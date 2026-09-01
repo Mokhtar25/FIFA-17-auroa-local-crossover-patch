@@ -207,10 +207,10 @@ did turn up two real wine bugs on the way, both fixed here:
  #include "coreaudio_cocoa.h"
  
  #ifdef HAVE_AVFOUNDATION_AVFOUNDATION_H
-@@ -74,28 +80,70 @@
+@@ -74,27 +80,70 @@
   *          0 if access was denied
   *         -1 if requesting permission is unsupported (older macOS)
-  *         -2 if the request timed out -- not a denial; see AUTH_TIMED_OUT
++ *         -2 if the request timed out -- not a denial; see AUTH_TIMED_OUT
   */
 -int CoreAudio_request_capture_authorization(void)
 +/* Must match AUTH_TIMED_OUT in coreaudio.c.  A timeout is reported separately

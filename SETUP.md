@@ -481,10 +481,17 @@ This is the main reason the default is a separate copy.)
 | `Uninstall.command` | double-click to undo |
 | `fixes/` | the seven files that go into the CrossOver copy, their source, and their checksums |
 | `aurora17/` | the PowerShell stand-in, its source, and its checksum |
-| `patches/` | the source code changes the six files were built from |
+| `patches/` | the source code changes the six Wine files were built from, and how to apply them |
+| `build.sh` | rebuilds every file in `fixes/` from source, so you need not take ours on trust |
+| `LICENSE` | MIT, for the parts that are ours |
+| `NOTICE.md` | which files are MIT and which are LGPL, and how to rebuild the LGPL ones |
 | `setup.sh` `uninstall.sh` | what the two `.command` files run |
 
 The six CrossOver files are built from freely published CrossOver source code,
-and the changes are included in `patches/` as that requires. The stand-in is our
-own, and its source is in `aurora17/`. Nothing in here belongs to anyone else —
-no game, no CrossOver, no Aurora.
+and the changes are in `patches/` as their licence requires — `./build.sh` puts
+the two back together and rebuilds them, so the claim is one you can check rather
+than one you have to believe. The stand-in and `a17hosts.dylib` are our own, with
+their source beside them. `NOTICE.md` says which files carry which licence.
+
+Nothing in here belongs to anyone else — no game, no CrossOver, no Aurora, no
+certificate or key. You need your own copy of each.
