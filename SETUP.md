@@ -402,8 +402,8 @@ own window once and it will be renewed.
 ```
 
 It changes nothing. It checks every file, the signature, the permissions, the
-bottle settings, the version DLL override, the bottle's own shortcuts, the
-certificate store, name resolution and the PowerShell stand-in, and prints `BAD` beside whatever is wrong. Do this before anything in
+bottle settings, the version DLL override, the bottle's own shortcuts, name
+resolution and the PowerShell stand-in, and prints `BAD` beside whatever is wrong. Do this before anything in
 the table below — most of the time it names the problem outright.
 
 If it says everything is fine and the game still misbehaves, or if you are
@@ -452,7 +452,6 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | Stuck on the loading screen | the search path or the graphics setting | `--verify`, then steps 4 and 6 |
 | Freezes before the menu, no sound | the Teams audio driver | Step 7 |
 | The game works when you start it from inside CrossOver-FIFA, but not from its shortcut in `~/Applications/CrossOver` | that shortcut hardcodes the CrossOver that made it, which was your normal one, so the game runs unpatched | `./setup.sh` repoints it and `--verify` checks it. The original is kept as `.bak-aurora17` |
-| On a brand-new bottle: the game starts, the launcher says it is running, then it quits after ~15 seconds and the launcher hangs | the bottle has no root certificates yet, and Aurora's online path is TLS. Wine fills that store the first time something asks for it, not when the bottle is made | Run `_fifa17.exe` in the game folder once, on its own, then use Aurora normally. `--verify` says `no root certificates yet` when this is the cause. Only ever needed once per bottle |
 | "Servers have been shut down", and `--verify` says everything is fine | the bottle is loading Wine's own `version.dll`, so Aurora's shim never loads | `--verify` now says `BAD` for this. Quit CrossOver fully and re-run `./setup.sh`, or step 6a by hand |
 | "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
