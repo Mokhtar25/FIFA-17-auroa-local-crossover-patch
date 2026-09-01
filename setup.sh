@@ -433,17 +433,12 @@ repoint_menu_shims() {
 }
 
 # ------------------------------------------- the bottle's certificate store
-# Wine fills a prefix's root certificate store from the Mac's trust store the
-# first time something asks for it -- not when the bottle is made. Until then it
-# is empty, and Aurora's whole online path is TLS to the local redirector, so
-# the shim's auth bridge cannot complete:
-#
-#   origin-auth-code-sync-bridge-failed pipe-capability
-#   redirect-disabled origin-auth-capability
-#
-# The game then waits out its 15 s budget and exits -6, having already loaded
-# the shim and reported itself running. Nothing names the certificate store.
-# A long-lived bottle never shows this; a fresh one shows it every time.
+# Reported by --report only, as an observation. A fresh bottle has an empty
+# root store and a working one had 163 certificates, so the count is worth
+# having in a diagnosis -- but it is NOT known to cause anything. The theory
+# that an empty store was what stalled a fresh bottle was tested and is wrong:
+# a full game session on a fresh 64-bit bottle left the count at 0. Treat
+# it as an open question rather than acting on this number.
 root_cert_count() {
     local reg="$BOTTLE_DIR/$BOTTLE/system.reg"
     [ -f "$reg" ] || { print -r -- 0; return 1 }
@@ -657,23 +652,6 @@ verify_install() {
         problems=$((problems+1))
     fi
 
-    # An empty store is normal on a bottle nothing has run in yet, and fatal
-    # the moment Aurora tries to launch. It is a note, not a BAD, because one
-    # run of anything that uses TLS fixes it -- but it has to be said, because
-    # the failure it causes names certificates nowhere.
-    local ncerts; ncerts="$(root_cert_count)"
-    if [ "$ncerts" -gt 0 ] 2>/dev/null; then
-        ok "$ncerts root certificates in the $BOTTLE bottle"
-    else
-        note "the $BOTTLE bottle has no root certificates yet"
-        say "        Wine fills that store the first time something asks for it,"
-        say "        and Aurora's online path is TLS, so the game will load the"
-        say "        shim, report itself running, and quit after about 15 seconds"
-        say "        with no explanation. Run the game once by itself first --"
-        say "        _fifa17.exe in the game folder -- then use Aurora normally."
-        say "        This is expected on a bottle that has never run anything."
-    fi
-
     # PLAY only needs one of the two stand-in locations to be right.
     local psdir="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
     local found=0 d
@@ -797,7 +775,7 @@ report_mode() {
         print -r -- ""
 
         print -r -- "---- certificate store ---------------------------------"
-        print -r -- "root certificates: $(root_cert_count)  (0 means Aurora cannot connect yet)"
+        print -r -- "root certificates: $(root_cert_count)  (observation only, cause unknown)"
         print -r -- ""
 
         print -r -- "---- the shim in the game folder -----------------------"
