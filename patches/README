@@ -1,0 +1,47 @@
+Four patches against pristine crossover-sources-26.3.0.tar.gz, published by
+CodeWeavers. They are modifications to Wine and are LGPL-2.1-or-later; the full
+text is in ../fixes/LICENSE.LGPL, and ../NOTICE.md says what belongs to whom.
+
+APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
+
+    1. crossover-26.3-fifa17-rosetta.patch
+    2. crossover-26.3-fifa17-online.patch
+    3. crossover-26.3-fifa17-audio.patch
+    4. crossover-26.3-fifa17-cng.patch
+
+cng must go last: it builds on online, and both touch dlls/crypt32/pfx.c.
+Applying them in directory order -- the obvious thing to do with a folder of
+patches -- produces a reject.
+
+    patch -p1 --forward < ../patches/<name>          # from the wine/ directory
+
+WHAT EACH ONE COVERS
+
+    rosetta   bugs 1-8    getting the game to boot and run at all
+                          ntdll (signal_x86_64.c, virtual.c, loader), version
+    online    bugs 9-12   getting online to work
+                          ntdll/unix/virtual.c, crypt32/pfx.c, secur32/schannel.c
+    audio     bug 4       getting sound back, plus two Wine bugs beside it
+                          winecoreaudio.drv
+    cng       bug 13      CNG and PKCS#12, so .NET can use a certificate
+                          crypt32 (both halves), include/wincrypt.h
+
+Each patch carries its own header explaining what it changes and why, including
+the reasoning and the measurements behind it. Read the top of the file before
+the diff.
+
+ONE THING A PATCH CANNOT CARRY
+
+SONAME_LIBGNUTLS is undefined in this tree, which is a configure result and not
+source. Without defining it, the whole unix half of crypt32 compiles to stubs
+that return STATUS_DLL_NOT_FOUND -- the PE side reports "call not implemented"
+-- and it does that while building perfectly cleanly. In your build64 directory:
+
+    sed -i '' 's|/\* #undef SONAME_LIBGNUTLS \*/|#define SONAME_LIBGNUTLS "libgnutls.30.dylib"|' \
+        include/config.h
+    ln -s "$(brew --prefix gnutls)/include/gnutls" include/gnutls
+
+Only the headers are needed; CrossOver 26.3 already ships libgnutls.30.dylib in
+its lib64 directory and crypt32 opens it by name at runtime.
+
+../build.sh does all of the above for you, including this step.
