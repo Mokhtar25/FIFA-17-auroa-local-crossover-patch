@@ -1,3 +1,8 @@
+Apply order matters: rosetta, then online, then audio, then cng.
+The online and cng patches both touch dlls/crypt32/pfx.c, and cng builds on the
+result of online.  Applying them alphabetically -- the obvious thing to do with a
+directory of patches -- produces a reject.  See README in this directory.
+
 FIFA 17 / CrossOver 26.3: CoreAudio fixes.  BUGS.md #4.
 
 The startup deadlock was NOT wine's: /Library/Audio/Plug-Ins/HAL/MSTeamsAudioDevice.driver
@@ -22,7 +27,7 @@ did turn up two real wine bugs on the way, both fixed here:
 
 --- a/dlls/winecoreaudio.drv/coreaudio.c
 +++ b/dlls/winecoreaudio.drv/coreaudio.c
-@@ -221,6 +221,41 @@
+@@ -221,6 +221,55 @@
      struct main_loop_params *params = args;
      NtSetEvent(params->event, NULL);
      return STATUS_SUCCESS;
@@ -43,16 +48,30 @@ did turn up two real wine bugs on the way, both fixed here:
 + */
 +static BOOL device_is_excluded(CFStringRef name)
 +{
-+    const char *exclude = getenv("WINE_COREAUDIO_EXCLUDE");
-+    char buf[256], *list, *tok, *ctx;
++    static const char *exclude;
++    static BOOL looked_up;
++    char buf[512], *list, *tok, *ctx, *end;
 +    BOOL ret = FALSE;
 +
++    /* Benign race: getenv is idempotent and every thread computes the same
++     * answer.  Worth doing because this runs once per device per enumeration. */
++    if(!looked_up){
++        exclude = getenv("WINE_COREAUDIO_EXCLUDE");
++        looked_up = TRUE;
++    }
++
 +    if(!exclude || !*exclude || !name) return FALSE;
++    /* A name too long for buf cannot be matched at all, so give it real room:
++     * failing to exclude a device is the failure that hangs the process. */
 +    if(!CFStringGetCString(name, buf, sizeof(buf), kCFStringEncodingUTF8)) return FALSE;
 +    if(!(list = strdup(exclude))) return FALSE;
 +
 +    for(tok = strtok_r(list, ",", &ctx); tok; tok = strtok_r(NULL, ",", &ctx)){
-+        while(*tok == ' ') tok++;
++        /* Trim both ends.  Trimming only the front means "A , B" -- which the
++         * documented comma-separated form invites -- silently never matches. */
++        while(*tok == ' ' || *tok == '\t') tok++;
++        end = tok + strlen(tok);
++        while(end > tok && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
 +        if(*tok && strcasestr(buf, tok)){
 +            WARN("Skipping excluded audio device \"%s\" (matched \"%s\")\n", buf, tok);
 +            ret = TRUE;
@@ -64,7 +83,7 @@ did turn up two real wine bugs on the way, both fixed here:
  }
  
  static NTSTATUS unix_get_endpoint_ids(void *args)
-@@ -301,6 +336,11 @@
+@@ -301,6 +420,11 @@
              continue;
          }
  
@@ -76,7 +95,7 @@ did turn up two real wine bugs on the way, both fixed here:
          addr.mSelector = kAudioDevicePropertyDeviceUID;
          size = sizeof(CFStringRef);
          sc = AudioObjectGetPropertyData(devices[i], &addr, 0, NULL, &size, &info[params->num].uid);
-@@ -500,6 +540,39 @@
+@@ -500,6 +634,55 @@
      return noErr;
  }
  
@@ -92,12 +111,18 @@ did turn up two real wine bugs on the way, both fixed here:
 + * The result is cached because the permission request itself is slow, and
 + * is_format_supported can be called many times during startup.
 + */
++/* Must match AUTH_TIMED_OUT in authorization.m.  Duplicated rather than added to
++ * coreaudio_cocoa.h, which this patch does not otherwise touch. */
++#define AUTH_TIMED_OUT (-2)
++
 +static BOOL capture_authorized(void)
 +{
 +    static int cached = -1;
-+    int status;
++    int status, done;
 +
-+    if (cached != -1) return cached;
++    /* Benign race on the cache: both threads compute the same answer.  Read and
++     * write it atomically so the value seen is one that was actually stored. */
++    if ((done = __atomic_load_n(&cached, __ATOMIC_ACQUIRE)) != -1) return done;
 +
 +    status = CoreAudio_get_capture_authorization_status();
 +    TRACE("Audio capture authorization status: %d\n", status);
@@ -105,18 +130,28 @@ did turn up two real wine bugs on the way, both fixed here:
 +    if (status == NOT_DETERMINED)
 +        status = CoreAudio_request_capture_authorization();
 +
++    if (status == AUTH_TIMED_OUT)
++    {
++        /* The dialog did not answer in time, which is not the same as the user
++         * saying no.  Caching it would disable capture for the life of the process
++         * because the machine happened to be busy at launch.  Fail this call and
++         * ask again on the next one. */
++        WARN("Audio capture permission request timed out; not caching the result.\n");
++        return FALSE;
++    }
++
 +    if (status == 0)
 +        ERR_(winediag)("Microphone/audio capture permission was denied. "
 +                       "This can be enabled under Security & Privacy in System Preferences.\n");
 +
-+    cached = (status != 0);
-+    return cached;
++    __atomic_store_n(&cached, status != 0, __ATOMIC_RELEASE);
++    return status != 0;
 +}
 +
  static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID adevid)
  {
      AudioComponentInstance unit;
-@@ -517,6 +590,9 @@
+@@ -517,6 +766,9 @@
          return NULL;
      }
  
@@ -126,7 +161,7 @@ did turn up two real wine bugs on the way, both fixed here:
      sc = AudioComponentInstanceNew(comp, &unit);
      if(sc != noErr){
          WARN("AudioComponentInstanceNew failed: %x\n", (int)sc);
-@@ -752,6 +828,11 @@
+@@ -752,6 +1010,11 @@
      stream->bufsize_frames = muldiv(params->duration, stream->fmt->nSamplesPerSec, 10000000);
      if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
          stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
@@ -138,7 +173,7 @@ did turn up two real wine bugs on the way, both fixed here:
  
      if(!(stream->unit = get_audiounit(stream->flow, stream->dev_id))){
          params->result = AUDCLNT_E_DEVICE_INVALIDATED;
-@@ -775,22 +856,6 @@
+@@ -775,22 +1048,6 @@
          WARN("Couldn't set callback: %x\n", (int)sc);
          params->result = osstatus_to_hresult(sc);
          goto end;
@@ -172,11 +207,16 @@ did turn up two real wine bugs on the way, both fixed here:
  #include "coreaudio_cocoa.h"
  
  #ifdef HAVE_AVFOUNDATION_AVFOUNDATION_H
-@@ -74,27 +76,65 @@
+@@ -74,28 +80,70 @@
   *          0 if access was denied
   *         -1 if requesting permission is unsupported (older macOS)
+  *         -2 if the request timed out -- not a denial; see AUTH_TIMED_OUT
   */
 -int CoreAudio_request_capture_authorization(void)
++/* Must match AUTH_TIMED_OUT in coreaudio.c.  A timeout is reported separately
++ * from a denial so the caller can decline to cache it. */
++#define AUTH_TIMED_OUT (-2)
++
 +/* Shared between this function and the completion handler, because the wait is
 + * bounded: if we give up first the handler may still run afterwards, and it must
 + * not write to a stack frame that is already gone.  Last one out frees it. */
@@ -235,7 +275,7 @@ did turn up two real wine bugs on the way, both fixed here:
 +         * lock.  Treat a timeout as "not granted" and let the caller fail cleanly. */
 +        if (dispatch_semaphore_wait(req->semaphore,
 +                                    dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)))
-+            ret = 0;
++            ret = AUTH_TIMED_OUT;
 +        else
 +            ret = req->granted;
 +

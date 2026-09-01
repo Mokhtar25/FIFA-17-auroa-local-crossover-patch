@@ -12,7 +12,9 @@
 set -eu
 HERE="${0:A:h}"
 
-RECEIPT="$HOME/Library/Application Support/Aurora17/install-receipt.conf"
+# Same override setup.sh takes, so the throwaway-tree test undoes the install
+# it made rather than the real one.
+RECEIPT="${AURORA_RECEIPT_DIR:-$HOME/Library/Application Support/Aurora17}/install-receipt.conf"
 
 say()  { print -r -- "$@"; }
 ok()   { print -r -- "  ok    $@"; }
@@ -125,13 +127,33 @@ if [ "$MODE" = "in-place" ]; then
         fi
     done
 
+    # The resolver. ws2_32.so was not backed up because it did not need to be:
+    # setup.sh changed one string inside one of its load commands, and the same
+    # tool changes it back exactly. Removing a17hosts.dylib without doing this
+    # first would leave ws2_32.so pointing at a library that is gone, and every
+    # Windows program in the bottle would fail to start.
+    if otool -L "$WINE/x86_64-unix/ws2_32.so" 2>/dev/null | grep -q '@rpath/a17hosts.dylib'; then
+        install_name_tool -change @rpath/a17hosts.dylib /usr/lib/libSystem.B.dylib \
+            "$WINE/x86_64-unix/ws2_32.so" 2>/dev/null \
+            || fail "Could not put ws2_32.so back on the system resolver in
+             $APP
+         Nothing else has been removed. a17hosts.dylib is still in place,
+         so the app still works; try again once it is not running."
+        ok "put ws2_32.so back on the system resolver"
+        put_back=$((put_back+1))
+    fi
+    if [ -f "$WINE/x86_64-unix/a17hosts.dylib" ]; then
+        rm -f "$WINE/x86_64-unix/a17hosts.dylib"
+        ok "removed a17hosts.dylib"
+    fi
+
     if [ "$put_back" -gt 0 ]; then
         # This re-signs ad-hoc. It does NOT restore CodeWeavers' signature,
         # their Team ID, or the original hardened-runtime flags, because those
         # cannot be reconstructed from six replaced files. Say so rather than
         # printing "signed" and letting the user believe otherwise.
         signed=1
-        for so in ntdll.so winecoreaudio.so crypt32.so; do
+        for so in ntdll.so winecoreaudio.so crypt32.so ws2_32.so; do
             codesign --force --sign - "$WINE/x86_64-unix/$so" 2>/dev/null || signed=0
         done
         # Sign the app back with the entitlements it currently carries. Signing
@@ -153,7 +175,7 @@ if [ "$MODE" = "in-place" ]; then
         fi
         undone=$((undone+put_back))
         say ""
-        note "the six files are back, but this app now carries our ad-hoc"
+        note "everything we changed is back, but this app now carries our ad-hoc"
         say "        signature, not CodeWeavers'. To have CrossOver exactly as it"
         say "        shipped, reinstall it from CodeWeavers."
     else

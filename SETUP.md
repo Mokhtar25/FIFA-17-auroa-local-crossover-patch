@@ -6,7 +6,7 @@ sound, says the servers have been shut down, or Aurora's **PLAY** button does
 nothing at all.
 
 **It does not change your CrossOver.** It makes a separate copy called
-**CrossOver-FIFA**, puts six small files in that, and adds one file to your
+**CrossOver-FIFA**, puts seven small files in that, and adds one file to your
 Aurora17 folder. Your own CrossOver and every other bottle you run in it are
 left exactly as they are — so Rocket League, the EA App, or whatever else you
 have keeps working on the CrossOver you already trust.
@@ -109,7 +109,7 @@ To undo everything later, double-click **Uninstall.command**.
 
 ## The manual way
 
-Same thing by hand, if you would rather see it happen. Eight steps.
+Same thing by hand, if you would rather see it happen. Nine steps.
 
 ### 1. Make the copy, and find the folder
 
@@ -152,6 +152,37 @@ go in `x86_64-windows`.
 **`crypt32` is two files, not one,** and both are needed. Replacing only
 `crypt32.dll` changes nothing at all — the half that matters is `crypt32.so`.
 
+Then copy `fixes/x86_64-unix/a17hosts.dylib` into `x86_64-unix` as well. That one
+is new — there is nothing of that name to replace — and the next step wires it in.
+
+### 3a. Let the game find Aurora17 by name
+
+FIFA reaches EA's servers by name. Aurora17 answers those names on your own Mac,
+so they have to point at your Mac and not at EA. Aurora17's launcher already
+writes them into the hosts file **inside the bottle**, on every PLAY and every
+REPAIR SETUP — but Wine asks macOS to resolve names, and macOS has never heard of
+that file, so it was being written and ignored.
+
+`a17hosts.dylib` is what reads it. One command connects it:
+
+```
+APP=/Applications/CrossOver-FIFA.app
+W="$APP/Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix"
+install_name_tool -change /usr/lib/libSystem.B.dylib @rpath/a17hosts.dylib "$W/ws2_32.so"
+```
+
+Check it took:
+
+```
+otool -L "$W/ws2_32.so" | grep a17hosts
+```
+
+That must print a line. If it prints nothing, the game will not connect.
+
+Nothing outside the copy and the bottle changes, and no password is needed. Names
+the bottle's hosts file does not mention are resolved normally, so the rest of the
+internet — and any other EA software on your Mac — is unaffected.
+
 ### 4. Repair the search path
 
 Two of the files need a line telling them where to find their neighbours. Paste
@@ -190,10 +221,12 @@ Now add one permission to that file. Without it the app will not open at all:
   /tmp/cx.plist
 ```
 
-Then sign the three changed Mac files, and the app itself with that file:
+Then sign the changed Mac files, and the app itself with that file. `ws2_32.so`
+is in the list because step 3a edited it, and `a17hosts.dylib` because it is new:
 
 ```
-codesign --force --sign - "$W/ntdll.so" "$W/winecoreaudio.so" "$W/crypt32.so"
+codesign --force --sign - "$W/ntdll.so" "$W/winecoreaudio.so" "$W/crypt32.so" \
+                          "$W/a17hosts.dylib" "$W/ws2_32.so"
 
 codesign --force --sign - -o runtime --entitlements /tmp/cx.plist "$APP"
 codesign --verify --deep --strict "$APP"
@@ -340,8 +373,8 @@ own window once and it will be renewed.
 ```
 
 It changes nothing. It checks every file, the signature, the permissions, the
-bottle settings and the PowerShell stand-in, and prints `BAD` beside whatever is
-wrong. Do this before anything in the table below — most of the time it names
+bottle settings, name resolution and the PowerShell stand-in, and prints `BAD`
+beside whatever is wrong. Do this before anything in the table below — most of the time it names
 the problem outright.
 
 ### The first thing to check
@@ -375,6 +408,9 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | Freezes before the menu, no sound | the Teams audio driver | Step 7 |
 | "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
+| The game cannot reach Aurora17 — a connection error at the redirector, but everything else works | `ws2_32.so` is not reading the bottle's hosts file, so the names still go to EA | `--verify` says `ws2_32.so still asks macOS to resolve names`. Run `./setup.sh` again, or step 3a by hand |
+| `--verify` says the bottle's hosts file names none of the 6 EA hosts | Aurora17's launcher has not run in that bottle yet — it writes them itself | Press **PLAY FIFA 17** (or **REPAIR SETUP**) once, then `--verify` again. It is not a fault on a fresh bottle |
+| You have an `AURORA17` block in `/etc/hosts` from an older setup | it is no longer needed — the fix works inside the bottle now | It does no harm. To remove it: edit `/etc/hosts` (needs a password), delete the block, then `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder` |
 | **PLAY does nothing at all** — no game, no error, and the button becomes clickable again | Aurora17 is not finding the stand-in: it is in neither place, or it is in a different bottle than the one you opened | `--verify` says which. If it is missing, `AURORA_DIR=/path/to/Aurora17 ./setup.sh` |
 | PLAY does nothing, and something is already using port 47170 | a server left running by an earlier attempt is holding the port | `lsof -nP -iTCP:47170 -sTCP:LISTEN`, then quit that process, then press PLAY again |
 | "Aurora17 could not finish — Success." | only `crypt32.dll` was installed, not `crypt32.so` | Step 3 — it is **two** files |
@@ -424,8 +460,12 @@ their own and can be left.
 what is in it. It will not touch a CrossOver it did not patch, and it will not
 delete a `powershell.exe` that is not the one it put there.
 
+Nothing was ever written outside the copy, the bottle and your Aurora17 folder —
+in particular, no system file, and at no point were you asked for a password.
+
 (If you used `AURORA_IN_PLACE=1` to patch your real CrossOver instead,
-`./uninstall.sh` puts the six `.orig` files back and re-signs it, keeping the
+`./uninstall.sh` puts the six `.orig` files back, points `ws2_32.so` at the
+system resolver again, removes `a17hosts.dylib`, and re-signs it, keeping the
 permissions it has. It **cannot** restore CodeWeavers' own signature — six
 replaced files are not enough to rebuild that. The app works, but it now carries
 an ad-hoc signature. To have CrossOver exactly as it shipped, reinstall it.
@@ -439,7 +479,7 @@ This is the main reason the default is a separate copy.)
 |---|---|
 | `START HERE.command` | double-click to install |
 | `Uninstall.command` | double-click to undo |
-| `fixes/` | the six files that go into the CrossOver copy, and their checksums |
+| `fixes/` | the seven files that go into the CrossOver copy, their source, and their checksums |
 | `aurora17/` | the PowerShell stand-in, its source, and its checksum |
 | `patches/` | the source code changes the six files were built from |
 | `setup.sh` `uninstall.sh` | what the two `.command` files run |

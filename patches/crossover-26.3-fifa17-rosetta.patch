@@ -1,6 +1,11 @@
+Apply order matters: rosetta, then online, then audio, then cng.
+The online and cng patches both touch dlls/crypt32/pfx.c, and cng builds on the
+result of online.  Applying them alphabetically -- the obvious thing to do with a
+directory of patches -- produces a reject.  See README in this directory.
+
 --- a/dlls/ntdll/unix/signal_x86_64.c
 +++ b/dlls/ntdll/unix/signal_x86_64.c
-@@ -1106,13 +1106,229 @@
+@@ -1106,13 +1106,249 @@
      if (context->SegCs != cs64_sel) return NULL;
      return get_cpu_area( IMAGE_FILE_MACHINE_I386 );
  }
@@ -10,12 +15,28 @@
  /***********************************************************************
 + *              CTXLOG instrumentation (context structure tracing)
 + *
-+ * Unconditional stderr logging of the CONTEXT contents on every
-+ * NtGetContextThread / NtSetContextThread.  Instrumentation only:
-+ * invisible to the guest process.  The fixed-width formatter and write(2)
-+ * avoid stdio and allocator state because these APIs are also used from
-+ * signal paths.
++ * Logs the CONTEXT contents on every NtGetContextThread / NtSetContextThread,
++ * to stderr, when CX_CTXLOG=1 is set.  Instrumentation only: invisible to the
++ * guest process either way.  The fixed-width formatter and write(2) avoid stdio
++ * and allocator state because these APIs are also reached from signal paths.
++ *
++ * The gate is not optional.  Left always on, this writes several kilobytes per
++ * context operation, including from inside the SIGSEGV and SIGTRAP handlers --
++ * which for a protector-heavy title is a continuous stream, and changes the
++ * timing of the very thing being traced.
 + */
++
++static int ctxlog_enabled = -1;
++
++static BOOL ctxlog_on(void)
++{
++    if (ctxlog_enabled == -1)
++    {
++        const char *val = getenv( "CX_CTXLOG" );
++        ctxlog_enabled = (val && val[0] == '1');
++    }
++    return ctxlog_enabled != 0;
++}
 +
 +static volatile unsigned int ctxlog_next_event;
 +static __thread unsigned int ctxlog_depth;
@@ -95,6 +116,8 @@
 +static void ctxlog_dump_bytes( const char *tag, unsigned int event, const void *ptr,
 +                               unsigned int size )
 +{
++    if (!ctxlog_on()) return;
++
 +    const unsigned char *bytes = ptr;
 +    unsigned int offset = 0;
 +
@@ -119,6 +142,8 @@
 +                         HANDLE handle, const CONTEXT *context, DWORD requested,
 +                         NTSTATUS status )
 +{
++    if (!ctxlog_on()) return;
++
 +    struct ctxlog_buf buf = {{0}, 0};
 +    DWORD flags = context ? context->ContextFlags : 0;
 +
@@ -231,7 +256,7 @@
  {
      NTSTATUS ret = STATUS_SUCCESS;
      DWORD flags = context->ContextFlags & ~CONTEXT_AMD64;
-@@ -1212,10 +1428,367 @@
+@@ -1212,10 +1880,367 @@
  
  
  /***********************************************************************
@@ -600,7 +625,7 @@
  {
      struct syscall_frame *frame = get_syscall_frame();
      DWORD needed_flags = context->ContextFlags & ~CONTEXT_AMD64;
-@@ -1346,6 +1919,35 @@
+@@ -1346,6 +3085,35 @@
      }
      set_context_exception_reporting_flags( &context->ContextFlags, CONTEXT_SERVICE_ACTIVE );
      return STATUS_SUCCESS;
@@ -636,7 +661,7 @@
  }
  
  
-@@ -2488,7 +3090,44 @@
+@@ -2488,7 +4314,46 @@
  #endif
      return TRUE;
  }
@@ -650,6 +675,8 @@
 +
 +static void drbp_report_av( ULONG_PTR rip, const EXCEPTION_RECORD *rec )
 +{
++    if (!ctxlog_on()) return;
++
 +    MEMORY_BASIC_INFORMATION mbi;
 +    unsigned char code[24];
 +    struct ctxlog_buf buf;
@@ -681,7 +708,7 @@
  
  /**********************************************************************
   *		segv_handler
-@@ -2539,6 +3178,28 @@
+@@ -2539,6 +4478,28 @@
          }
          break;
      case TRAP_x86_PAGEFLT:  /* Page fault */
@@ -710,7 +737,7 @@
          rec.NumberParameters = 2;
          rec.ExceptionInformation[0] = (ERROR_sig(ucontext) >> 1) & 0x09;
          rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
-@@ -2582,6 +3243,8 @@
+@@ -2582,6 +4587,8 @@
          break;
      }
      if (handle_syscall_fault( ucontext, &rec, &context.c )) return;
@@ -733,7 +760,7 @@
  NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
                                           SIZE_T *size_ptr, ULONG type, ULONG protect )
  {
-@@ -5310,7 +5315,14 @@
+@@ -5310,7 +5325,16 @@
      else
          limit = 0;
  
@@ -741,7 +768,9 @@
 +    {
 +        NTSTATUS status = allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
 +#ifdef __APPLE__
-+        if (!status && (protect & 0xf0) && smc_flush_on())
++        if (!status && (protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
++                                   PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
++            && smc_flush_on())
 +            toggle_executable_pages_for_rosetta( process, *ret, *size_ptr );
 +#endif
 +        return status;
@@ -749,7 +778,7 @@
  }
  
  
-@@ -6840,6 +6852,29 @@
+@@ -6840,6 +6878,29 @@
   * toggle the executable bit (from inside the target process) on/off for any executable
   * pages that were modified, to force Rosetta to re-translate it.
   */
@@ -814,7 +843,7 @@
 +++ b/dlls/version/version.spec
 @@ -1,4 +1,5 @@
  @ stdcall -import GetFileVersionInfoA(str long long ptr)
-+@ stdcall GetFileVersionInfoByHandle(long wstr long ptr)
++@ stdcall GetFileVersionInfoByHandle(ptr wstr long ptr)
  @ stdcall -import GetFileVersionInfoExA(long str long long ptr)
  @ stdcall -import GetFileVersionInfoExW(long wstr long long ptr)
  @ stdcall -import GetFileVersionInfoSizeA(str ptr)
@@ -1080,7 +1109,7 @@
  /******************************************************************
   *		LdrGetProcedureAddress  (NTDLL.@)
   */
-@@ -2107,6 +2357,8 @@
+@@ -2107,6 +2857,8 @@
          {
              *address = proc;
              ret = STATUS_SUCCESS;
@@ -1089,7 +1118,7 @@
          }
          else
          {
-@@ -2115,6 +2367,17 @@
+@@ -2115,6 +2871,17 @@
          }
      }
  

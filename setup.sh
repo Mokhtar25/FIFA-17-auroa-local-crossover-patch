@@ -48,13 +48,83 @@ FILES=(
   x86_64-windows/crypt32.dll
   x86_64-windows/secur32.dll
 )
-# The three that are Mach-O and therefore have to be signed.
-MACHO=( ntdll.so winecoreaudio.so crypt32.so )
+# One more file, added rather than replaced, so it is not in FILES: the thing
+# that makes name resolution work without touching /etc/hosts. See below.
+RESOLVER=x86_64-unix/a17hosts.dylib
+
+# The Mach-O files that have to be signed after we have touched them. The first
+# three are ours; a17hosts.dylib is new; ws2_32.so is CrossOver's own, edited in
+# place by step 4 and therefore no longer covered by CodeWeavers' signature.
+MACHO=( ntdll.so winecoreaudio.so crypt32.so a17hosts.dylib ws2_32.so )
+
+# FIFA 17 talks to EA's servers by name. Aurora17 answers those names locally, so
+# they have to resolve to this machine -- otherwise the game reaches the real EA
+# hosts, two of which are still up, and fails with a connection error.
+#
+# Aurora17's launcher already writes those names into the bottle's own hosts
+# file, C:\windows\system32\drivers\etc\hosts, on every PLAY and every REPAIR
+# SETUP. On Windows that is the file that decides. Under Wine it is not: Wine
+# resolves names by calling macOS from lib/wine/x86_64-unix/ws2_32.so, so the
+# launcher was writing a file nothing read, reporting success, and leaving
+# /etc/hosts -- root-owned, system-wide, and needing a password -- as the only
+# thing that actually decided.
+#
+# a17hosts.dylib closes that. Step 4 points ws2_32.so's libSystem dependency at
+# it; it answers getaddrinfo() and gethostbyname() from the bottle's hosts file
+# and falls through to the real resolver for every name that file does not
+# mention. Per bottle, no password, nothing outside the copy touched, and the
+# launcher's existing hosts work finally counts for something.
+#
+# DYLD_INSERT_LIBRARIES cannot do this job: wineloader is built with the
+# hardened runtime and does not carry
+# com.apple.security.cs.allow-dyld-environment-variables, so dyld strips it.
+LIBSYSTEM=/usr/lib/libSystem.B.dylib
+RESOLVER_PATH=@rpath/a17hosts.dylib
+AURORA_HOSTS=(
+  f17.aurora.test
+  gosredirector.ea.com
+  easw.easports.com
+  content.lt.easfc.ea.com
+  pal.gt.easfc.ea.com
+  pg.fifa12.test.easportsworld.ea.com
+)
+
+# The hosts file inside the bottle -- the one a17hosts.dylib reads, and the one
+# Aurora17's launcher maintains. AURORA_HOSTS_FILE overrides it, for testing
+# against a throwaway file. (a17hosts.dylib reads AURORA17_HOSTS_FILE for the
+# same purpose; the names are deliberately different, so setting one for a test
+# here cannot silently redirect the other.)
+bottle_hosts_file() {
+    if [ -n "${AURORA_HOSTS_FILE:-}" ]; then
+        print -r -- "$AURORA_HOSTS_FILE"
+    else
+        print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/drivers/etc/hosts"
+    fi
+}
+
+# Which of the names above the bottle's hosts file does not point at this
+# machine. Prints one per line.
+hosts_missing() {
+    local h f; f="$(bottle_hosts_file)"
+    for h in $AURORA_HOSTS; do
+        grep -qE "^[[:space:]]*127\.0\.0\.1[[:space:]]+${h//./\\.}([[:space:]]|\$)" \
+            "$f" 2>/dev/null || print -r -- "$h"
+    done
+}
+
+# Is ws2_32.so reading the bottle's hosts file, or still the system resolver?
+ws2_32_is_patched() {
+    otool -L "$1/x86_64-unix/ws2_32.so" 2>/dev/null | grep -q "$RESOLVER_PATH"
+}
 
 # Written after a successful install so uninstall knows exactly what to undo,
 # rather than guessing from a list of default locations. Guessing is what made
 # an earlier uninstaller delete a file out of a folder nobody had named.
-RECEIPT_DIR="$HOME/Library/Application Support/Aurora17"
+# AURORA_RECEIPT_DIR exists so a test install against a throwaway tree can keep
+# its own receipt. Without it such a test writes over the receipt for the real
+# install, which then points uninstall.sh at a scratch directory that is about
+# to be deleted.
+RECEIPT_DIR="${AURORA_RECEIPT_DIR:-$HOME/Library/Application Support/Aurora17}"
 RECEIPT="$RECEIPT_DIR/install-receipt.conf"
 
 # ---------------------------------------------------------------- discovery
@@ -154,8 +224,40 @@ LIBVAL_KEY="com.apple.security.cs.disable-library-validation"
 
 # LC_UUID identifies a Mach-O file across an added rpath and a re-signing,
 # both of which change its bytes.
+#
+# Match the "uuid" line itself. Matching LC_UUID and taking the next line reads
+# "cmdsize 24" instead, which is 24 for every Mach-O ever built -- so every file
+# compared equal to every other one and --verify said "ok" to a stock CrossOver.
 macho_uuid() {
-    otool -l "$1" 2>/dev/null | awk '/LC_UUID/{getline; print $2; exit}'
+    otool -l "$1" 2>/dev/null | awk '$1 == "uuid" { print $2; exit }'
+}
+
+# Does this Mach-O already carry the lib64 rpath?
+#
+# Read from the LC_RPATH entries only. Grepping the whole otool dump for
+# "lib64" also matches ordinary library paths, and -- worse -- an otool that
+# cannot run at all answers "no" for a file that plainly has the rpath. Adding
+# it a second time is what produces:
+#
+#   "would duplicate path, file already has LC_RPATH for: ..."
+#   "changing install names or rpaths can't be redone ... must be relinked"
+#
+# So if otool produces nothing usable, fall back to searching the file itself
+# rather than assuming the rpath is absent.
+RPATH_LIB64='@loader_path/../../../lib64'
+has_lib64_rpath() {
+    local out
+    out="$(otool -l "$1" 2>/dev/null)" || out=""
+    if [ -n "$out" ]; then
+        print -r -- "$out" \
+            | awk '/^ *cmd LC_RPATH$/{r=1;next} r&&/^ *path /{print $2;r=0}' \
+            | grep -Fqx "$RPATH_LIB64" && return 0
+        # otool worked and the rpath is not there.
+        print -r -- "$out" | grep -q 'cmd LC_' && return 1
+    fi
+    # otool is unusable on this machine. The rpath, if present, is still a
+    # literal string inside the file.
+    LC_ALL=C grep -Fq "$RPATH_LIB64" "$1"
 }
 
 # The keys currently on a bundle, one per line.
@@ -174,7 +276,7 @@ sign_payload() {
             || fail "Could not sign $so.
          The copy is incomplete. Run ./uninstall.sh and try again."
     done
-    ok "the three Mac files"
+    ok "the ${#MACHO} Mac files"
 }
 
 resign_app() {
@@ -287,11 +389,15 @@ verify_install() {
 
     local so
     for so in ntdll.so crypt32.so; do
-        otool -l "$wine/x86_64-unix/$so" 2>/dev/null | grep -q 'lib64' \
+        has_lib64_rpath "$wine/x86_64-unix/$so" \
             && ok "$so search path" \
             || { say "  BAD   $so is missing its library search path"; problems=$((problems+1)); }
     done
     for so in $MACHO; do
+        # A file that is not there is reported as missing by the checks that own
+        # it, further down. Saying "not signed" about it as well is two problems
+        # for one fault, and names the wrong repair.
+        [ -f "$wine/x86_64-unix/$so" ] || continue
         codesign --verify "$wine/x86_64-unix/$so" 2>/dev/null \
             || { say "  BAD   $so is not signed — run ./setup.sh --resign"; problems=$((problems+1)); }
     done
@@ -341,6 +447,48 @@ verify_install() {
     [ "$found" = 1 ] || { say "  BAD   the PowerShell stand-in is in neither place — PLAY will do nothing"
                           problems=$((problems+1)); }
 
+    # Name resolution. Two halves: the reader has to be installed and wired in,
+    # and the file it reads has to say something. The second half is Aurora17's
+    # to maintain -- its launcher rewrites that file on every PLAY -- so an
+    # empty one on a bottle that has never played is normal, not a fault.
+    if [ ! -f "$wine/$RESOLVER" ]; then
+        say "  BAD   ${RESOLVER:t} is missing — the game will not reach Aurora17"
+        problems=$((problems+1))
+    elif [ "$(macho_uuid "$wine/$RESOLVER")" = "$(macho_uuid "$HERE/fixes/$RESOLVER")" ]; then
+        ok "${RESOLVER:t}"
+    else
+        say "  BAD   ${RESOLVER:t} is not the shipped version"
+        problems=$((problems+1))
+    fi
+
+    if ws2_32_is_patched "$wine"; then
+        ok "ws2_32.so reads the bottle's hosts file"
+    else
+        say "  BAD   ws2_32.so still asks macOS to resolve names, so the hosts"
+        say "        file inside the bottle is ignored and the game will not"
+        say "        connect. Re-run ./setup.sh"
+        problems=$((problems+1))
+    fi
+
+    local -a miss; local bh; bh="$(bottle_hosts_file)"
+    miss=( ${(f)"$(hosts_missing)"} )
+    if [ "${#miss}" -eq 0 ]; then
+        ok "all ${#AURORA_HOSTS} EA host redirections in the bottle's hosts file"
+    elif [ "${#miss}" -eq "${#AURORA_HOSTS}" ]; then
+        note "the bottle's hosts file names none of the ${#AURORA_HOSTS} EA hosts yet"
+        say "        $bh"
+        say "        Aurora17's launcher writes them itself, on every PLAY and"
+        say "        every REPAIR SETUP. If it has not been run in this bottle,"
+        say "        this is expected — press PLAY once and check again."
+    else
+        say "  BAD   the bottle's hosts file names only $((${#AURORA_HOSTS} - ${#miss}))"
+        say "        of the ${#AURORA_HOSTS} EA hosts, so something rewrote it wrongly:"
+        say "        $bh"
+        say "        Missing: ${miss[*]}"
+        say "        Use Aurora17's REPAIR SETUP to put them back."
+        problems=$((problems+1))
+    fi
+
     say ""
     if [ "$problems" -eq 0 ]; then
         say "Everything checks out."
@@ -379,7 +527,23 @@ if [ "$MODE" = resign ]; then
     say ""
     say "Re-signing $TARGET"
     say ""
-    sign_payload "$TARGET/Contents/SharedSupport/CrossOver/lib/wine"
+    # An install made by an older copy of this package has no resolver in it,
+    # and signing a file that is not there would stop with "the copy is
+    # incomplete". Put it in first: it is two small operations, and --resign is
+    # what SETUP.md sends people to when something is missing.
+    RESIGN_WINE="$TARGET/Contents/SharedSupport/CrossOver/lib/wine"
+    if [ ! -f "$RESIGN_WINE/$RESOLVER" ]; then
+        cp -X "$HERE/fixes/$RESOLVER" "$RESIGN_WINE/$RESOLVER" \
+            || die $E_PERMISSION "Could not install ${RESOLVER:t} into $TARGET."
+        ok "added ${RESOLVER:t}"
+    fi
+    if ! ws2_32_is_patched "$RESIGN_WINE"; then
+        install_name_tool -change "$LIBSYSTEM" "$RESOLVER_PATH" \
+            "$RESIGN_WINE/x86_64-unix/ws2_32.so" 2>/dev/null \
+            || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}."
+        ok "pointed ws2_32.so at the bottle's hosts file"
+    fi
+    sign_payload "$RESIGN_WINE"
     resign_app "$TARGET"
     say ""
     say "Done. Open ${TARGET:t:r} again."
@@ -426,7 +590,9 @@ for f in $FILES; do
     [ -f "$SRCWINE/$f" ] \
         || die $E_PAYLOAD "$f is missing from $SRC. That is not a complete CrossOver 26.3."
 done
-ok "all six files present in CrossOver"
+[ -f "$SRCWINE/x86_64-unix/ws2_32.so" ] \
+    || die $E_PAYLOAD "ws2_32.so is missing from $SRC. That is not a complete CrossOver 26.3."
+ok "all six files present in CrossOver, and the ws2_32.so we edit"
 
 # Verify the payload we are about to install before touching anything, not
 # after the working copy has already been deleted.
@@ -591,6 +757,25 @@ for f in $FILES; do
     ok "${f:t}"
 done
 
+# The name resolution fix. a17hosts.dylib re-exports the whole of libSystem and
+# overrides two functions out of it, so redirecting ws2_32.so's libSystem
+# dependency to it changes name resolution and nothing else. The edit is one
+# string inside an existing load command -- reversible with the same tool, which
+# is how uninstall.sh puts it back.
+cp -X "$HERE/fixes/$RESOLVER" "$WINE/$RESOLVER" \
+    || die $E_PERMISSION "Could not install ${RESOLVER:t} into $APP."
+ok "${RESOLVER:t}"
+if ws2_32_is_patched "$WINE"; then
+    ok "ws2_32.so — already reading the bottle's hosts file"
+else
+    install_name_tool -change "$LIBSYSTEM" "$RESOLVER_PATH" "$WINE/x86_64-unix/ws2_32.so" 2>/dev/null \
+        || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}."
+    ws2_32_is_patched "$WINE" \
+        || die $E_PAYLOAD "ws2_32.so did not take the change. Nothing will
+         resolve to Aurora17 and the game will not connect."
+    ok "ws2_32.so — now reads the bottle's hosts file"
+fi
+
 # ------------------------------------------------- 5. the search path fix
 # Both rebuilt .so files lose it, and both need it: ntdll.so to find its sibling
 # libraries, crypt32.so to find the gnutls CrossOver already ships in lib64.
@@ -599,12 +784,21 @@ done
 say ""
 say "5. Repairing the library search path"
 for so in ntdll.so crypt32.so; do
-    if otool -l "$WINE/x86_64-unix/$so" | grep -q 'lib64'; then
+    if has_lib64_rpath "$WINE/x86_64-unix/$so"; then
         ok "$so — already present"
     else
-        install_name_tool -add_rpath '@loader_path/../../../lib64' "$WINE/x86_64-unix/$so" \
-            || die $E_PERMISSION "Could not repair the search path in $so."
-        ok "$so — added"
+        # Keep the error: "would duplicate path" means the rpath was there all
+        # along and only the check was wrong, which is nothing to stop for. Any
+        # other failure is real.
+        RPATH_ERR="$(install_name_tool -add_rpath "$RPATH_LIB64" "$WINE/x86_64-unix/$so" 2>&1)"
+        if [ $? -eq 0 ]; then
+            ok "$so — added"
+        elif print -r -- "$RPATH_ERR" | grep -q 'would duplicate path'; then
+            ok "$so — already present"
+        else
+            print -r -- "$RPATH_ERR"
+            die $E_PERMISSION "Could not repair the search path in $so."
+        fi
     fi
 done
 
