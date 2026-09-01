@@ -396,6 +396,8 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | `Not enough disk space` (exit 2) | the 1 GB copy will not fit | Free the amount it names and run again. Nothing was changed. |
 | `is running. Quit it first` (exit 3) | CrossOver-FIFA is open | Quit it fully — ⌘Q, not just closing the window — and run again. |
 | `is set to something else` | a bottle setting exists with the wrong value | Open the `cxbottle.conf` it names, fix or delete that one line, run again. |
+| `could not read the permissions on ...` (a note, not a stop) | that CrossOver's signature was replaced at some point, so it no longer carries its own permission list | Nothing to do. The installer signs with the four CrossOver 26.3 ships with instead, then verifies they landed. Microphone, camera and Apple Events keep working. |
+| `Could not read CrossOver's own permissions` (older versions, stops) | same cause, but the older installer had nothing to fall back on | Use this version of `setup.sh` — it carries the list and continues. |
 | `Signing lost these permissions` / `did not verify` | signing went wrong | `./setup.sh --resign`. If that fails too, `./uninstall.sh` and install again. |
 | `NOT FINISHED` (exit 5) | CrossOver is patched but the bottle or the stand-in is not done | The missing piece is listed. Fix it, run again, confirm with `--verify`. |
 

@@ -260,6 +260,75 @@ has_lib64_rpath() {
     LC_ALL=C grep -Fq "$RPATH_LIB64" "$1"
 }
 
+# Reads a bundle's entitlements into $2 as an XML plist.
+#   0  read them
+#   2  the bundle is signed but genuinely carries none
+#   1  codesign itself failed; the reason is left in CODESIGN_ERR
+#
+# Two spellings, because they are not the same on every macOS: older codesign
+# writes the plist to the named file, newer builds only write it to stdout.
+# Guessing wrong looks exactly like "this app has no permissions", which is the
+# one answer that must never be assumed.
+CODESIGN_ERR=""
+read_entitlements() {
+    local app="$1" out="$2"
+    CODESIGN_ERR=""
+
+    if CODESIGN_ERR="$(codesign -d --entitlements "$out" --xml "$app" 2>&1)" \
+       && [ -s "$out" ]; then
+        CODESIGN_ERR=""
+        return 0
+    fi
+
+    rm -f "$out"
+    if codesign -d --entitlements - --xml "$app" >"$out" 2>/dev/null \
+       && [ -s "$out" ]; then
+        CODESIGN_ERR=""
+        return 0
+    fi
+
+    rm -f "$out"
+    codesign -dv "$app" >/dev/null 2>&1 || {
+        CODESIGN_ERR="${CODESIGN_ERR:-$app has no code signature at all.}"
+        return 1
+    }
+    return 2
+}
+
+# The four permissions a genuine CrossOver 26.3 ships with. Kept here so a
+# CrossOver whose own copy cannot be read -- because its signature was replaced
+# by a patcher, a repack, or an earlier hand-signing -- can still be signed with
+# the right set instead of silently losing microphone, camera and Apple Events.
+# Read back and verified after signing exactly like a set we read off the app.
+STOCK_ENTITLEMENTS=(
+  com.apple.security.automation.apple-events
+  com.apple.security.cs.allow-unsigned-executable-memory
+  com.apple.security.device.audio-input
+  com.apple.security.device.camera
+)
+
+write_stock_entitlements() {
+    local out="$1" k
+    {
+        print -r -- '<?xml version="1.0" encoding="UTF-8"?>'
+        print -r -- '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+        print -r -- '<plist version="1.0"><dict>'
+        for k in $STOCK_ENTITLEMENTS; do
+            print -r -- "<key>$k</key><true/>"
+        done
+        print -r -- '</dict></plist>'
+    } > "$out" || return 1
+    [ -s "$out" ]
+}
+
+# Why the app could not tell us, in one line, for the note that follows.
+ent_reason() {
+    case "$1" in
+        2) print -r -- "it carries none of its own" ;;
+        *) print -r -- "codesign said: ${CODESIGN_ERR:-nothing at all}" ;;
+    esac
+}
+
 # The keys currently on a bundle, one per line.
 entitlement_keys() {
     local plist="$1"
@@ -288,11 +357,19 @@ resign_app() {
     # Failing to read the original entitlements is not the same as there being
     # none. Treating it as "none" is how the four CrossOver needs get silently
     # dropped, which breaks microphone, camera, and Apple Events afterwards.
-    codesign -d --entitlements "$ent" --xml "$app" 2>/dev/null && [ -s "$ent" ] \
-        || { rm -f "$ent" "$after"
-             fail "Could not read CrossOver's own permissions from $app.
-         Signing without them would take away microphone, camera and
-         Apple Events access. Nothing has been signed." }
+    local rc
+    read_entitlements "$app" "$ent"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        # Signing with an empty list is what takes microphone, camera and Apple
+        # Events away for good, so put the known CrossOver 26.3 set in instead.
+        note "could not read the permissions on $app -- $(ent_reason "$rc")"
+        write_stock_entitlements "$ent" \
+            || { rm -f "$ent" "$after"
+                 fail "Could not write the replacement permission list.
+         Nothing has been signed." }
+        note "using the four CrossOver 26.3 ships with instead"
+    fi
 
     local -a before_keys
     before_keys=( ${(f)"$(entitlement_keys "$ent")"} )
@@ -593,6 +670,25 @@ done
 [ -f "$SRCWINE/x86_64-unix/ws2_32.so" ] \
     || die $E_PAYLOAD "ws2_32.so is missing from $SRC. That is not a complete CrossOver 26.3."
 ok "all six files present in CrossOver, and the ws2_32.so we edit"
+
+# Keeping CrossOver's own permissions is the one step with nothing to fall back
+# on, and it runs at the very end -- after 2 GB has been copied and six files
+# replaced. Read them from the original now, while nothing has happened yet, so
+# a CrossOver that cannot supply them stops here instead of there.
+PRE_ENT="$(mktemp -t cxpre).plist"
+read_entitlements "$SRC" "$PRE_ENT"
+PRE_RC=$?
+if [ "$PRE_RC" -eq 0 ]; then
+    ok "CrossOver's own permissions can be read and kept"
+else
+    note "cannot read the permissions on $SRC -- $(ent_reason "$PRE_RC")"
+    write_stock_entitlements "$PRE_ENT" \
+        || die $E_UNSUPPORTED "Cannot read $SRC's permissions and cannot write a
+         replacement list either. Nothing has been changed."
+    note "the four CrossOver 26.3 ships with will be used instead"
+    say "        microphone, camera and Apple Events will still work"
+fi
+rm -f "$PRE_ENT"
 
 # Verify the payload we are about to install before touching anything, not
 # after the working copy has already been deleted.
