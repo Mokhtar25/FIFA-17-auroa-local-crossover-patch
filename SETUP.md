@@ -402,7 +402,8 @@ own window once and it will be renewed.
 ```
 
 It changes nothing. It checks every file, the signature, the permissions, the
-bottle settings, the version DLL override, the bottle's own shortcuts, name
+bottle settings, the version DLL override, the bottle's own shortcuts, whether
+anything is still holding the bottle, name
 resolution and the PowerShell stand-in, and prints `BAD` beside whatever is wrong. Do this before anything in
 the table below — most of the time it names the problem outright.
 
@@ -414,11 +415,40 @@ asking someone else for help:
 ```
 
 Also changes nothing. It prints one diagnosis — the checks above, plus which
-CrossOver is *actually* running, the bottle settings, the shim's fingerprint in
-the game folder, and whether the shim ever loaded — and saves it to
+CrossOver is *actually* running, what is holding the bottle, the bottle
+settings, the shim's fingerprint in the game folder, and whether the shim ever
+loaded — and saves it to
 `aurora17-report.txt`. Send that file rather than describing the symptom; it
 contains everything anyone would otherwise have to ask you for, and no keys,
 tokens or paths outside the game and the bottle.
+
+### If the bottle never finishes loading
+
+CrossOver opens, the bottle sits there with its spinner, and nothing ever
+happens — quitting CrossOver and reopening it changes nothing.
+
+```
+./setup.sh --unstick
+```
+
+**Quit CrossOver first.** The command refuses to do anything while any copy of
+CrossOver is open, and says so.
+
+What it fixes: every bottle runs a small set of Windows services, and they are
+started by a `wineserver` that is supposed to outlive them. When that server
+dies first — a crash, a forced quit, or CrossOver being replaced underneath it
+by an installer — those services stay behind, no longer belonging to any
+program you can see, still holding a lock file that says the bottle is busy.
+The next time you open that bottle, CrossOver waits for a server that is not
+there. It waits forever, and quitting CrossOver does not help, because the
+processes it is waiting on were never CrossOver's to begin with.
+
+`--unstick` closes them and removes the abandoned lock. It touches nothing in
+the bottle itself: no files, no settings, no saves.
+
+This is also worth running if you have ever opened the Aurora17 bottle in your
+**normal** CrossOver. Each copy leaves its own session behind, and one copy
+cannot adopt the other's.
 
 ### The first thing to check
 
@@ -438,6 +468,8 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | `Refusing ...` (exit 2) | `AURORA_TARGET` names something unsafe or not an app | Point it at a path ending in `.app` that is not `/Applications` itself. |
 | `Not enough disk space` (exit 2) | the 1 GB copy will not fit | Free the amount it names and run again. Nothing was changed. |
 | `is running. Quit it first` (exit 3) | CrossOver-FIFA is open | Quit it fully — ⌘Q, not just closing the window — and run again. |
+| `The ... bottle is open in CrossOver` (exit 3) | the installer will not edit a bottle Wine has open — Wine holds the registry in memory and writes its own copy back when it quits, which would undo step 6a silently | Quit CrossOver fully — ⌘Q — and run again. Nothing was changed. |
+| `leftover process(es) are still inside the ... bottle` (exit 3) | a previous session never closed; it would overwrite whatever the installer writes, and the bottle will hang on loading | `./setup.sh --unstick`, then run the installer again. Nothing was changed. |
 | `is set to something else` | a bottle setting exists with the wrong value | Open the `cxbottle.conf` it names, fix or delete that one line, run again. |
 | `could not read the permissions on ...` (a note, not a stop) | that CrossOver's signature was replaced at some point, so it no longer carries its own permission list | Nothing to do. The installer signs with the four CrossOver 26.3 ships with instead, then verifies they landed. Microphone, camera and Apple Events keep working. |
 | `Could not read CrossOver's own permissions` (older versions, stops) | same cause, but the older installer had nothing to fall back on | Use this version of `setup.sh` — it carries the list and continues. |
@@ -450,6 +482,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 |---|---|---|
 | The game opens and closes over and over, forever | `CX_DR_TRAP` is missing | `--verify`, then step 6 |
 | Stuck on the loading screen | the search path or the graphics setting | `--verify`, then steps 4 and 6 |
+| **The bottle itself never opens** — CrossOver's spinner runs forever, and quitting and reopening CrossOver does not help | a previous session's Windows services outlived their `wineserver` and still hold the bottle's lock; they are not CrossOver's children any more, so quitting CrossOver leaves them running | Quit CrossOver, then `./setup.sh --unstick`. `--verify` reports this as `BAD` too |
 | Freezes before the menu, no sound | the Teams audio driver | Step 7 |
 | The game works when you start it from inside CrossOver-FIFA, but not from its shortcut in `~/Applications/CrossOver` | that shortcut hardcodes the CrossOver that made it, which was your normal one, so the game runs unpatched | `./setup.sh` repoints it and `--verify` checks it. The original is kept as `.bak-aurora17` |
 | "Servers have been shut down", and `--verify` says everything is fine | the bottle is loading Wine's own `version.dll`, so Aurora's shim never loads | `--verify` now says `BAD` for this. Quit CrossOver fully and re-run `./setup.sh`, or step 6a by hand |

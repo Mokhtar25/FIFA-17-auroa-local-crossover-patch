@@ -12,6 +12,7 @@
 #   ./setup.sh --resign                   repair the signature, no re-copy
 #   ./setup.sh --verify                   check an install, change nothing
 #   ./setup.sh --report                   one pasteable diagnosis, change nothing
+#   ./setup.sh --unstick                  free a bottle that is stuck loading
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -29,8 +30,9 @@ case "${1:-}" in
     --resign) MODE=resign; shift ;;
     --verify) MODE=verify; shift ;;
     --report) MODE=report; shift ;;
+    --unstick) MODE=unstick; shift ;;
     --help|-h)
-        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
     -*) print -r -- "Unknown option: $1"; exit $E_UNSUPPORTED ;;
 esac
@@ -206,6 +208,56 @@ app_is_running() {
     local pat
     pat=$(pgrep_quote "$1/Contents/MacOS")
     pgrep -f "$pat" >/dev/null 2>&1
+}
+
+# --------------------------------------------- who is holding the bottle
+# Wine keeps the registry in memory and writes user.reg back out when the last
+# process in a prefix exits. Editing that file while a bottle is live is
+# therefore not a change at all: when CrossOver is finally quit it puts its own
+# copy back, taking the version override with it, and the game says the servers
+# have been shut down again -- with every check in --verify still saying ok,
+# because they read the file that is about to be overwritten.
+#
+# The same question has a second answer. When a bottle's wineserver dies but
+# its services.exe, explorer.exe and rpcss.exe do not, those stay behind
+# reparented to init, still holding a lock directory under /tmp that nothing
+# will ever release. The next attempt to open that bottle waits on a wineserver
+# that is not there, forever, and CrossOver simply spins. That is what "the
+# bottle is stuck loading" is, and it survives quitting and reopening CrossOver
+# because the processes it is waiting on are no longer CrossOver's children.
+#
+# Both come down to: is anything in this prefix right now, and does anything
+# own it. --unstick answers the second one.
+prefix_holders() {
+    local pfx="$BOTTLE_DIR/$BOTTLE"
+    [ -d "$pfx" ] || return 0
+    # Every Wine process in a bottle has its working directory inside it.
+    /usr/sbin/lsof -a -d cwd -F pn 2>/dev/null | awk -v pfx="$pfx" '
+        substr($0,1,1)=="p" { pid=substr($0,2); next }
+        substr($0,1,1)=="n" {
+            path=substr($0,2)
+            if (path==pfx || index(path, pfx "/")==1) print pid
+        }'
+}
+
+# Every CrossOver bundle with a live process, one path per line. Trimming at
+# /Contents/ leaves a bundle path and turns every other match -- shells,
+# editors, anything with the word on its command line -- into something that no
+# longer ends in .app, which is the filter.
+crossovers_running() {
+    ps -Ao command= 2>/dev/null | grep -i crossover | grep -v grep \
+        | sed 's|/Contents/.*||' | grep -E '^/.*\.app$' | sort -u || true
+}
+
+# Wine names these directories after the prefix's device and inode, not after
+# the bottle, so there is no reading the name to find out whose it is. The only
+# safe test is whether any process still has one open.
+stale_wine_sockets() {
+    local d
+    for d in /tmp/.wine-*/server-*(N/); do
+        [ -n "$(/usr/sbin/lsof +D "$d" -F p 2>/dev/null | grep '^p')" ] \
+            || print -r -- "$d"
+    done
 }
 
 # ------------------------------------------------------------- signing
@@ -625,6 +677,26 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # A live session means everything below is being read from a file Wine is
+    # about to overwrite from its own memory; a session with no CrossOver
+    # behind it means the bottle will not open at all. See prefix_holders.
+    local -a holding
+    holding=( ${(f)"$(prefix_holders)"} )
+    holding=( ${holding:#} )
+    if [ "${#holding}" -eq 0 ]; then
+        ok "nothing is holding the $BOTTLE bottle"
+    elif [ -n "$(crossovers_running)" ]; then
+        note "the $BOTTLE bottle is open in CrossOver right now (${#holding} processes)."
+        say "        Quit CrossOver and check again — Wine writes its own copy of"
+        say "        user.reg out as it goes, which can undo the version override"
+        say "        below after this has already said ok."
+    else
+        say "  BAD   ${#holding} process(es) are still inside the $BOTTLE bottle with"
+        say "        no CrossOver running. The bottle will hang on loading until"
+        say "        they are gone. Run:  ./setup.sh --unstick"
+        problems=$((problems+1))
+    fi
+
     # Without this the redirect shim is never loaded and the only symptom is
     # "servers have been shut down" -- with every other check here passing.
     if [ -f "$(bottle_user_reg)" ]; then
@@ -740,12 +812,26 @@ report_mode() {
         print -r -- ""
 
         print -r -- "---- which CrossOver is actually running ----------------"
-        # Trimming at /Contents/ leaves a bundle path and turns every other
-        # match -- shells, editors, anything with the word in its command line
-        # -- into something that no longer ends in .app, which is the filter.
-        ps -Ao command= 2>/dev/null | grep -i crossover | grep -v grep \
-            | sed 's|/Contents/.*||' | grep -E '^/.*\.app$' | sort -u \
-            || print -r -- "(no CrossOver running)"
+        local running
+        running="$(crossovers_running)"
+        print -r -- "${running:-(no CrossOver running)}"
+        print -r -- ""
+
+        print -r -- "---- what is holding the bottle ------------------------"
+        local -a hold
+        hold=( ${(f)"$(prefix_holders)"} )
+        hold=( ${hold:#} )
+        if [ "${#hold}" -eq 0 ]; then
+            print -r -- "(nothing)"
+        else
+            ps -o pid=,etime=,command= -p "${(j:,:)hold}" 2>/dev/null || true
+        fi
+        print -r -- ""
+
+        print -r -- "---- wineserver directories nobody owns ----------------"
+        local orphaned
+        orphaned="$(stale_wine_sockets)"
+        print -r -- "${orphaned:-(none)}"
         print -r -- ""
 
         print -r -- "---- checks --------------------------------------------"
@@ -840,6 +926,73 @@ report_mode() {
     print -r -- ""
     print -r -- "Saved to $out — send that file, or paste everything above."
 }
+
+# ------------------------------------------------------ --unstick, and stop
+# Frees a bottle whose Wine session outlived its wineserver -- see the comment
+# on prefix_holders for what that state is and how it looks from outside. One
+# rule makes this safe to do bluntly: with every CrossOver quit, anything still
+# inside the prefix is by definition an orphan, because nothing is left that
+# could legitimately be using it.
+if [ "$MODE" = unstick ]; then
+    say ""
+    say "Freeing the $BOTTLE bottle"
+    say ""
+    RUNNING="$(crossovers_running)"
+    if [ -n "$RUNNING" ]; then
+        say "  CrossOver is still open:"
+        print -r -- "$RUNNING" | sed 's/^/        /'
+        die $E_PERMISSION "Quit CrossOver completely -- Command-Q, not just closing the
+         window -- and run this again. Nothing has been touched."
+    fi
+    ok "no CrossOver is running"
+
+    HOLDING=( ${(f)"$(prefix_holders)"} )
+    HOLDING=( ${HOLDING:#} )
+    if [ "${#HOLDING}" -eq 0 ]; then
+        ok "nothing was holding the bottle"
+    else
+        say "  ${#HOLDING} leftover process(es) in the bottle:"
+        ps -o pid=,etime=,command= -p "${(j:,:)HOLDING}" 2>/dev/null \
+            | sed 's/^/        /' || true
+        # Ask first. A wineserver that is somehow still alive flushes the
+        # registry on the way out, and losing that is the whole point of this.
+        kill -TERM ${HOLDING} 2>/dev/null || true
+        WAITED=0
+        while [ "$WAITED" -lt 10 ]; do
+            LEFT=( ${(f)"$(prefix_holders)"} )
+            LEFT=( ${LEFT:#} )
+            [ "${#LEFT}" -eq 0 ] && break
+            /bin/sleep 1
+            WAITED=$((WAITED + 1))
+        done
+        LEFT=( ${(f)"$(prefix_holders)"} )
+        LEFT=( ${LEFT:#} )
+        [ "${#LEFT}" -eq 0 ] || kill -KILL ${LEFT} 2>/dev/null || true
+        /bin/sleep 1
+        LEFT=( ${(f)"$(prefix_holders)"} )
+        LEFT=( ${LEFT:#} )
+        [ "${#LEFT}" -eq 0 ] \
+            && ok "cleared ${#HOLDING} process(es)" \
+            || die $E_PERMISSION "${#LEFT} process(es) would not close. Restart the Mac and
+         run this again -- nothing else here can free the bottle."
+    fi
+
+    # The lock these leave behind outlives them, and CrossOver waits on it just
+    # the same. Only ever the ones nobody has open.
+    STALE=( ${(f)"$(stale_wine_sockets)"} )
+    STALE=( ${STALE:#} )
+    if [ "${#STALE}" -eq 0 ]; then
+        ok "no abandoned wineserver directories"
+    else
+        for D in ${STALE}; do rm -rf "$D" 2>/dev/null || true; done
+        ok "removed ${#STALE} abandoned wineserver director$([ ${#STALE} -eq 1 ] && print -n y || print -n ies)"
+    fi
+
+    say ""
+    say "The $BOTTLE bottle is free. Open CrossOver again."
+    say ""
+    exit 0
+fi
 
 if [ "$MODE" = report ]; then
     if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
@@ -1035,6 +1188,28 @@ if [ "$IN_PLACE" != "1" ]; then
 fi
 if [ "$IN_PLACE" = "1" ] && app_is_running "$SRC"; then
     die $E_PERMISSION "$SRC is running. Quit it first, then run this again."
+fi
+
+# Step 7 edits the bottle's user.reg. A live Wine session keeps the registry in
+# memory and writes it back out when it exits, so the version override added
+# here would be thrown away silently the next time CrossOver quits -- and the
+# game would say the servers have been shut down with every check in --verify
+# saying ok. See prefix_holders.
+HOLDING=( ${(f)"$(prefix_holders)"} )
+HOLDING=( ${HOLDING:#} )
+if [ "${#HOLDING}" -gt 0 ]; then
+    if [ -n "$(crossovers_running)" ]; then
+        die $E_PERMISSION "The $BOTTLE bottle is open in CrossOver.
+         Quit CrossOver completely -- Command-Q, not just closing the window --
+         and run this again. Installing now would leave the bottle's settings to
+         be overwritten when it does quit, and the game would say the servers
+         have been shut down. Nothing has been changed."
+    fi
+    die $E_PERMISSION "${#HOLDING} leftover process(es) are still inside the $BOTTLE bottle
+         with no CrossOver running. They will overwrite whatever is written
+         here, and the bottle will hang on loading. Free it first:
+             ./setup.sh --unstick
+         Nothing has been changed."
 fi
 
 # =========================================================================
