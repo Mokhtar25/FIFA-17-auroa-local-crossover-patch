@@ -393,6 +393,45 @@ set_version_override() {
     version_override_is_set
 }
 
+# --------------------------------------------- the bottle's own shortcuts
+# CrossOver writes a small sh script per Start Menu entry and hardcodes the
+# CrossOver that generated it. Aurora's installer runs under the normal
+# CrossOver, so its shortcut launches the game through the UNPATCHED copy --
+# and the shortcut is how a player actually starts the game. Everything then
+# behaves as though none of this was ever installed: no shim, no redirect,
+# "servers have been shut down". Launching the same bottle from inside
+# CrossOver-FIFA works, which makes it look intermittent rather than wrong.
+menu_shims() {
+    local d="$BOTTLE_DIR/$BOTTLE/desktopdata"
+    [ -d "$d" ] || return 0
+    # The backups this makes are shims too, and still name the old CrossOver.
+    grep -rl "/Contents/SharedSupport/CrossOver/bin/wine" "$d" 2>/dev/null \
+        | grep -v '\.bak-aurora17$' || true
+}
+
+# Shims that name a CrossOver other than the one we installed into.
+menu_shims_pointing_elsewhere() {
+    local f
+    for f in ${(f)"$(menu_shims)"}; do
+        [ -n "$f" ] || continue
+        grep -q "$1/Contents/SharedSupport/CrossOver/bin/wine" "$f" || print -r -- "$f"
+    done
+}
+
+repoint_menu_shims() {
+    local app="$1" f n=0
+    for f in ${(f)"$(menu_shims_pointing_elsewhere "$app")"}; do
+        [ -n "$f" ] || continue
+        [ -f "$f.bak-aurora17" ] || cp -X "$f" "$f.bak-aurora17" 2>/dev/null || cp "$f" "$f.bak-aurora17" || return 1
+        # Any .app path in front of the known suffix, replaced with ours.
+        /usr/bin/sed -i '' \
+            -e "s|\"[^\"]*/Contents/SharedSupport/CrossOver/bin/wine\"|\"$app/Contents/SharedSupport/CrossOver/bin/wine\"|g" \
+            "$f" || return 1
+        n=$((n+1))
+    done
+    print -r -- "$n"
+}
+
 # The keys currently on a bundle, one per line.
 entitlement_keys() {
     local plist="$1"
@@ -585,6 +624,21 @@ verify_install() {
                  problems=$((problems+1)); }
     fi
 
+    # A shortcut that starts the game through the unpatched CrossOver undoes
+    # every other thing on this list, while all of them still report ok.
+    local -a stray
+    stray=( ${(f)"$(menu_shims_pointing_elsewhere "$app")"} )
+    stray=( ${stray:#} )
+    if [ "${#stray}" -eq 0 ]; then
+        ok "the bottle's shortcuts start ${app:t}"
+    else
+        say "  BAD   ${#stray} shortcut(s) in the $BOTTLE bottle start a different"
+        say "        CrossOver, so the game runs unpatched and will say the"
+        say "        servers are shut down. Re-run ./setup.sh"
+        for f in $stray; do say "        ${f:t}"; done
+        problems=$((problems+1))
+    fi
+
     # PLAY only needs one of the two stand-in locations to be right.
     local psdir="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
     local found=0 d
@@ -696,6 +750,15 @@ report_mode() {
         else
             print -r -- "NOT SET -- Aurora's redirect shim cannot load"
         fi
+        print -r -- ""
+
+        print -r -- "---- what the bottle's shortcuts start -----------------"
+        local sh
+        for sh in ${(f)"$(menu_shims)"}; do
+            [ -n "$sh" ] || continue
+            print -r -- "${sh:t}"
+            sed -n 's|.*exec "\([^"]*\)/Contents/SharedSupport.*|  -> \1|p' "$sh"
+        done
         print -r -- ""
 
         print -r -- "---- the shim in the game folder -----------------------"
@@ -1159,6 +1222,17 @@ else
         note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once,"
         say "        then run ./setup.sh again so the version override can be set"
     fi
+
+    # See repoint_menu_shims. Done last in this step so it also catches a
+    # shortcut Aurora created earlier under the normal CrossOver.
+    REPOINTED="$(repoint_menu_shims "$APP" 2>/dev/null || print -r -- fail)"
+    case "$REPOINTED" in
+        fail) note "could not repoint the bottle's shortcuts — start the game from"
+              say "        inside ${APP:t} rather than from its shortcut" ;;
+        0)    ok "the bottle's shortcuts already start ${APP:t}" ;;
+        *)    ok "$REPOINTED shortcut(s) now start ${APP:t}, not your normal CrossOver"
+              say "        (the originals are kept alongside as .bak-aurora17)" ;;
+    esac
 
     BOTTLE_OK=1
 fi
