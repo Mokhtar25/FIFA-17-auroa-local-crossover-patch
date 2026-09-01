@@ -1,0 +1,208 @@
+Aurora17 / FIFA 17 online: four Wine fixes, on top of crossover-26.3-fifa17-rosetta.patch.
+
+  dlls/ntdll/unix/virtual.c   BUGS.md #9  VirtualQuery must not return an image region that
+                                          crosses a PE section boundary
+                              BUGS.md #12 a writable section with no raw data is demand-zero,
+                                          not copy-on-write
+  dlls/crypt32/pfx.c          BUGS.md #10 give every PFX import its own key container
+  dlls/secur32/schannel.c     BUGS.md #11 fall back to exporting the private key from the
+                                          certificate's provider
+
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3245,7 +3245,14 @@
+             size = ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+ 
+         if (sec[i].Characteristics & IMAGE_SCN_MEM_READ)    vprot |= VPROT_READ;
+-        if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
++        /* A writable section with no raw data is demand-zero: there is no file content
++         * behind it, so Windows backs it with private pages and VirtualQuery reports a
++         * plain writable protection, never a copy-on-write one.  Marking it WRITECOPY
++         * makes Wine report PAGE_EXECUTE_WRITECOPY where Windows reports
++         * PAGE_EXECUTE_READWRITE -- which is exactly the shape of the unpack target
++         * section of a packed executable (UPX and friends). */
++        if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)
++            vprot |= sec[i].SizeOfRawData ? VPROT_WRITECOPY : VPROT_WRITE;
+         if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
+ 
+         if (!set_vprot( view, ptr + sec[i].VirtualAddress, size, vprot ) && (vprot & VPROT_EXEC))
+@@ -5718,6 +5725,62 @@
+     }
+ #endif
+     return NULL;
++}
++
++
++/***********************************************************************
++ *           clip_to_image_section
++ *
++ * Windows maps every PE section of an image as its own subsection of the
++ * section object, and NtQueryVirtualMemory never returns a region that
++ * crosses one of those boundaries -- VirtualQuery on a module always stops
++ * at the end of the section the address falls in, even when the next
++ * section happens to carry the same page protection.  Wine only tracks
++ * per-page protection, so it happily merges neighbouring sections and
++ * reports a region that runs past the end of the section.  Anti-tamper code
++ * that validates a page before patching it compares RegionSize against the
++ * section extent and rejects the process when it does not match.
++ *
++ * Clip the reported region at the boundary of the containing section.
++ * virtual_mutex must be held by caller.
++ */
++static SIZE_T clip_to_image_section( struct file_view *view, const char *base, SIZE_T size )
++{
++    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)view->base;
++    const IMAGE_NT_HEADERS *nt;
++    const IMAGE_SECTION_HEADER *sec;
++    SIZE_T offset = base - (char *)view->base;
++    SIZE_T start, end;
++    UINT i, count;
++
++    if (!(view->protect & SEC_IMAGE)) return size;
++    if (view->size < page_size || !size) return size;
++    if (!(get_page_vprot( (char *)view->base ) & VPROT_READ)) return size;
++    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return size;
++    if (dos->e_lfanew > page_size - sizeof(*nt)) return size;
++
++    nt = (const IMAGE_NT_HEADERS *)((const char *)dos + dos->e_lfanew);
++    if (nt->Signature != IMAGE_NT_SIGNATURE) return size;
++
++    count = nt->FileHeader.NumberOfSections;
++    if (!count) return size;
++    if (dos->e_lfanew + FIELD_OFFSET( IMAGE_NT_HEADERS, OptionalHeader ) +
++        nt->FileHeader.SizeOfOptionalHeader + count * sizeof(*sec) > page_size) return size;
++
++    sec = IMAGE_FIRST_SECTION( nt );
++
++    /* the PE headers are a subsection of their own */
++    if (offset < sec[0].VirtualAddress)
++        return min( size, sec[0].VirtualAddress - offset );
++
++    for (i = 0; i < count; i++)
++    {
++        start = sec[i].VirtualAddress;
++        if (offset < start) continue;
++        end = (i + 1 < count && sec[i + 1].VirtualAddress > start) ? sec[i + 1].VirtualAddress : view->size;
++        if (offset < end) return min( size, end - offset );
++    }
++    return size;
+ }
+ 
+ 
+@@ -5767,6 +5830,7 @@
+ 
+         info->AllocationBase = alloc_base;
+         info->RegionSize = get_committed_size( view, base, ~(size_t)0, &vprot, ~VPROT_WRITEWATCH );
++        info->RegionSize = clip_to_image_section( view, base, info->RegionSize );
+         info->State = (vprot & VPROT_COMMITTED) ? MEM_COMMIT : MEM_RESERVE;
+         info->Protect = (vprot & VPROT_COMMITTED) ? get_win32_prot( vprot, view->protect ) : 0;
+         info->AllocationProtect = get_win32_prot( view->protect, view->protect );
+--- a/dlls/secur32/schannel.c
++++ b/dlls/secur32/schannel.c
+@@ -512,7 +512,7 @@
+ }
+ 
+ #define MAX_LEAD_BYTES 8
+-static BYTE *get_key_blob(const CERT_CONTEXT *ctx, DWORD *size)
++static BYTE *get_key_blob_from_registry(const CERT_CONTEXT *ctx, DWORD *size)
+ {
+     BYTE *buf, *ret = NULL;
+     DATA_BLOB blob_in, blob_out;
+@@ -559,6 +559,58 @@
+ 
+     RegCloseKey(hkey);
+     return ret;
++}
++
++/* Keys that were never persisted -- a PFX imported into an ephemeral
++ * (CRYPT_VERIFYCONTEXT) container, which is what crypt32's PFXImportCertStore
++ * does for .NET's X509Certificate2 -- have no HKCU\Software\Wine\Crypto\RSA
++ * entry to read, so the registry lookup above finds nothing and every server
++ * credential built from such a certificate fails with SEC_E_INTERNAL_ERROR.
++ * The key is still reachable through the certificate's own provider, so export
++ * it from there instead; CryptExportKey produces exactly the PRIVATEKEYBLOB
++ * the gnutls backend expects. */
++static BYTE *get_key_blob_from_provider(const CERT_CONTEXT *ctx, DWORD *size)
++{
++    HCRYPTPROV prov = 0;
++    HCRYPTKEY key = 0;
++    DWORD spec = 0, len = 0;
++    BOOL free_prov = FALSE;
++    BYTE *buf = NULL;
++
++    if (!CryptAcquireCertificatePrivateKey(ctx, CRYPT_ACQUIRE_CACHE_FLAG, NULL, &prov, &spec, &free_prov))
++        return NULL;
++
++    if (!spec) spec = AT_KEYEXCHANGE;
++    if (!CryptGetUserKey(prov, spec, &key) &&
++        !CryptGetUserKey(prov, spec == AT_KEYEXCHANGE ? AT_SIGNATURE : AT_KEYEXCHANGE, &key))
++    {
++        WARN("no user key for spec %lu\n", spec);
++        if (free_prov) CryptReleaseContext(prov, 0);
++        return NULL;
++    }
++
++    if (CryptExportKey(key, 0, PRIVATEKEYBLOB, 0, NULL, &len) && (buf = malloc(len + MAX_LEAD_BYTES)))
++    {
++        if (CryptExportKey(key, 0, PRIVATEKEYBLOB, 0, buf, &len)) *size = len + MAX_LEAD_BYTES;
++        else
++        {
++            WARN("failed to export private key\n");
++            free(buf);
++            buf = NULL;
++        }
++    }
++
++    CryptDestroyKey(key);
++    if (free_prov) CryptReleaseContext(prov, 0);
++    return buf;
++}
++
++static BYTE *get_key_blob(const CERT_CONTEXT *ctx, DWORD *size)
++{
++    BYTE *ret;
++
++    if ((ret = get_key_blob_from_registry(ctx, size))) return ret;
++    return get_key_blob_from_provider(ctx, size);
+ }
+ 
+ static SECURITY_STATUS acquire_credentials_handle(ULONG fCredentialUse,
+--- a/dlls/crypt32/pfx.c
++++ b/dlls/crypt32/pfx.c
+@@ -30,23 +30,34 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(crypt);
+ 
++static LONG container_index;
++
+ static HCRYPTPROV import_key( cert_store_data_t data, DWORD flags )
+ {
+     HCRYPTPROV prov = 0;
+     HCRYPTKEY cryptkey;
+     DWORD size, acquire_flags;
+     void *key;
++    WCHAR container[64];
+     struct import_store_key_params params = { data, NULL, &size };
+ 
+     if (CRYPT32_CALL( import_store_key, &params ) != STATUS_BUFFER_TOO_SMALL) return 0;
+ 
++    /* Windows gives every PFX import its own randomly named key container.  Importing
++     * into the default (per-user) container instead makes all imports in a process share
++     * one container, so the CRYPT_DELETEKEYSET that .NET issues when it is done with one
++     * temporary certificate destroys the key another, still-live certificate depends on.
++     * Use a unique container name per import, as Windows does. */
++    swprintf( container, ARRAY_SIZE(container), L"wine-pfx-%08lx-%08lx-%08lx", GetCurrentProcessId(),
++              GetTickCount(), InterlockedIncrement( &container_index ) );
++
+     acquire_flags = (flags & CRYPT_MACHINE_KEYSET) | CRYPT_NEWKEYSET;
+-    if (!CryptAcquireContextW( &prov, NULL, MS_ENHANCED_PROV_W, PROV_RSA_FULL, acquire_flags ))
++    if (!CryptAcquireContextW( &prov, container, MS_ENHANCED_PROV_W, PROV_RSA_FULL, acquire_flags ))
+     {
+         if (GetLastError() != NTE_EXISTS) return 0;
+ 
+         acquire_flags &= ~CRYPT_NEWKEYSET;
+-        if (!CryptAcquireContextW( &prov, NULL, MS_ENHANCED_PROV_W, PROV_RSA_FULL, acquire_flags ))
++        if (!CryptAcquireContextW( &prov, container, MS_ENHANCED_PROV_W, PROV_RSA_FULL, acquire_flags ))
+         {
+             WARN( "CryptAcquireContextW failed %08lx\n", GetLastError() );
+             return 0;

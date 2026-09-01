@@ -1,0 +1,247 @@
+FIFA 17 / CrossOver 26.3: CoreAudio fixes.  BUGS.md #4.
+
+The startup deadlock was NOT wine's: /Library/Audio/Plug-Ins/HAL/MSTeamsAudioDevice.driver
+stops answering, and any process that points an AudioUnit at its device hangs forever inside
+the CoreAudio HAL -- reproducible with a 40-line native program, no wine involved.  Chasing it
+did turn up two real wine bugs on the way, both fixed here:
+
+  dlls/winecoreaudio.drv/coreaudio.c       capture authorization is checked three calls too
+                                           late, after the input AudioUnit has already been
+                                           created and pointed at the device; on a host that
+                                           cannot show the permission dialog that call never
+                                           returns.  Ask first, in get_audiounit(), so every
+                                           entry point is covered, and cache the answer.
+                                           Also adds WINE_COREAUDIO_EXCLUDE, to skip a wedged
+                                           device by name without uninstalling its driver.
+
+  dlls/winecoreaudio.drv/authorization.m   the permission request waited DISPATCH_TIME_FOREVER.
+                                           Bounded to 5s, treating a timeout as "not granted".
+                                           The completion handler can now outlive the wait, so
+                                           the shared state is refcounted instead of living on
+                                           the caller's stack.
+
+--- a/dlls/winecoreaudio.drv/coreaudio.c
++++ b/dlls/winecoreaudio.drv/coreaudio.c
+@@ -221,6 +221,41 @@
+     struct main_loop_params *params = args;
+     NtSetEvent(params->event, NULL);
+     return STATUS_SUCCESS;
++}
++
++/***********************************************************************
++ *              device_is_excluded
++ *
++ * Skip devices whose name matches WINE_COREAUDIO_EXCLUDE (a comma-separated
++ * list of substrings, case-insensitive).
++ *
++ * A third-party HAL plugin that stops answering wedges every process that so
++ * much as points an AudioUnit at its device -- the call is a synchronous round
++ * trip into coreaudiod and there is no timeout to reach for.  An application
++ * that enumerates endpoints and probes each one then hangs on startup through
++ * no fault of its own.  This lets such a device be skipped without uninstalling
++ * the driver system-wide.
++ */
++static BOOL device_is_excluded(CFStringRef name)
++{
++    const char *exclude = getenv("WINE_COREAUDIO_EXCLUDE");
++    char buf[256], *list, *tok, *ctx;
++    BOOL ret = FALSE;
++
++    if(!exclude || !*exclude || !name) return FALSE;
++    if(!CFStringGetCString(name, buf, sizeof(buf), kCFStringEncodingUTF8)) return FALSE;
++    if(!(list = strdup(exclude))) return FALSE;
++
++    for(tok = strtok_r(list, ",", &ctx); tok; tok = strtok_r(NULL, ",", &ctx)){
++        while(*tok == ' ') tok++;
++        if(*tok && strcasestr(buf, tok)){
++            WARN("Skipping excluded audio device \"%s\" (matched \"%s\")\n", buf, tok);
++            ret = TRUE;
++            break;
++        }
++    }
++    free(list);
++    return ret;
+ }
+ 
+ static NTSTATUS unix_get_endpoint_ids(void *args)
+@@ -301,6 +336,11 @@
+             continue;
+         }
+ 
++        if(device_is_excluded(info[params->num].name)){
++            CFRelease(info[params->num].name);
++            continue;
++        }
++
+         addr.mSelector = kAudioDevicePropertyDeviceUID;
+         size = sizeof(CFStringRef);
+         sc = AudioObjectGetPropertyData(devices[i], &addr, 0, NULL, &size, &info[params->num].uid);
+@@ -500,6 +540,39 @@
+     return noErr;
+ }
+ 
++/***********************************************************************
++ *              capture_authorized
++ *
++ * Whether this process may record audio, asked once and cached.
++ *
++ * Every path that touches an input AudioUnit has to come through here first.
++ * Enabling input IO on an AUHAL, or merely querying it, makes the CoreAudio HAL
++ * do a synchronous round trip to coreaudiod; if the process has no capture
++ * authorization that call never returns, and it takes the caller's lock with it.
++ * The result is cached because the permission request itself is slow, and
++ * is_format_supported can be called many times during startup.
++ */
++static BOOL capture_authorized(void)
++{
++    static int cached = -1;
++    int status;
++
++    if (cached != -1) return cached;
++
++    status = CoreAudio_get_capture_authorization_status();
++    TRACE("Audio capture authorization status: %d\n", status);
++
++    if (status == NOT_DETERMINED)
++        status = CoreAudio_request_capture_authorization();
++
++    if (status == 0)
++        ERR_(winediag)("Microphone/audio capture permission was denied. "
++                       "This can be enabled under Security & Privacy in System Preferences.\n");
++
++    cached = (status != 0);
++    return cached;
++}
++
+ static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID adevid)
+ {
+     AudioComponentInstance unit;
+@@ -517,6 +590,9 @@
+         return NULL;
+     }
+ 
++    if(dataflow == eCapture && !capture_authorized())
++        return NULL;
++
+     sc = AudioComponentInstanceNew(comp, &unit);
+     if(sc != noErr){
+         WARN("AudioComponentInstanceNew failed: %x\n", (int)sc);
+@@ -752,6 +828,11 @@
+     stream->bufsize_frames = muldiv(params->duration, stream->fmt->nSamplesPerSec, 10000000);
+     if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
+         stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
++
++    if(stream->flow == eCapture && !capture_authorized()){
++        params->result = E_ACCESSDENIED;
++        goto end;
++    }
+ 
+     if(!(stream->unit = get_audiounit(stream->flow, stream->dev_id))){
+         params->result = AUDCLNT_E_DEVICE_INVALIDATED;
+@@ -775,22 +856,6 @@
+         WARN("Couldn't set callback: %x\n", (int)sc);
+         params->result = osstatus_to_hresult(sc);
+         goto end;
+-    }
+-
+-    if (stream->flow == eCapture) {
+-        /* On 10.14 and later:
+-         * Check the audio capture/microphone authorization status, and explicitly
+-         * request it if the user hasn't previously granted or denied permission.
+-         */
+-        int authstatus = CoreAudio_get_capture_authorization_status();
+-        TRACE("Audio capture authorization status: %d\n", authstatus);
+-
+-        if (authstatus == NOT_DETERMINED)
+-            authstatus = CoreAudio_request_capture_authorization();
+-
+-        if (authstatus == 0)
+-            ERR_(winediag)("Microphone/audio capture permission was denied. "
+-                           "This can be enabled under Security & Privacy in System Preferences.\n");
+     }
+ 
+     sc = AudioUnitInitialize(stream->unit);
+--- a/dlls/winecoreaudio.drv/authorization.m
++++ b/dlls/winecoreaudio.drv/authorization.m
+@@ -28,6 +28,8 @@
+ #import <AVFoundation/AVFoundation.h>
+ #endif
+ 
++#include <stdlib.h>
++
+ #include "coreaudio_cocoa.h"
+ 
+ #ifdef HAVE_AVFOUNDATION_AVFOUNDATION_H
+@@ -74,27 +76,65 @@
+  *          0 if access was denied
+  *         -1 if requesting permission is unsupported (older macOS)
+  */
+-int CoreAudio_request_capture_authorization(void)
++/* Shared between this function and the completion handler, because the wait is
++ * bounded: if we give up first the handler may still run afterwards, and it must
++ * not write to a stack frame that is already gone.  Last one out frees it. */
++struct capture_auth_request
+ {
+-    __block int ret = -1;
+     dispatch_semaphore_t semaphore;
++    int granted;
++    int refcount;
++};
++
++static void capture_auth_release(struct capture_auth_request *req)
++{
++    if (__sync_sub_and_fetch(&req->refcount, 1) == 0)
++    {
++        dispatch_release(req->semaphore);
++        free(req);
++    }
++}
++
++int CoreAudio_request_capture_authorization(void)
++{
++    struct capture_auth_request *req;
+     NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
++    int ret = -1;
+ 
+     if ([AVCaptureDevice respondsToSelector:@selector(requestAccessForMediaType:completionHandler:)])
+     {
++        if (!(req = calloc(1, sizeof(*req))))
++        {
++            [pool release];
++            return -1;
++        }
++        req->semaphore = dispatch_semaphore_create(0);
++        req->granted   = -1;
++        req->refcount  = 2;   /* this function, and the completion handler */
++
+         [[NSNotificationCenter defaultCenter] postNotificationName:WineWillShowPermissionDialogNotification
+                                                             object:nil];
+-        semaphore = dispatch_semaphore_create(0);
+         [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
+                                  completionHandler:^(BOOL granted){
+-            dispatch_semaphore_signal(semaphore);
+-            ret = granted ? 1 : 0;
++            req->granted = granted ? 1 : 0;
++            dispatch_semaphore_signal(req->semaphore);
++            capture_auth_release(req);
+         }];
+ 
+-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+-        dispatch_release(semaphore);
++        /* Bounded, not DISPATCH_TIME_FOREVER: the permission dialog is shown by
++         * the responsible process, and if it can never be shown -- an unsigned or
++         * ad-hoc signed host, a session with no UI -- an unbounded wait hangs the
++         * caller for the life of the process while it holds the audio client's
++         * lock.  Treat a timeout as "not granted" and let the caller fail cleanly. */
++        if (dispatch_semaphore_wait(req->semaphore,
++                                    dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)))
++            ret = 0;
++        else
++            ret = req->granted;
++
+         [[NSNotificationCenter defaultCenter] postNotificationName:WineDidShowPermissionDialogNotification
+                                                             object:nil];
++        capture_auth_release(req);
+     }
+ 
+     [pool release];

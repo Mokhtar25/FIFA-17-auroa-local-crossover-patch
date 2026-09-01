@@ -1,0 +1,1109 @@
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1106,13 +1106,229 @@
+     if (context->SegCs != cs64_sel) return NULL;
+     return get_cpu_area( IMAGE_FILE_MACHINE_I386 );
+ }
++
+ 
+ 
+ /***********************************************************************
++ *              CTXLOG instrumentation (context structure tracing)
++ *
++ * Unconditional stderr logging of the CONTEXT contents on every
++ * NtGetContextThread / NtSetContextThread.  Instrumentation only:
++ * invisible to the guest process.  The fixed-width formatter and write(2)
++ * avoid stdio and allocator state because these APIs are also used from
++ * signal paths.
++ */
++
++static volatile unsigned int ctxlog_next_event;
++static __thread unsigned int ctxlog_depth;
++static __thread struct
++{
++    HANDLE handle;
++    unsigned int set_event;
++    BOOL active;
++} ctxlog_pending;
++
++C_ASSERT( sizeof(CONTEXT) == 0x4d0 );
++C_ASSERT( offsetof(CONTEXT, ContextFlags) == 0x30 );
++C_ASSERT( offsetof(CONTEXT, MxCsr) == 0x34 );
++C_ASSERT( offsetof(CONTEXT, FltSave) == 0x100 );
++C_ASSERT( sizeof(XSAVE_FORMAT) == 0x200 );
++C_ASSERT( sizeof(CONTEXT_EX) == 0x20 );
++
++struct ctxlog_buf
++{
++    char data[4096];
++    unsigned int len;
++};
++
++/* Signal-safe one-shot line emitter.  NtGetContextThread is reachable from
++ * setup_raise_exception() inside the SIGTRAP/SIGSEGV handlers, so stdio (and
++ * its stderr lock) must not be used here: format into a stack buffer and issue
++ * a single write(2), which also keeps lines from interleaving between threads. */
++static void ctxlog_emit( const char *buf, unsigned int len )
++{
++    while (len > 0)
++    {
++        ssize_t n = write( 2, buf, len );
++        if (n <= 0) break;
++        buf += n;
++        len -= n;
++    }
++}
++
++static void ctxlog_char( struct ctxlog_buf *buf, char ch )
++{
++    if (buf->len < sizeof(buf->data)) buf->data[buf->len++] = ch;
++}
++
++static void ctxlog_str( struct ctxlog_buf *buf, const char *str )
++{
++    while (*str) ctxlog_char( buf, *str++ );
++}
++
++static void ctxlog_hex( struct ctxlog_buf *buf, ULONG64 value, unsigned int digits )
++{
++    static const char hex[] = "0123456789abcdef";
++
++    while (digits) ctxlog_char( buf, hex[(value >> (--digits * 4)) & 0xf] );
++}
++
++static void ctxlog_field( struct ctxlog_buf *buf, const char *name, ULONG64 value, unsigned int digits )
++{
++    ctxlog_char( buf, ' ' );
++    ctxlog_str( buf, name );
++    ctxlog_char( buf, '=' );
++    ctxlog_hex( buf, value, digits );
++}
++
++static ULONG64 ctxlog_hash( const void *ptr, unsigned int size )
++{
++    const unsigned char *bytes = ptr;
++    ULONG64 hash = 0xcbf29ce484222325ULL;
++
++    while (size--)
++    {
++        hash ^= *bytes++;
++        hash *= 0x100000001b3ULL;
++    }
++    return hash;
++}
++
++static void ctxlog_dump_bytes( const char *tag, unsigned int event, const void *ptr,
++                               unsigned int size )
++{
++    const unsigned char *bytes = ptr;
++    unsigned int offset = 0;
++
++    while (offset < size)
++    {
++        struct ctxlog_buf buf = {{0}, 0};
++        unsigned int end = offset + 128;
++
++        if (end > size) end = size;
++        ctxlog_str( &buf, "CTXLOG " );
++        ctxlog_str( &buf, tag );
++        ctxlog_field( &buf, "event", event, 8 );
++        ctxlog_field( &buf, "offset", offset, 8 );
++        ctxlog_str( &buf, " bytes=" );
++        while (offset < end) ctxlog_hex( &buf, bytes[offset++], 2 );
++        ctxlog_char( &buf, '\n' );
++        ctxlog_emit( buf.data, buf.len );
++    }
++}
++
++static void ctxlog_dump( const char *tag, unsigned int event, unsigned int pair,
++                         HANDLE handle, const CONTEXT *context, DWORD requested,
++                         NTSTATUS status )
++{
++    struct ctxlog_buf buf = {{0}, 0};
++    DWORD flags = context ? context->ContextFlags : 0;
++
++    ctxlog_str( &buf, "CTXLOG " );
++    ctxlog_str( &buf, tag );
++    ctxlog_field( &buf, "event", event, 8 );
++    ctxlog_field( &buf, "pair", pair, 8 );
++    ctxlog_field( &buf, "tid", (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread, 8 );
++    ctxlog_field( &buf, "handle", (ULONG_PTR)handle, 16 );
++    ctxlog_field( &buf, "context", (ULONG_PTR)context, 16 );
++    ctxlog_field( &buf, "requested", requested, 8 );
++    ctxlog_field( &buf, "flags", flags, 8 );
++    ctxlog_field( &buf, "groups", flags & 0x5f, 2 );
++    ctxlog_field( &buf, "status", status, 8 );
++
++    if (context && (flags & 0x01))
++    {
++        ctxlog_field( &buf, "rip", context->Rip, 16 );
++        ctxlog_field( &buf, "rsp", context->Rsp, 16 );
++        ctxlog_field( &buf, "eflags", context->EFlags, 8 );
++    }
++    if (context && (flags & 0x02))
++    {
++        ctxlog_field( &buf, "rax", context->Rax, 16 );
++        ctxlog_field( &buf, "rbx", context->Rbx, 16 );
++        ctxlog_field( &buf, "rcx", context->Rcx, 16 );
++        ctxlog_field( &buf, "rdx", context->Rdx, 16 );
++        ctxlog_field( &buf, "rbp", context->Rbp, 16 );
++        ctxlog_field( &buf, "rsi", context->Rsi, 16 );
++        ctxlog_field( &buf, "rdi", context->Rdi, 16 );
++        ctxlog_field( &buf, "r8", context->R8, 16 );
++        ctxlog_field( &buf, "r9", context->R9, 16 );
++        ctxlog_field( &buf, "r10", context->R10, 16 );
++        ctxlog_field( &buf, "r11", context->R11, 16 );
++        ctxlog_field( &buf, "r12", context->R12, 16 );
++        ctxlog_field( &buf, "r13", context->R13, 16 );
++        ctxlog_field( &buf, "r14", context->R14, 16 );
++        ctxlog_field( &buf, "r15", context->R15, 16 );
++    }
++    if (context && (flags & 0x04))
++    {
++        ctxlog_field( &buf, "cs", context->SegCs, 4 );
++        ctxlog_field( &buf, "ds", context->SegDs, 4 );
++        ctxlog_field( &buf, "es", context->SegEs, 4 );
++        ctxlog_field( &buf, "fs", context->SegFs, 4 );
++        ctxlog_field( &buf, "gs", context->SegGs, 4 );
++        ctxlog_field( &buf, "ss", context->SegSs, 4 );
++    }
++    if (context && (flags & 0x08))
++    {
++        ctxlog_field( &buf, "mxcsr", context->MxCsr, 8 );
++        ctxlog_field( &buf, "fp_mxcsr", context->FltSave.MxCsr, 8 );
++        ctxlog_field( &buf, "mxcsr_mask", context->FltSave.MxCsr_Mask, 8 );
++        ctxlog_field( &buf, "fp_hash", ctxlog_hash( &context->FltSave, sizeof(context->FltSave) ), 16 );
++    }
++    if (context && (flags & 0x10))
++    {
++        ctxlog_field( &buf, "dr0", context->Dr0, 16 );
++        ctxlog_field( &buf, "dr1", context->Dr1, 16 );
++        ctxlog_field( &buf, "dr2", context->Dr2, 16 );
++        ctxlog_field( &buf, "dr3", context->Dr3, 16 );
++        ctxlog_field( &buf, "dr6", context->Dr6, 16 );
++        ctxlog_field( &buf, "dr7", context->Dr7, 16 );
++    }
++    ctxlog_field( &buf, "xfeatures", xstate_extended_features, 16 );
++    ctxlog_field( &buf, "xstate_size", xstate_size, 8 );
++    ctxlog_char( &buf, '\n' );
++    ctxlog_emit( buf.data, buf.len );
++
++    if (context && (flags & 0x08)) ctxlog_dump_bytes( "FP", event, &context->FltSave, sizeof(context->FltSave) );
++
++    /* Wine itself dereferences this descriptor only when extended features are
++     * enabled.  Follow that rule so a caller that supplied exactly sizeof(CONTEXT)
++     * cannot make the logger read beyond its buffer on legacy-only Rosetta. */
++    if (context && !status && (flags & 0x40) && xstate_extended_features)
++    {
++        const CONTEXT_EX *context_ex = (const CONTEXT_EX *)(context + 1);
++        LONG offset = context_ex->XState.Offset;
++        DWORD length = context_ex->XState.Length;
++        struct ctxlog_buf xbuf = {{0}, 0};
++
++        ctxlog_str( &xbuf, "CTXLOG XSTATE" );
++        ctxlog_field( &xbuf, "event", event, 8 );
++        ctxlog_field( &xbuf, "all_off", (ULONG)context_ex->All.Offset, 8 );
++        ctxlog_field( &xbuf, "all_len", context_ex->All.Length, 8 );
++        ctxlog_field( &xbuf, "legacy_off", (ULONG)context_ex->Legacy.Offset, 8 );
++        ctxlog_field( &xbuf, "legacy_len", context_ex->Legacy.Length, 8 );
++        ctxlog_field( &xbuf, "xstate_off", (ULONG)offset, 8 );
++        ctxlog_field( &xbuf, "xstate_len", length, 8 );
++        if (length >= sizeof(XSAVE_AREA_HEADER) && length <= xstate_size)
++        {
++            const XSAVE_AREA_HEADER *xs = (const XSAVE_AREA_HEADER *)((const char *)context_ex + offset);
++            ctxlog_field( &xbuf, "mask", xs->Mask, 16 );
++            ctxlog_field( &xbuf, "compaction", xs->CompactionMask, 16 );
++            ctxlog_field( &xbuf, "hash", ctxlog_hash( xs, length ), 16 );
++        }
++        ctxlog_char( &xbuf, '\n' );
++        ctxlog_emit( xbuf.data, xbuf.len );
++        if (length >= sizeof(XSAVE_AREA_HEADER) && length <= xstate_size)
++            ctxlog_dump_bytes( "XBYTES", event, (const char *)context_ex + offset, length );
++    }
++}
++
++/***********************************************************************
+  *              NtSetContextThread  (NTDLL.@)
+  *              ZwSetContextThread  (NTDLL.@)
+  */
+-NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
++static NTSTATUS ctxlog_set_context_thread( HANDLE handle, const CONTEXT *context )
+ {
+     NTSTATUS ret = STATUS_SUCCESS;
+     DWORD flags = context->ContextFlags & ~CONTEXT_AMD64;
+@@ -1212,10 +1428,367 @@
+ 
+ 
+ /***********************************************************************
++ *              CX_DR_PERSIST - software persistence for foreign debug registers
++ *
++ * Measured on this machine: a mach thread_set_state( x86_DEBUG_STATE ) issued
++ * by the (native, non-translated) wineserver against a suspended Rosetta
++ * thread is accepted, and an immediate read-back returns the written values.
++ * The state is dropped once the target thread resumes, so the next
++ * NtGetContextThread reports all zeroes.  server/mach.c's is_rosetta() tests
++ * the wineserver's own process, which is native, so neither CW HACK 22131
++ * path is ever taken here.
++ *
++ * With CX_DR_PERSIST=1 the values written by a successful foreign
++ * NtSetContextThread are remembered per target thread and replayed into a
++ * later foreign NtGetContextThread, so a guest that arms a breakpoint and
++ * re-reads it from a different thread sees its own value.
++ *
++ * This makes the read-back consistent.  It does not make the hardware
++ * breakpoint fire; that remains impossible under Rosetta.  A/B lever only.
++ *
++ * CONTEXT_DEBUG_REGISTERS is (CONTEXT_AMD64 | 0x0010): test the bare 0x10 bit,
++ * never the constant, or every AMD64 context matches.
++ */
++
++#define DRCACHE_MAX 64
++#define DRCACHE_BIT 0x10
++
++static int drcache_enabled = -1;
++static volatile int drcache_lock;
++static unsigned int drcache_count;
++static struct
++{
++    ULONG_PTR tid;
++    DWORD64 dr0, dr1, dr2, dr3, dr6, dr7;
++} drcache[DRCACHE_MAX];
++
++static int drbp_mode(void);
++static void drcache_put( ULONG_PTR tid, DWORD64 dr0, DWORD64 dr1, DWORD64 dr2,
++                         DWORD64 dr3, DWORD64 dr6, DWORD64 dr7 );
++
++static BOOL drcache_on(void)
++{
++    if (drcache_enabled == -1)
++    {
++        const char *val = getenv( "CX_DR_PERSIST" );
++        drcache_enabled = (val && val[0] == '1');
++    }
++    /* Emulated breakpoints need a coherent virtual DR state: the guest's
++     * handler queries its own Dr0/Dr6/Dr7 after the trap and must not see the
++     * empty hardware state. */
++    return drcache_enabled != 0 || drbp_mode() == 2;
++}
++
++static void drcache_acquire(void)
++{
++    while (__atomic_exchange_n( &drcache_lock, 1, __ATOMIC_ACQUIRE )) continue;
++}
++
++static void drcache_release(void)
++{
++    __atomic_store_n( &drcache_lock, 0, __ATOMIC_RELEASE );
++}
++
++/* Key on the target thread id: handles to the same thread are opened, closed
++ * and renumbered between the calls we need to correlate. */
++static ULONG_PTR drcache_tid( HANDLE handle )
++{
++    THREAD_BASIC_INFORMATION info;
++
++    if (NtQueryInformationThread( handle, ThreadBasicInformation, &info, sizeof(info), NULL ))
++        return 0;
++    return (ULONG_PTR)info.ClientId.UniqueThread;
++}
++
++static void drcache_log( const char *tag, unsigned int event, ULONG_PTR tid, const CONTEXT *context )
++{
++    struct ctxlog_buf buf;
++
++    buf.len = 0;
++    ctxlog_str( &buf, "CTXDR " );
++    ctxlog_str( &buf, tag );
++    ctxlog_field( &buf, "event", event, 8 );
++    ctxlog_field( &buf, "tid", tid, 8 );
++    ctxlog_field( &buf, "dr0", context->Dr0, 16 );
++    ctxlog_field( &buf, "dr7", context->Dr7, 16 );
++    ctxlog_char( &buf, '\n' );
++    ctxlog_emit( buf.data, buf.len );
++}
++
++
++/* Dump the bytes a guest just armed an execute breakpoint on.  The watcher
++ * thread and its target are threads of the same process, so the address is
++ * readable from here; NtReadVirtualMemory is used so a bad address returns a
++ * status instead of faulting inside the instrumentation. */
++
++/* CX_DR_TRAP: reachability probe for an armed execute breakpoint.
++ *
++ * Rosetta silently never fires a hardware #DB, so arming Dr0/Dr7 has no
++ * observable effect.  With CX_DR_TRAP=1 the page holding the breakpoint
++ * address has its execute permission removed instead, turning any execution
++ * in that page into a page fault we can see.  One-shot: the first fault is
++ * logged and execute is restored, so the guest continues normally.
++ *
++ * A fault whose RIP equals the armed address proves the guest reaches the
++ * breakpoint and that only the trap delivery is missing.
++ */
++
++static int drbp_enabled = -1;
++static volatile ULONG_PTR drbp_addr;
++static volatile ULONG_PTR drbp_page;
++static volatile int drbp_armed;
++static volatile unsigned int drbp_hits;
++static volatile ULONG_PTR drbp_dr7;
++static volatile ULONG drbp_oldprot;
++
++static int drbp_mode(void)
++{
++    if (drbp_enabled == -1)
++    {
++        const char *val = getenv( "CX_DR_TRAP" );
++        drbp_enabled = val ? val[0] - '0' : 0;
++        if (drbp_enabled < 0 || drbp_enabled > 2) drbp_enabled = 0;
++    }
++    return drbp_enabled;
++}
++
++static BOOL drbp_on(void)
++{
++    return drbp_mode() != 0;
++}
++
++static void drbp_log( const char *tag, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c )
++{
++    struct ctxlog_buf buf;
++
++    buf.len = 0;
++    ctxlog_str( &buf, "CTXBP " );
++    ctxlog_str( &buf, tag );
++    ctxlog_field( &buf, "a", a, 16 );
++    ctxlog_field( &buf, "b", b, 16 );
++    ctxlog_field( &buf, "c", c, 16 );
++    ctxlog_char( &buf, '\n' );
++    ctxlog_emit( buf.data, buf.len );
++}
++
++/* Non-executable counterpart of an executable protection, preserving
++ * read/write/copy-on-write semantics.  The guest reads its own page
++ * protections back through VirtualQuery, so the value it sees afterwards must
++ * be exactly what it was before. */
++static ULONG drbp_strip_exec( ULONG prot )
++{
++    switch (prot & 0xff)
++    {
++    case PAGE_EXECUTE:           return PAGE_NOACCESS;
++    case PAGE_EXECUTE_READ:      return PAGE_READONLY;
++    case PAGE_EXECUTE_READWRITE: return PAGE_READWRITE;
++    case PAGE_EXECUTE_WRITECOPY: return PAGE_WRITECOPY;
++    default:                     return 0;
++    }
++}
++
++static void drbp_arm( DWORD64 addr )
++{
++    void *base = (void *)(ULONG_PTR)(addr & ~(ULONG_PTR)0xfff);
++    void *query = base;
++    SIZE_T size = 0x1000;
++    MEMORY_BASIC_INFORMATION mbi;
++    ULONG old = 0, noexec;
++    NTSTATUS ret;
++
++    if (!addr || drbp_armed) return;
++
++    if (NtQueryVirtualMemory( GetCurrentProcess(), query, MemoryBasicInformation,
++                              &mbi, sizeof(mbi), NULL ))
++        return;
++    if (!(noexec = drbp_strip_exec( mbi.Protect )))
++    {
++        drbp_log( "arm-skip", (ULONG_PTR)addr, mbi.Protect, 0 );
++        return;
++    }
++
++    drbp_addr = (ULONG_PTR)addr;
++    drbp_hits = 0;
++    drbp_page = (ULONG_PTR)base;
++    drbp_oldprot = mbi.Protect;
++    ret = NtProtectVirtualMemory( GetCurrentProcess(), &base, &size, noexec, &old );
++    drbp_log( "arm", (ULONG_PTR)addr, (ULONG_PTR)mbi.Protect, (ULONG_PTR)ret );
++    if (!ret) drbp_armed = 1;
++}
++
++/* Called from segv_handler.
++ * 0 = not ours, 1 = ours, resume the guest, 2 = ours, raise a synthetic #DB. */
++static int drbp_handle_fault( ULONG_PTR fault_addr, ULONG_PTR rip )
++{
++    void *base;
++    SIZE_T size = 0x1000;
++    ULONG old = 0;
++    int deliver;
++
++    if (!drbp_armed) return 0;
++    if ((fault_addr & ~(ULONG_PTR)0xfff) != drbp_page &&
++        (rip & ~(ULONG_PTR)0xfff) != drbp_page) return 0;
++
++    drbp_armed = 0;
++    drbp_hits++;
++    base = (void *)drbp_page;
++    NtProtectVirtualMemory( GetCurrentProcess(), &base, &size, drbp_oldprot, &old );
++
++    deliver = (drbp_mode() == 2 && rip == drbp_addr);
++    if (deliver)
++        drcache_put( (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread,
++                     drbp_addr, 0, 0, 0, 0x1, drbp_dr7 );
++    drbp_log( deliver ? "DELIVER" : (rip == drbp_addr ? "HIT-EXACT" : "hit"), rip, fault_addr, drbp_addr );
++    return deliver ? 2 : 1;
++}
++
++static void drcache_dump_target( unsigned int event, DWORD64 addr )
++{
++    unsigned char code[32];
++    struct ctxlog_buf buf;
++    SIZE_T got = 0;
++    NTSTATUS ret;
++    unsigned int i;
++
++    ret = NtReadVirtualMemory( GetCurrentProcess(), (void *)(ULONG_PTR)addr, code, sizeof(code), &got );
++
++    buf.len = 0;
++    ctxlog_str( &buf, "CTXDR code" );
++    ctxlog_field( &buf, "event", event, 8 );
++    ctxlog_field( &buf, "addr", addr, 16 );
++    ctxlog_field( &buf, "status", ret, 8 );
++    ctxlog_field( &buf, "got", got, 8 );
++    ctxlog_str( &buf, " bytes=" );
++    for (i = 0; i < got; i++) ctxlog_hex( &buf, code[i], 2 );
++    ctxlog_char( &buf, '\n' );
++    ctxlog_emit( buf.data, buf.len );
++}
++
++static void drcache_put( ULONG_PTR tid, DWORD64 dr0, DWORD64 dr1, DWORD64 dr2,
++                         DWORD64 dr3, DWORD64 dr6, DWORD64 dr7 )
++{
++    unsigned int i;
++
++    if (!tid) return;
++    drcache_acquire();
++    for (i = 0; i < drcache_count; i++) if (drcache[i].tid == tid) break;
++    if (i == drcache_count)
++    {
++        if (drcache_count == DRCACHE_MAX)
++        {
++            drcache_release();
++            return;
++        }
++        drcache_count++;
++        drcache[i].tid = tid;
++    }
++    drcache[i].dr0 = dr0;
++    drcache[i].dr1 = dr1;
++    drcache[i].dr2 = dr2;
++    drcache[i].dr3 = dr3;
++    drcache[i].dr6 = dr6;
++    drcache[i].dr7 = dr7;
++    drcache_release();
++}
++
++static void drcache_store( HANDLE handle, unsigned int event, const CONTEXT *context )
++{
++    ULONG_PTR tid = drcache_tid( handle );
++    unsigned int i;
++
++    if (!tid) return;
++    drcache_acquire();
++    for (i = 0; i < drcache_count; i++) if (drcache[i].tid == tid) break;
++    if (i == drcache_count)
++    {
++        if (drcache_count == DRCACHE_MAX)
++        {
++            drcache_release();
++            return;
++        }
++        drcache_count++;
++        drcache[i].tid = tid;
++    }
++    drcache[i].dr0 = context->Dr0;
++    drcache[i].dr1 = context->Dr1;
++    drcache[i].dr2 = context->Dr2;
++    drcache[i].dr3 = context->Dr3;
++    drcache[i].dr6 = context->Dr6;
++    drcache[i].dr7 = context->Dr7;
++    drcache_release();
++    drcache_log( "store", event, tid, context );
++}
++
++static void drcache_apply( HANDLE handle, unsigned int event, CONTEXT *context )
++{
++    ULONG_PTR tid = drcache_tid( handle );
++    unsigned int i;
++    BOOL found = FALSE;
++
++    if (!tid) return;
++    drcache_acquire();
++    for (i = 0; i < drcache_count; i++)
++    {
++        if (drcache[i].tid != tid) continue;
++        context->Dr0 = drcache[i].dr0;
++        context->Dr1 = drcache[i].dr1;
++        context->Dr2 = drcache[i].dr2;
++        context->Dr3 = drcache[i].dr3;
++        context->Dr6 = drcache[i].dr6;
++        context->Dr7 = drcache[i].dr7;
++        found = TRUE;
++        break;
++    }
++    drcache_release();
++    if (found) drcache_log( "apply", event, tid, context );
++}
++
++
++NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
++{
++    NTSTATUS ret;
++    unsigned int event = __atomic_add_fetch( &ctxlog_next_event, 1, __ATOMIC_RELAXED );
++    BOOL top = !ctxlog_depth++;
++    DWORD requested = context ? context->ContextFlags : 0;
++
++    if (!context)
++    {
++        ret = STATUS_ACCESS_VIOLATION;
++        ctxlog_dump( "SET", event, 0, handle, context, requested, ret );
++        ctxlog_depth--;
++        return ret;
++    }
++    ret = ctxlog_set_context_thread( handle, context );
++    ctxlog_dump( "SET", event, 0, handle, context, requested, ret );
++    if (!ret && handle != GetCurrentThread() && (requested & DRCACHE_BIT))
++    {
++        if (context->Dr7 & 0xff)
++        {
++            drcache_dump_target( event, context->Dr0 );
++            if (drbp_on())
++            {
++                drbp_dr7 = (ULONG_PTR)context->Dr7;
++                drbp_arm( context->Dr0 );
++            }
++        }
++        if (drcache_on()) drcache_store( handle, event, context );
++    }
++    if (top && !ret && handle != GetCurrentThread())
++    {
++        ctxlog_pending.handle = handle;
++        ctxlog_pending.set_event = event;
++        ctxlog_pending.active = TRUE;
++    }
++    ctxlog_depth--;
++    return ret;
++}
++
++
++/***********************************************************************
+  *              NtGetContextThread  (NTDLL.@)
+  *              ZwGetContextThread  (NTDLL.@)
+  */
+-NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
++static NTSTATUS ctxlog_get_context_thread( HANDLE handle, CONTEXT *context )
+ {
+     struct syscall_frame *frame = get_syscall_frame();
+     DWORD needed_flags = context->ContextFlags & ~CONTEXT_AMD64;
+@@ -1346,6 +1919,35 @@
+     }
+     set_context_exception_reporting_flags( &context->ContextFlags, CONTEXT_SERVICE_ACTIVE );
+     return STATUS_SUCCESS;
++}
++
++
++NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
++{
++    NTSTATUS ret;
++    unsigned int event = __atomic_add_fetch( &ctxlog_next_event, 1, __ATOMIC_RELAXED );
++    BOOL top = !ctxlog_depth++;
++    DWORD requested = context ? context->ContextFlags : 0;
++    unsigned int pair = 0;
++
++    if (!context)
++    {
++        ret = STATUS_ACCESS_VIOLATION;
++        ctxlog_dump( "GET", event, 0, handle, context, requested, ret );
++        ctxlog_depth--;
++        return ret;
++    }
++    ret = ctxlog_get_context_thread( handle, context );
++    if (!ret && (requested & DRCACHE_BIT) && drcache_on())
++        drcache_apply( handle, event, context );
++    if (top && ctxlog_pending.active && ctxlog_pending.handle == handle)
++    {
++        pair = ctxlog_pending.set_event;
++        ctxlog_pending.active = FALSE;
++    }
++    ctxlog_dump( "GET", event, pair, handle, context, requested, ret );
++    ctxlog_depth--;
++    return ret;
+ }
+ 
+ 
+@@ -2488,7 +3090,44 @@
+ #endif
+     return TRUE;
+ }
++
++
++
++/* One-shot report on the first access violation raised from code that is not
++ * part of any mapped image: tells apart a fault in a module from a fault in
++ * dynamically generated (JIT / protector-VM) code. */
++static volatile int av_reported;
++
++static void drbp_report_av( ULONG_PTR rip, const EXCEPTION_RECORD *rec )
++{
++    MEMORY_BASIC_INFORMATION mbi;
++    unsigned char code[24];
++    struct ctxlog_buf buf;
++    SIZE_T got = 0;
++    unsigned int i;
++
++    if (__atomic_exchange_n( &av_reported, 1, __ATOMIC_ACQ_REL )) return;
++    if (NtQueryVirtualMemory( GetCurrentProcess(), (void *)rip, MemoryBasicInformation,
++                              &mbi, sizeof(mbi), NULL ))
++        return;
+ 
++    buf.len = 0;
++    ctxlog_str( &buf, "CTXAV" );
++    ctxlog_field( &buf, "rip", rip, 16 );
++    ctxlog_field( &buf, "alloc_base", (ULONG_PTR)mbi.AllocationBase, 16 );
++    ctxlog_field( &buf, "region", (ULONG_PTR)mbi.RegionSize, 16 );
++    ctxlog_field( &buf, "prot", mbi.Protect, 8 );
++    ctxlog_field( &buf, "alloc_prot", mbi.AllocationProtect, 8 );
++    ctxlog_field( &buf, "state", mbi.State, 8 );
++    ctxlog_field( &buf, "type", mbi.Type, 8 );
++    ctxlog_field( &buf, "access", rec->ExceptionInformation[0], 8 );
++    ctxlog_field( &buf, "target", rec->ExceptionInformation[1], 16 );
++    ctxlog_str( &buf, " code=" );
++    if (!NtReadVirtualMemory( GetCurrentProcess(), (void *)rip, code, sizeof(code), &got ))
++        for (i = 0; i < got; i++) ctxlog_hex( &buf, code[i], 2 );
++    ctxlog_char( &buf, '\n' );
++    ctxlog_emit( buf.data, buf.len );
++}
+ 
+ /**********************************************************************
+  *		segv_handler
+@@ -2539,6 +3178,28 @@
+         }
+         break;
+     case TRAP_x86_PAGEFLT:  /* Page fault */
++        {
++            int drbp = drbp_handle_fault( (ULONG_PTR)siginfo->si_addr, RIP_sig(ucontext) );
++
++            if (drbp == 1)
++            {
++                leave_handler( ucontext );
++                return;
++            }
++            if (drbp == 2)
++            {
++                /* Present it to the guest exactly as a hardware execute
++                 * breakpoint would arrive: a fault before the instruction,
++                 * with B0 set in Dr6. */
++                rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
++                rec.ExceptionAddress = (void *)RIP_sig(ucontext);
++                rec.NumberParameters = 0;
++                context.c.Dr0 = drbp_addr;
++                context.c.Dr6 = 0x1;
++                context.c.Dr7 = drbp_dr7;
++                break;
++            }
++        }
+         rec.NumberParameters = 2;
+         rec.ExceptionInformation[0] = (ERROR_sig(ucontext) >> 1) & 0x09;
+         rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
+@@ -2582,6 +3243,8 @@
+         break;
+     }
+     if (handle_syscall_fault( ucontext, &rec, &context.c )) return;
++    if (rec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
++        drbp_report_av( RIP_sig(ucontext), &rec );
+     setup_raise_exception( ucontext, &rec, &context );
+ }
+ 
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5259,6 +5259,11 @@
+  *             NtAllocateVirtualMemory   (NTDLL.@)
+  *             ZwAllocateVirtualMemory   (NTDLL.@)
+  */
++#ifdef __APPLE__
++static BOOL smc_flush_on(void);
++static void toggle_executable_pages_for_rosetta( HANDLE process, void *addr, SIZE_T size );
++#endif
++
+ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
+                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
+ {
+@@ -5310,7 +5315,14 @@
+     else
+         limit = 0;
+ 
+-    return allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
++    {
++        NTSTATUS status = allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
++#ifdef __APPLE__
++        if (!status && (protect & 0xf0) && smc_flush_on())
++            toggle_executable_pages_for_rosetta( process, *ret, *size_ptr );
++#endif
++        return status;
++    }
+ }
+ 
+ 
+@@ -6840,6 +6852,29 @@
+  * toggle the executable bit (from inside the target process) on/off for any executable
+  * pages that were modified, to force Rosetta to re-translate it.
+  */
++/* CX_SMC_FLUSH: the same problem, reached a different way.
++ *
++ * A guest that allocates an RWX page, writes code into it with ordinary stores
++ * and jumps straight in never goes through NtWriteVirtualMemory, so CW HACK
++ * 18947's toggle below never runs.  If Rosetta still holds a translation for a
++ * previously freed allocation at the same address, the new code executes as
++ * the old one -- landing mid-instruction and faulting on a wild operand.
++ *
++ * Toggling execute on a freshly allocated executable region forces Rosetta to
++ * drop any cached translation for those addresses.
++ */
++static int smc_flush_enabled = -1;
++
++static BOOL smc_flush_on(void)
++{
++    if (smc_flush_enabled == -1)
++    {
++        const char *val = getenv( "CX_SMC_FLUSH" );
++        smc_flush_enabled = (val && val[0] == '1');
++    }
++    return smc_flush_enabled != 0;
++}
++
+ static void toggle_executable_pages_for_rosetta( HANDLE process, void *addr, SIZE_T size )
+ {
+     MEMORY_BASIC_INFORMATION info;
+--- a/dlls/version/version.c
++++ b/dlls/version/version.c
+@@ -332,4 +332,28 @@
+     HeapFree( GetProcessHeap(), 0, wtmpf );
+     HeapFree( GetProcessHeap(), 0, wcurd );
+     return ret;
++}
++
++/******************************************************************************
++ * GetFileVersionInfoByHandle    [VERSION.@]
++ *
++ * Undocumented. Present in version.dll on every released Windows since Vista,
++ * but absent from Wine, which leaves version.dll exporting 16 entries where
++ * Windows exports 17.
++ *
++ * That gap breaks any proxy/wrapper version.dll -- the common "drop a DLL next
++ * to the .exe and forward every export" pattern. Such a proxy resolves the full
++ * export set of the system copy at load time; one NULL from GetProcAddress and
++ * it rolls its own hooks back. Exporting a failing stub is enough to keep those
++ * wrappers working, since none of them call this entry, they only forward it.
++ *
++ * The real signature is not documented. Four arguments matches the commonly
++ * cited form; on x86-64 the count does not affect the ABI in any case. Fail
++ * loudly rather than guess at behaviour.
++ */
++BOOL WINAPI GetFileVersionInfoByHandle( HANDLE handle, LPCWSTR filename, DWORD len, void *data )
++{
++    FIXME( "(%p %s %lu %p): stub\n", handle, debugstr_w(filename), len, data );
++    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
++    return FALSE;
+ }
+--- a/dlls/version/version.spec
++++ b/dlls/version/version.spec
+@@ -1,4 +1,5 @@
+ @ stdcall -import GetFileVersionInfoA(str long long ptr)
++@ stdcall GetFileVersionInfoByHandle(long wstr long ptr)
+ @ stdcall -import GetFileVersionInfoExA(long str long long ptr)
+ @ stdcall -import GetFileVersionInfoExW(long wstr long long ptr)
+ @ stdcall -import GetFileVersionInfoSizeA(str ptr)
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2080,9 +2080,259 @@
+         RtlLeaveCriticalSection( &loader_section );
+     }
+     return STATUS_SUCCESS;
++}
++
++
++
++/* CXSCAN: replicate the Aurora shim's connect-slot scan.
++ *
++ * The shim locates the IAT slot to hook by scanning a module's WRITABLE
++ * sections for 8-byte-aligned pointers equal to &ws2_32!connect, and it
++ * demands EXACTLY ONE match. Under Wine that check fails and the redirect is
++ * rolled back, so the game talks to the dead EA servers.
++ *
++ * The gate calls no API between resolving connect and reaching its verdict,
++ * so relay tracing cannot show the count. Here we are inside the same process
++ * at the moment it resolves "connect", with the full module list in hand, so
++ * we can just run the same scan and print what it would have seen.
++ *
++ * Enabled with CX_SCAN_CONNECT=1.
++ */
++static int cxscan_enabled = -1;
++
++static BOOL cxscan_on(void)
++{
++    /* Unconditional in this diagnostic build. An env gate was tried first but
++     * CrossOver's wrapper does not propagate arbitrary environment variables
++     * through to the PE side -- the same trap that makes WINEDEBUG useless
++     * there (see HANDOFF.md section 11). Only fires on lookups of "connect",
++     * so the noise is a handful of lines per process. */
++    return TRUE;
+ }
+ 
+ 
++
++/* Print every ws2_32 export whose address appears in the given module. Shows
++ * exactly what the packed Origin emulator has resolved at gate time, and so
++ * whether "connect" is merely late or genuinely never resolved. */
++static void cxscan_resolved_in( HMODULE ws2, const WCHAR *want )
++{
++    PEB_LDR_DATA *ldr = NtCurrentTeb()->Peb->LdrData;
++    LIST_ENTRY *mark = &ldr->InMemoryOrderModuleList, *entry;
++    IMAGE_EXPORT_DIRECTORY *ex;
++    DWORD sz, *names, *funcs;
++    WORD *ords;
++    UINT k;
++
++    if (!(ex = RtlImageDirectoryEntryToData( ws2, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &sz ))) return;
++    names = (DWORD *)((char *)ws2 + ex->AddressOfNames);
++    ords  = (WORD  *)((char *)ws2 + ex->AddressOfNameOrdinals);
++    funcs = (DWORD *)((char *)ws2 + ex->AddressOfFunctions);
++
++    for (entry = mark->Flink; entry != mark; entry = entry->Flink)
++    {
++        LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks );
++        char *base = (char *)mod->DllBase;
++        IMAGE_NT_HEADERS *nt;
++        IMAGE_SECTION_HEADER *sec;
++        UINT i;
++
++        if (!base || !mod->BaseDllName.Buffer) continue;
++        if (wcsicmp( mod->BaseDllName.Buffer, want )) continue;
++        if (!(nt = RtlImageNtHeader( (HMODULE)base ))) continue;
++        sec = IMAGE_FIRST_SECTION( nt );
++        ERR( "CXSCAN resolved ws2_32 exports inside %s:\n", debugstr_w(want) );
++        for (k = 0; k < ex->NumberOfNames; k++)
++        {
++            void *addr = (char *)ws2 + funcs[ords[k]];
++            const char *nm = (const char *)ws2 + names[k];
++            for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
++            {
++                char *p = base + sec[i].VirtualAddress;
++                SIZE_T n = sec[i].Misc.VirtualSize, off;
++                if (!(sec[i].Characteristics & IMAGE_SCN_MEM_READ)) continue;
++                for (off = 0; off + sizeof(void *) <= n; off += sizeof(void *))
++                    if (*(void **)(p + off) == addr)
++                        ERR( "CXSCAN     %-20s at '%.8s'+%08lx\n", nm,
++                             (const char *)sec[i].Name, (DWORD)off );
++            }
++        }
++        ERR( "CXSCAN resolved-list end\n" );
++    }
++}
++
++
++/* Identify the gate's arg1 without guessing. The gate holds it in rsi (a
++ * callee-saved register), so by the time we are inside LdrGetProcedureAddress
++ * the value is saved somewhere on the stack below us. arg1 is a descriptor
++ * {base@0x00, size@0x0c}; scan the stack for any qword that points at such a
++ * struct whose base matches a loaded module and whose size matches that
++ * module's SizeOfImage. That pins the scanned module exactly. */
++static void cxscan_find_arg1( void )
++{
++    PEB_LDR_DATA *ldr = NtCurrentTeb()->Peb->LdrData;
++    LIST_ENTRY *mark = &ldr->InMemoryOrderModuleList, *entry;
++    void **sp;
++    int i;
++
++    sp = (void **)&sp;
++    for (i = 0; i < 1024; i++)
++    {
++        void *cand = sp[i], *base;
++        DWORD size;
++
++        if (!cand || ((ULONG_PTR)cand & 7)) continue;
++        __TRY
++        {
++            base = *(void **)cand;
++            size = *(DWORD *)((char *)cand + 0x0c);
++        }
++        __EXCEPT_ALL
++        {
++            continue;
++        }
++        __ENDTRY
++        if (!base) continue;
++
++        for (entry = mark->Flink; entry != mark; entry = entry->Flink)
++        {
++            LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks );
++            IMAGE_NT_HEADERS *nt;
++            if (mod->DllBase != base) continue;
++            nt = RtlImageNtHeader( (HMODULE)base );
++            ERR( "CXARG1 stack[%d]=%p -> {base=%p size=%08lx} module=%s imagesize=%08lx %s\n",
++                 i, cand, base, size, debugstr_w(mod->BaseDllName.Buffer),
++                 nt ? nt->OptionalHeader.SizeOfImage : 0,
++                 (nt && size == nt->OptionalHeader.SizeOfImage) ? "*** SIZE MATCHES ***" : "" );
++        }
++    }
++}
++
++
++/* Find the gate's cfg (r15). Its +0x71 holds the 8-byte section NAME the gate
++ * demands and +0x7c the Characteristics, with +0x60 the slot offset. A section
++ * name starts with '.', which makes cfg findable on the stack. */
++static void cxscan_find_cfg( void *conn, void *modbase )
++{
++    void **sp = (void **)&sp;
++    int i;
++
++    for (i = 0; i < 1024; i++)
++    {
++        char *cand = (char *)sp[i];
++        char nm[9];
++        DWORD off, chars;
++        void *slotval = NULL;
++
++        if (!cand || ((ULONG_PTR)cand & 7)) continue;
++        __TRY
++        {
++            memcpy( nm, cand + 0x71, 8 );
++            off   = *(DWORD *)(cand + 0x60);
++            chars = *(DWORD *)(cand + 0x7c);
++            if (modbase && off && off < 0x20000000)
++                slotval = *(void **)((char *)modbase + off);
++        }
++        __EXCEPT_ALL
++        {
++            continue;
++        }
++        __ENDTRY
++        nm[8] = 0;
++        if (nm[0] != '.') continue;
++        {
++            /* validate() also requires VirtualQuery(slot).Protect == cfg[0x80],
++             * State == MEM_COMMIT and Type == MEM_IMAGE. Measure all of them. */
++            MEMORY_BASIC_INFORMATION mbi;
++            SIZE_T got = 0;
++            DWORD want_prot = 0;
++
++            __TRY { want_prot = *(DWORD *)(cand + 0x80); } __EXCEPT_ALL { } __ENDTRY
++            memset( &mbi, 0, sizeof(mbi) );
++            if (modbase && off)
++                NtQueryVirtualMemory( GetCurrentProcess(), (char *)modbase + off,
++                                      MemoryBasicInformation, &mbi, sizeof(mbi), &got );
++            ERR( "CXPROT slot=%p State=%08lx Type=%08lx Protect=%08lx AllocProtect=%08lx AllocBase=%p RegionSize=%Ix | cfg_wants_protect=%08lx %s\n",
++                 (char *)modbase + off, mbi.State, mbi.Type, mbi.Protect, mbi.AllocationProtect,
++                 mbi.AllocationBase, mbi.RegionSize, want_prot,
++                 mbi.Protect == want_prot ? "MATCH" : "*** PROTECT MISMATCH ***" );
++        }
++        {
++            /* dump the 8 name bytes raw: the real section name has an embedded
++             * NUL (".data\0m\0"), so any %s print stops early and hides a
++             * mismatch in the trailing bytes that the 8-byte compare sees. */
++            const unsigned char *b = (const unsigned char *)(cand + 0x71);
++            ERR( "CXCFG  cand=%p wants name=%02x%02x%02x%02x%02x%02x%02x%02x ('%s') chars=%08lx slot_off=%08lx slotval=%p %s\n",
++                 cand, b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7], nm, chars, off, slotval,
++                 slotval == conn ? "(slot holds &connect)" : "(slot NOT &connect)" );
++        }
++    }
++}
++
++static void cxscan_report( HMODULE ws2, void *target )
++{
++    PEB_LDR_DATA *ldr = NtCurrentTeb()->Peb->LdrData;
++    LIST_ENTRY *mark = &ldr->InMemoryOrderModuleList, *entry;
++
++    ANSI_STRING ga;
++    void *gai = NULL;
++
++    /* The shim checks a resolver slot (getaddrinfo) before the connect slot, and
++     * the resolver check passes. Counting both per module identifies which module
++     * it is actually scanning: the target is the one holding getaddrinfo. */
++    RtlInitAnsiString( &ga, "getaddrinfo" );
++    LdrGetProcedureAddress( ws2, &ga, 0, &gai );
++
++    ERR( "CXSCAN &connect=%p &getaddrinfo=%p (shim needs exactly 1 hit)\n", target, gai );
++
++    for (entry = mark->Flink; entry != mark; entry = entry->Flink)
++    {
++        LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks );
++        char *base = (char *)mod->DllBase;
++        IMAGE_NT_HEADERS *nt;
++        IMAGE_SECTION_HEADER *sec;
++        LONG64 hits = 0, ghits = 0;
++        UINT i;
++
++        if (!base) continue;
++        nt = RtlImageNtHeader( (HMODULE)base );
++        if (!nt) continue;
++        sec = IMAGE_FIRST_SECTION( nt );
++
++        for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
++        {
++            char *p = base + sec[i].VirtualAddress;
++            SIZE_T n = sec[i].Misc.VirtualSize, off;
++
++            /* the shim tests bit 30 == IMAGE_SCN_MEM_READ, not WRITE */
++            if (!(sec[i].Characteristics & IMAGE_SCN_MEM_READ)) continue;
++            if (n < sizeof(void *)) continue;
++            for (off = 0; off + sizeof(void *) <= n; off += sizeof(void *))
++            {
++                void *v = *(void **)(p + off);
++                if (v != target && !(gai && v == gai)) continue;
++                if (v == target) hits++; else ghits++;
++                /* print the section as the shim sees it in memory: it matches
++                 * the 8-byte name and the characteristics against its config. */
++                ERR( "CXSCAN     %s slot in section name=%02x%02x%02x%02x%02x%02x%02x%02x '%.8s' chars=%08lx rva=%08lx (module %s)\n",
++                     v == target ? "connect    " : "getaddrinfo",
++                     sec[i].Name[0],sec[i].Name[1],sec[i].Name[2],sec[i].Name[3],
++                     sec[i].Name[4],sec[i].Name[5],sec[i].Name[6],sec[i].Name[7],
++                     (const char *)sec[i].Name, (DWORD)sec[i].Characteristics,
++                     (DWORD)(sec[i].VirtualAddress + off), debugstr_w(mod->BaseDllName.Buffer) );
++            }
++        }
++        if (hits || ghits)
++            ERR( "CXSCAN   %-34s base=%p connect=%I64d getaddrinfo=%I64d %s\n",
++                 debugstr_w(mod->BaseDllName.Buffer), base, hits, ghits,
++                 hits == 1 ? "(connect gate PASS)" : "(connect gate FAIL)" );
++    }
++    cxscan_find_arg1();
++    cxscan_find_cfg( target, (void *)0x140000000 );
++    cxscan_resolved_in( ws2, L"stp-origin_emu.dll" );
++    ERR( "CXSCAN end\n" );
++}
++
+ /******************************************************************
+  *		LdrGetProcedureAddress  (NTDLL.@)
+  */
+@@ -2107,6 +2357,8 @@
+         {
+             *address = proc;
+             ret = STATUS_SUCCESS;
++            if (name && name->Buffer && !strcmp( name->Buffer, "connect" ) && cxscan_on())
++                cxscan_report( module, proc );
+         }
+         else
+         {
+@@ -2115,6 +2367,17 @@
+         }
+     }
+ 
++    /* CXSCAN: log every lookup against ws2_32, by name or by ordinal, so an
++     * ordinal-only resolution (UPX resolves by ordinal where it can, and
++     * connect is ws2_32 ordinal 4) is not invisible. */
++    if (wm && wm->ldr.BaseDllName.Buffer && !wcsicmp( wm->ldr.BaseDllName.Buffer, L"ws2_32.dll" ))
++    {
++        if (name && name->Buffer)
++            ERR( "CXWS2 by-name %-20s -> %p (ret=%p)\n", name->Buffer, *address, __builtin_return_address(0) );
++        else
++            ERR( "CXWS2 by-ord  %-20lu -> %p (ret=%p)\n", ord, *address, __builtin_return_address(0) );
++    }
++
+     RtlLeaveCriticalSection( &loader_section );
+     return ret;
+ }

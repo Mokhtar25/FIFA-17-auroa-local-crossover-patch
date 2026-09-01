@@ -1,0 +1,957 @@
+Aurora17 / FIFA 17 on CrossOver 26.3 — CNG and PKCS#12 support in crypt32
+========================================================================
+
+What this is for
+----------------
+.NET 8 does all of its certificate work through CNG. Wine's CNG support is thin
+enough that Aurora17's launcher could neither create its own certificate nor read
+back the one already on disk, and failed with "CryptographicException: Success."
+— which is what .NET prints when a call fails without setting an error code.
+
+Three gaps, each of which only became visible once the one before it was closed:
+
+  1. CertSetCertificateContextProperty ignored property 78,
+     CERT_NCRYPT_KEY_HANDLE_PROP_ID, which is how .NET attaches a freshly
+     generated CNG key to a new certificate.
+  2. PFXExportCertStoreEx was a two-line stub returning FALSE. It is what
+     X509Certificate2.Export(Pfx) calls.
+  3. PFXImportCertStore ignored PKCS12_ALWAYS_CNG_KSP, so a certificate imported
+     by .NET came back with no usable private key.
+
+Full write-up, with the evidence for each: BUGS.md section 13.
+
+Two things worth knowing before reading the diff
+------------------------------------------------
+  * For property 78, pvData IS the handle, not a pointer to it. Wine's
+    neighbouring CERT_KEY_PROV_HANDLE_PROP_ID uses the opposite convention.
+  * Wine's ncrypt records the provider on the key as
+    NCRYPT_PROVIDER_HANDLE_PROPERTY, and .NET frees that handle when it disposes
+    the CngKey. So import_key_cng must NOT free the provider it hands over —
+    doing so crashed the caller with c0000005 inside its own image. See
+    BUGS.md 14.5.
+
+Applying it
+-----------
+Apply AFTER crossover-26.3-fifa17-online.patch, which touches dlls/crypt32/pfx.c
+as well:
+
+    tar xzf crossover-sources-26.3.0.tar.gz
+    cd sources/wine
+    patch -p1 < crossover-26.3-fifa17-rosetta.patch
+    patch -p1 < crossover-26.3-fifa17-online.patch
+    patch -p1 < crossover-26.3-fifa17-audio.patch
+    patch -p1 < crossover-26.3-fifa17-cng.patch
+
+One thing this patch cannot carry
+---------------------------------
+gnutls is compiled out of the CrossOver 26.3 tree: config.h has SONAME_LIBGNUTLS
+undefined, so the whole unix half of crypt32 builds to stubs that return
+STATUS_DLL_NOT_FOUND, which the PE side reports as "call not implemented". That
+is a configure result, not source, so before building:
+
+    # in your build64 directory
+    sed -i '' 's|/\* #undef SONAME_LIBGNUTLS \*/|#define SONAME_LIBGNUTLS "libgnutls.30.dylib"|' \
+        include/config.h
+    ln -s /opt/homebrew/include/gnutls include/gnutls
+
+Only the headers are needed. The library itself is opened by name at runtime, and
+CrossOver 26.3 already ships libgnutls.30.dylib in its lib64 directory.
+
+Then build both halves, and install both:
+
+    arch -x86_64 make -j8 dlls/crypt32/all
+    # x86_64-windows/crypt32.dll  AND  crypt32.so -> lib/wine/x86_64-unix/
+    # a rebuilt .so loses its rpath every time:
+    install_name_tool -add_rpath '@loader_path/../../../lib64' .../x86_64-unix/crypt32.so
+    codesign --force --sign - .../x86_64-unix/crypt32.so
+
+Replacing only the DLL does nothing: the export lives in the unix half.
+
+--- a/include/wincrypt.h
++++ b/include/wincrypt.h
+@@ -1942,6 +1942,9 @@
+ /* Key Specs*/
+ #define AT_KEYEXCHANGE          1
+ #define AT_SIGNATURE            2
++
++/* dwKeySpec value marking a CNG (NCRYPT) key handle rather than a CryptoAPI provider */
++#define CERT_NCRYPT_KEY_SPEC    0xffffffff
+ 
+ /* Provider Types */
+ #define PROV_RSA_FULL             1
+@@ -3466,6 +3469,10 @@
+ #define CRYPT_ACQUIRE_USE_PROV_INFO_FLAG 0x00000002
+ #define CRYPT_ACQUIRE_COMPARE_KEY_FLAG   0x00000004
+ #define CRYPT_ACQUIRE_SILENT_FLAG        0x00000040
++#define CRYPT_ACQUIRE_NCRYPT_KEY_FLAGS_MASK  0x00070000
++#define CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG  0x00010000
++#define CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG 0x00020000
++#define CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG   0x00040000
+ 
+ /* flags for CryptFindCertificateKeyProvInfo */
+ #define CRYPT_FIND_USER_KEYSET_FLAG    0x00000001
+@@ -4002,6 +4009,7 @@
+ #define REPORT_NO_PRIVATE_KEY                 0x00000001
+ #define REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY 0x00000002
+ #define EXPORT_PRIVATE_KEYS                   0x00000004
++#define PKCS12_INCLUDE_EXTENDED_PROPERTIES    0x00000010
+ #define PKCS12_EXPORT_RESERVED_MASK           0xffff0000
+ 
+ #define CRYPT_USERDATA    0x00000001
+--- a/dlls/crypt32/cert.c
++++ b/dlls/crypt32/cert.c
+@@ -29,6 +29,7 @@
+ #include "wincrypt.h"
+ #include "snmp.h"
+ #include "bcrypt.h"
++#include "ncrypt.h"
+ #include "winnls.h"
+ #include "rpc.h"
+ #include "wine/debug.h"
+@@ -655,6 +656,27 @@
+              sizeof(keyContext.hCryptProv));
+         break;
+     }
++    case CERT_NCRYPT_KEY_HANDLE_PROP_ID:
++    {
++        CERT_KEY_CONTEXT keyContext;
++        DWORD size = sizeof(keyContext);
++
++        ret = CertContext_GetProperty(cert,
++         CERT_KEY_CONTEXT_PROP_ID, &keyContext, &size);
++        if (ret)
++        {
++            /* only report a handle that really is a CNG key */
++            if (keyContext.dwKeySpec != CERT_NCRYPT_KEY_SPEC)
++            {
++                SetLastError(CRYPT_E_NOT_FOUND);
++                ret = FALSE;
++            }
++            else
++                ret = CertContext_CopyParam(pvData, pcbData,
++                 &keyContext.hCryptProv, sizeof(keyContext.hCryptProv));
++        }
++        break;
++    }
+     case CERT_KEY_PROV_INFO_PROP_ID:
+         ret = CertContext_GetProperty(cert, dwPropId, pvData, pcbData);
+         if (ret && pvData)
+@@ -828,6 +850,34 @@
+             keyContext.cbSize = sizeof(keyContext);
+             if (pvData)
+                 keyContext.hCryptProv = *(const HCRYPTPROV *)pvData;
++            else
++            {
++                keyContext.hCryptProv = 0;
++                keyContext.dwKeySpec = AT_SIGNATURE;
++            }
++            ret = CertContext_SetProperty(cert, CERT_KEY_CONTEXT_PROP_ID,
++             0, &keyContext);
++            break;
++        }
++        case CERT_NCRYPT_KEY_HANDLE_PROP_ID:
++        {
++            CERT_KEY_CONTEXT keyContext;
++            DWORD size = sizeof(keyContext);
++
++            ret = CertContext_GetProperty(cert, CERT_KEY_CONTEXT_PROP_ID,
++             &keyContext, &size);
++            if (ret && !(dwFlags & CERT_STORE_NO_CRYPT_RELEASE_FLAG) &&
++                keyContext.dwKeySpec == CERT_NCRYPT_KEY_SPEC)
++                NCryptFreeObject(keyContext.hCryptProv);
++            keyContext.cbSize = sizeof(keyContext);
++            if (pvData)
++            {
++                /* Unlike CERT_KEY_PROV_HANDLE_PROP_ID, which takes a pointer to
++                 * the handle, this property carries the NCRYPT_KEY_HANDLE
++                 * itself in pvData. */
++                keyContext.hCryptProv = (HCRYPTPROV)(ULONG_PTR)pvData;
++                keyContext.dwKeySpec = CERT_NCRYPT_KEY_SPEC;
++            }
+             else
+             {
+                 keyContext.hCryptProv = 0;
+--- a/dlls/crypt32/pfx.c
++++ b/dlls/crypt32/pfx.c
+@@ -23,6 +23,14 @@
+ #include "windef.h"
+ #include "winbase.h"
+ #include "wincrypt.h"
++#include "bcrypt.h"
++#include "ncrypt.h"
++
++#ifndef MS_KEY_STORAGE_PROVIDER
++#define MS_KEY_STORAGE_PROVIDER L"Microsoft Software Key Storage Provider"
++#endif
++
++#define RSA_MAGIC_KEY  ('R' | ('S' << 8) | ('A' << 16) | ('2' << 24))
+ #include "snmp.h"
+ #include "crypt32_private.h"
+ 
+@@ -78,6 +86,111 @@
+     return prov;
+ }
+ 
++/* Mirror of bcrypt_blob_to_ms_blob(): turn the MS PRIVATEKEYBLOB the unix side
++ * produces into the CNG blob NCryptImportKey wants.  Components swap from
++ * least-significant-byte-first to most-significant-byte-first. */
++static BYTE *ms_blob_to_bcrypt_blob( const BYTE *src, DWORD src_size, DWORD *size_ret )
++{
++    const BLOBHEADER *hdr = (const BLOBHEADER *)src;
++    const RSAPUBKEY *pub;
++    const BYTE *m, *p1, *p2, *e1, *e2, *coef, *d;
++    BCRYPT_RSAKEY_BLOB *rsa;
++    DWORD bitlen, full, half, size, i, exp_len;
++    BYTE exp[4], *out, *dst;
++
++    if (src_size < sizeof(*hdr) + sizeof(*pub)) return NULL;
++    pub = (const RSAPUBKEY *)(hdr + 1);
++    bitlen = pub->bitlen;
++    full = bitlen / 8;
++    half = bitlen / 16;
++    if (!full || src_size < sizeof(*hdr) + sizeof(*pub) + bitlen * 9 / 16) return NULL;
++
++    exp[0] = (pub->pubexp >> 24) & 0xff;
++    exp[1] = (pub->pubexp >> 16) & 0xff;
++    exp[2] = (pub->pubexp >> 8) & 0xff;
++    exp[3] = pub->pubexp & 0xff;
++    for (exp_len = 0; exp_len < 3 && !exp[exp_len]; exp_len++) ;
++    exp_len = sizeof(exp) - exp_len;
++
++    m    = (const BYTE *)(pub + 1);
++    p1   = m + full;
++    p2   = p1 + half;
++    e1   = p2 + half;
++    e2   = e1 + half;
++    coef = e2 + half;
++    d    = coef + half;
++
++    size = sizeof(*rsa) + exp_len + bitlen * 9 / 16;
++    if (!(out = CryptMemAlloc( size ))) return NULL;
++
++    rsa = (BCRYPT_RSAKEY_BLOB *)out;
++    rsa->Magic       = BCRYPT_RSAFULLPRIVATE_MAGIC;
++    rsa->BitLength   = bitlen;
++    rsa->cbPublicExp = exp_len;
++    rsa->cbModulus   = full;
++    rsa->cbPrime1    = half;
++    rsa->cbPrime2    = half;
++
++    dst = out + sizeof(*rsa);
++    for (i = 0; i < exp_len; i++) *dst++ = exp[sizeof(exp) - exp_len + i];
++    for (i = 0; i < full; i++) *dst++ = m[full - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = p1[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = p2[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = e1[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = e2[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = coef[half - 1 - i];
++    for (i = 0; i < full; i++) *dst++ = d[full - 1 - i];
++
++    *size_ret = size;
++    return out;
++}
++
++/* PKCS12_ALWAYS_CNG_KSP asks for the key to live in a CNG key storage
++ * provider rather than a legacy CryptoAPI container, and to be attached to the
++ * certificate through CERT_NCRYPT_KEY_HANDLE_PROP_ID.  .NET always asks for
++ * this, and without it the imported certificate appears to have no usable key. */
++static NCRYPT_KEY_HANDLE import_key_cng( cert_store_data_t data )
++{
++    struct import_store_key_params params = { data, NULL, NULL };
++    NCRYPT_PROV_HANDLE prov = 0;
++    NCRYPT_KEY_HANDLE key = 0;
++    BYTE *ms = NULL, *cng = NULL;
++    DWORD size = 0, cng_size = 0;
++
++    params.buf_size = &size;
++    if (CRYPT32_CALL( import_store_key, &params ) != STATUS_BUFFER_TOO_SMALL) return 0;
++    if (!(ms = CryptMemAlloc( size ))) return 0;
++    params.buf = ms;
++    if (CRYPT32_CALL( import_store_key, &params )) goto done;
++
++    if (!(cng = ms_blob_to_bcrypt_blob( ms, size, &cng_size ))) goto done;
++
++    if (NCryptOpenStorageProvider( &prov, MS_KEY_STORAGE_PROVIDER, 0 ))
++    {
++        WARN( "NCryptOpenStorageProvider failed\n" );
++        goto done;
++    }
++    if (NCryptImportKey( prov, 0, BCRYPT_RSAFULLPRIVATE_BLOB, NULL, &key, cng, cng_size, 0 ))
++    {
++        WARN( "NCryptImportKey failed\n" );
++        key = 0;
++    }
++
++done:
++    /* Wine's ncrypt records the provider handle on the key as
++     * NCRYPT_PROVIDER_HANDLE_PROPERTY (ncrypt/main.c, create_key_object), and .NET
++     * reads it back into a SafeNCryptProviderHandle that it frees when it disposes
++     * the CngKey.  Freeing it here as well leaves the key holding a pointer to
++     * freed memory, and NCryptFreeObject reads object->type straight from the
++     * handle -- so the caller's own Dispose takes an access violation.  Hand
++     * ownership to the key instead, and release the provider only when there is no
++     * key to own it. */
++    if (prov && !key) NCryptFreeObject( prov );
++    CryptMemFree( cng );
++    CryptMemFree( ms );
++    return key;
++}
++
+ static BOOL set_key_context( const void *ctx, HCRYPTPROV prov )
+ {
+     CERT_KEY_CONTEXT key_ctx;
+@@ -154,6 +267,7 @@
+     DWORD i = 0, size;
+     HCERTSTORE store = NULL;
+     HCRYPTPROV prov = 0;
++    NCRYPT_KEY_HANDLE ncrypt_key = 0;
+     cert_store_data_t data = 0;
+     struct open_cert_store_params open_params = { pfx, password, &data };
+     struct close_cert_store_params close_params;
+@@ -168,15 +282,15 @@
+         FIXME( "flags %08lx not supported\n", flags );
+         return NULL;
+     }
+-    if (flags & PKCS12_ALWAYS_CNG_KSP)
++    if (CRYPT32_CALL( open_cert_store, &open_params )) return NULL;
++
++    if (flags & PKCS12_ALWAYS_CNG_KSP) ncrypt_key = import_key_cng( data );
++    if (!ncrypt_key)
+     {
+-        FIXME( "flag PKCS12_ALWAYS_CNG_KSP ignored\n" );
++        prov = import_key( data, flags );
++        if (!prov) goto error;
+     }
+-    if (CRYPT32_CALL( open_cert_store, &open_params )) return NULL;
+ 
+-    prov = import_key( data, flags );
+-    if (!prov) goto error;
+-
+     if (!(store = CertOpenStore( CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL )))
+     {
+         WARN( "CertOpenStore failed %08lx\n", GetLastError() );
+@@ -199,8 +313,18 @@
+             WARN( "CertCreateContext failed %08lx\n", GetLastError() );
+             goto error;
+         }
+-        if (flags & PKCS12_NO_PERSIST_KEY)
++        if (ncrypt_key)
+         {
++            if (!CertSetCertificateContextProperty( ctx, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0,
++                                                    (const void *)(ULONG_PTR)ncrypt_key ))
++            {
++                WARN( "failed to attach the CNG key %08lx\n", GetLastError() );
++                CertFreeCertificateContext( ctx );
++                goto error;
++            }
++        }
++        else if (flags & PKCS12_NO_PERSIST_KEY)
++        {
+             if (!set_key_context( ctx, prov ))
+             {
+                 WARN( "failed to set context property %08lx\n", GetLastError() );
+@@ -244,11 +368,243 @@
+ BOOL WINAPI PFXExportCertStore( HCERTSTORE store, CRYPT_DATA_BLOB *pfx, const WCHAR *password, DWORD flags )
+ {
+     return PFXExportCertStoreEx( store, pfx, password, NULL, flags );
++}
++
++/* Convert a CNG BCRYPT_RSAFULLPRIVATE_BLOB (big-endian components) into the
++ * MS PRIVATEKEYBLOB layout (little-endian) that the unix side already parses,
++ * so both kinds of key take the same path from here on. */
++static BYTE *bcrypt_blob_to_ms_blob( const BYTE *src, DWORD src_size, DWORD *size_ret )
++{
++    const BCRYPT_RSAKEY_BLOB *rsa = (const BCRYPT_RSAKEY_BLOB *)src;
++    const BYTE *exp, *m, *p1, *p2, *e1, *e2, *coef, *d;
++    DWORD bitlen, full, half, size, i;
++    BLOBHEADER *hdr;
++    RSAPUBKEY *pub;
++    BYTE *out, *dst;
++
++    if (src_size < sizeof(*rsa)) return NULL;
++    if (rsa->Magic != BCRYPT_RSAFULLPRIVATE_MAGIC)
++    {
++        FIXME( "unexpected key blob magic %08lx\n", rsa->Magic );
++        return NULL;
++    }
++
++    bitlen = rsa->BitLength;
++    full = bitlen / 8;
++    half = bitlen / 16;
++    if (rsa->cbModulus != full || rsa->cbPrime1 != half || rsa->cbPrime2 != half) return NULL;
++    if (src_size < sizeof(*rsa) + rsa->cbPublicExp + bitlen * 9 / 16) return NULL;
++
++    exp  = src + sizeof(*rsa);
++    m    = exp + rsa->cbPublicExp;
++    p1   = m + full;
++    p2   = p1 + half;
++    e1   = p2 + half;
++    e2   = e1 + half;
++    coef = e2 + half;
++    d    = coef + half;
++
++    size = sizeof(*hdr) + sizeof(*pub) + bitlen * 9 / 16;   /* m, p, q, e1, e2, coef, d */
++    if (!(out = CryptMemAlloc( size ))) return NULL;
++
++    hdr = (BLOBHEADER *)out;
++    hdr->bType    = PRIVATEKEYBLOB;
++    hdr->bVersion = CUR_BLOB_VERSION;
++    hdr->reserved = 0;
++    hdr->aiKeyAlg = CALG_RSA_KEYX;
++
++    pub = (RSAPUBKEY *)(hdr + 1);
++    pub->magic  = RSA_MAGIC_KEY;
++    pub->bitlen = bitlen;
++    pub->pubexp = 0;
++    for (i = 0; i < rsa->cbPublicExp && i < sizeof(pub->pubexp); i++)
++        pub->pubexp = (pub->pubexp << 8) | exp[i];
++
++    /* every component is stored most-significant byte first by CNG and
++     * least-significant byte first by CryptoAPI */
++    dst = (BYTE *)(pub + 1);
++    for (i = 0; i < full; i++) *dst++ = m[full - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = p1[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = p2[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = e1[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = e2[half - 1 - i];
++    for (i = 0; i < half; i++) *dst++ = coef[half - 1 - i];
++    for (i = 0; i < full; i++) *dst++ = d[full - 1 - i];
++
++    *size_ret = size;
++    return out;
+ }
+ 
++/* Pull the private key out of a certificate as an MS PRIVATEKEYBLOB.  A
++ * certificate minted through CNG carries an NCrypt key handle rather than a
++ * CryptoAPI provider, so both have to be handled. */
++static BYTE *export_private_key( PCCERT_CONTEXT cert, DWORD *size_ret )
++{
++    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE prov = 0;
++    DWORD key_spec = 0, size = 0;
++    BOOL free_prov = FALSE;
++    HCRYPTKEY key = 0;
++    BYTE *blob = NULL;
++
++    /* CACHE_FLAG makes it consult CERT_KEY_CONTEXT, which is where a key
++     * attached through CERT_NCRYPT_KEY_HANDLE_PROP_ID lives; without it a
++     * freshly minted CNG certificate looks as though it has no key at all. */
++    if (!CryptAcquireCertificatePrivateKey( cert, CRYPT_ACQUIRE_CACHE_FLAG | CRYPT_ACQUIRE_SILENT_FLAG |
++                                            CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG, NULL, &prov, &key_spec,
++                                            &free_prov ))
++    {
++        TRACE( "no private key on this certificate: %08lx\n", GetLastError() );
++        return NULL;
++    }
++
++    if (key_spec == CERT_NCRYPT_KEY_SPEC)
++    {
++        SECURITY_STATUS status;
++        BYTE *cng = NULL;
++
++        status = NCryptExportKey( prov, 0, BCRYPT_RSAFULLPRIVATE_BLOB, NULL, NULL, 0, &size, 0 );
++        if (status || !size)
++        {
++            WARN( "NCryptExportKey sizing failed %08lx\n", status );
++            goto done;
++        }
++        if (!(cng = CryptMemAlloc( size ))) goto done;
++        status = NCryptExportKey( prov, 0, BCRYPT_RSAFULLPRIVATE_BLOB, NULL, cng, size, &size, 0 );
++        if (status)
++        {
++            WARN( "NCryptExportKey failed %08lx\n", status );
++            CryptMemFree( cng );
++            goto done;
++        }
++        blob = bcrypt_blob_to_ms_blob( cng, size, size_ret );
++        CryptMemFree( cng );
++        goto done;
++    }
++
++    if (!CryptGetUserKey( prov, key_spec ? key_spec : AT_KEYEXCHANGE, &key ))
++    {
++        WARN( "CryptGetUserKey failed %08lx\n", GetLastError() );
++        goto done;
++    }
++    if (!CryptExportKey( key, 0, PRIVATEKEYBLOB, 0, NULL, &size ) || !size)
++    {
++        WARN( "CryptExportKey sizing failed %08lx\n", GetLastError() );
++        goto done;
++    }
++    if (!(blob = CryptMemAlloc( size ))) goto done;
++    if (!CryptExportKey( key, 0, PRIVATEKEYBLOB, 0, blob, &size ))
++    {
++        WARN( "CryptExportKey failed %08lx\n", GetLastError() );
++        CryptMemFree( blob );
++        blob = NULL;
++        goto done;
++    }
++    *size_ret = size;
++
++done:
++    if (key) CryptDestroyKey( key );
++    if (free_prov && key_spec != CERT_NCRYPT_KEY_SPEC) CryptReleaseContext( prov, 0 );
++    return blob;
++}
++
+ BOOL WINAPI PFXExportCertStoreEx( HCERTSTORE store, CRYPT_DATA_BLOB *pfx, const WCHAR *password, void *reserved,
+                                   DWORD flags )
+ {
+-    FIXME( "(%p, %p, %p, %p, %08lx): stub\n", store, pfx, password, reserved, flags );
+-    return FALSE;
++    PCCERT_CONTEXT cert = NULL;
++    BYTE *certs = NULL, *ptr, *key = NULL;
++    DWORD certs_size = sizeof(DWORD), count = 0, key_size = 0, size;
++    struct export_cert_store_params params;
++    BOOL ret = FALSE;
++    NTSTATUS status;
++
++    TRACE( "(%p, %p, %p, %p, %08lx)\n", store, pfx, password, reserved, flags );
++
++    if (!store || !pfx)
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return FALSE;
++    }
++    if (flags & ~(EXPORT_PRIVATE_KEYS|REPORT_NO_PRIVATE_KEY|REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY|
++                  PKCS12_INCLUDE_EXTENDED_PROPERTIES))
++        FIXME( "flags %08lx partially supported\n", flags );
++
++    /* measure first */
++    while ((cert = CertEnumCertificatesInStore( store, cert )))
++    {
++        certs_size += sizeof(DWORD) + cert->cbCertEncoded;
++        count++;
++    }
++    if (!count)
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return FALSE;
++    }
++
++    if (!(certs = CryptMemAlloc( certs_size )))
++    {
++        SetLastError( ERROR_OUTOFMEMORY );
++        return FALSE;
++    }
++
++    ptr = certs;
++    *(DWORD *)ptr = count;
++    ptr += sizeof(DWORD);
++
++    cert = NULL;
++    while ((cert = CertEnumCertificatesInStore( store, cert )))
++    {
++        *(DWORD *)ptr = cert->cbCertEncoded;
++        ptr += sizeof(DWORD);
++        memcpy( ptr, cert->pbCertEncoded, cert->cbCertEncoded );
++        ptr += cert->cbCertEncoded;
++
++        if ((flags & EXPORT_PRIVATE_KEYS) && !key)
++            key = export_private_key( cert, &key_size );
++    }
++
++    if ((flags & EXPORT_PRIVATE_KEYS) && !key)
++    {
++        if (flags & REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY)
++        {
++            WARN( "no exportable private key in the store\n" );
++            SetLastError( CRYPT_E_NOT_FOUND );
++            CryptMemFree( certs );
++            return FALSE;
++        }
++        WARN( "exporting certificates without a private key\n" );
++    }
++
++    size = pfx->pbData ? pfx->cbData : 0;
++    params.certs      = certs;
++    params.certs_size = certs_size;
++    params.key        = key;
++    params.key_size   = key_size;
++    params.password   = password;
++    params.buf        = pfx->pbData;
++    params.buf_size   = &size;
++
++    status = CRYPT32_CALL( export_cert_store, &params );
++    if (status == STATUS_BUFFER_TOO_SMALL)
++    {
++        pfx->cbData = size;
++        /* Windows reports the required size through cbData with pbData NULL,
++         * and fails with ERROR_MORE_DATA when a buffer was too small. */
++        if (!pfx->pbData) ret = TRUE;
++        else SetLastError( ERROR_MORE_DATA );
++    }
++    else if (!status)
++    {
++        pfx->cbData = size;
++        ret = TRUE;
++    }
++    else
++    {
++        WARN( "export failed %08lx\n", status );
++        SetLastError( status == STATUS_DLL_NOT_FOUND ? ERROR_CALL_NOT_IMPLEMENTED
++                                                     : ERROR_INVALID_PARAMETER );
++    }
++
++    CryptMemFree( key );
++    CryptMemFree( certs );
++    return ret;
+ }
+--- a/dlls/crypt32/unixlib.c
++++ b/dlls/crypt32/unixlib.c
+@@ -71,6 +71,23 @@
+ MAKE_FUNCPTR(gnutls_pkcs12_init);
+ MAKE_FUNCPTR(gnutls_pkcs12_simple_parse);
+ MAKE_FUNCPTR(gnutls_x509_crt_export);
++MAKE_FUNCPTR(gnutls_pkcs12_bag_init);
++MAKE_FUNCPTR(gnutls_pkcs12_bag_deinit);
++MAKE_FUNCPTR(gnutls_pkcs12_bag_set_crt);
++MAKE_FUNCPTR(gnutls_pkcs12_bag_set_data);
++MAKE_FUNCPTR(gnutls_pkcs12_bag_set_key_id);
++MAKE_FUNCPTR(gnutls_x509_crt_get_key_id);
++MAKE_FUNCPTR(gnutls_pkcs12_bag_encrypt);
++MAKE_FUNCPTR(gnutls_pkcs12_set_bag);
++MAKE_FUNCPTR(gnutls_pkcs12_generate_mac);
++MAKE_FUNCPTR(gnutls_pkcs12_export);
++MAKE_FUNCPTR(gnutls_x509_crt_init);
++MAKE_FUNCPTR(gnutls_x509_crt_deinit);
++MAKE_FUNCPTR(gnutls_x509_crt_import);
++MAKE_FUNCPTR(gnutls_x509_privkey_init);
++MAKE_FUNCPTR(gnutls_x509_privkey_deinit);
++MAKE_FUNCPTR(gnutls_x509_privkey_import_rsa_raw);
++MAKE_FUNCPTR(gnutls_x509_privkey_export_pkcs8);
+ MAKE_FUNCPTR(gnutls_x509_privkey_export_rsa_raw2);
+ MAKE_FUNCPTR(gnutls_x509_privkey_get_pk_algorithm2);
+ #undef MAKE_FUNCPTR
+@@ -131,6 +148,23 @@
+     LOAD_FUNCPTR(gnutls_pkcs12_init)
+     LOAD_FUNCPTR(gnutls_pkcs12_simple_parse)
+     LOAD_FUNCPTR(gnutls_x509_crt_export)
++    LOAD_FUNCPTR(gnutls_pkcs12_bag_init)
++    LOAD_FUNCPTR(gnutls_pkcs12_bag_deinit)
++    LOAD_FUNCPTR(gnutls_pkcs12_bag_set_crt)
++    LOAD_FUNCPTR(gnutls_pkcs12_bag_set_data)
++    LOAD_FUNCPTR(gnutls_pkcs12_bag_set_key_id)
++    LOAD_FUNCPTR(gnutls_x509_crt_get_key_id)
++    LOAD_FUNCPTR(gnutls_pkcs12_bag_encrypt)
++    LOAD_FUNCPTR(gnutls_pkcs12_set_bag)
++    LOAD_FUNCPTR(gnutls_pkcs12_generate_mac)
++    LOAD_FUNCPTR(gnutls_pkcs12_export)
++    LOAD_FUNCPTR(gnutls_x509_crt_init)
++    LOAD_FUNCPTR(gnutls_x509_crt_deinit)
++    LOAD_FUNCPTR(gnutls_x509_crt_import)
++    LOAD_FUNCPTR(gnutls_x509_privkey_init)
++    LOAD_FUNCPTR(gnutls_x509_privkey_deinit)
++    LOAD_FUNCPTR(gnutls_x509_privkey_import_rsa_raw)
++    LOAD_FUNCPTR(gnutls_x509_privkey_export_pkcs8)
+     LOAD_FUNCPTR(gnutls_x509_privkey_export_rsa_raw2)
+     LOAD_FUNCPTR(gnutls_x509_privkey_get_pk_algorithm2)
+ #undef LOAD_FUNCPTR
+@@ -359,8 +393,209 @@
+         return STATUS_INVALID_PARAMETER;
+ 
+     return STATUS_SUCCESS;
++}
++
++/* Reverse a little-endian MS key component into a big-endian gnutls datum. */
++static int ms_component_to_datum( const BYTE *src, unsigned int len, gnutls_datum_t *out )
++{
++    unsigned int i;
++
++    if (!(out->data = malloc( len ))) return -1;
++    out->size = len;
++    for (i = 0; i < len; i++) out->data[i] = src[len - 1 - i];
++    return 0;
++}
++
++/* Rebuild a gnutls private key from the MS PRIVATEKEYBLOB laid out by
++ * import_store_key() above: BLOBHEADER, RSAPUBKEY, then modulus, P, Q, e1, e2,
++ * u and d, each little-endian. */
++static int privkey_from_ms_blob( const void *blob, DWORD size, gnutls_x509_privkey_t *key_ret )
++{
++    const BLOBHEADER *hdr = blob;
++    const RSAPUBKEY *rsakey;
++    const BYTE *src;
++    gnutls_datum_t m = {0}, e = {0}, d = {0}, p = {0}, q = {0}, u = {0};
++    BYTE exp[4];
++    unsigned int bitlen, half, full;
++    int ret = -1;
++
++    if (size < sizeof(*hdr) + sizeof(*rsakey)) return -1;
++    if (hdr->bType != PRIVATEKEYBLOB) return -1;
++
++    rsakey = (const RSAPUBKEY *)(hdr + 1);
++    if (rsakey->magic != RSA_MAGIC_KEY) return -1;
++
++    bitlen = rsakey->bitlen;
++    full = bitlen / 8;
++    half = bitlen / 16;
++    if (!full || size < sizeof(*hdr) + sizeof(*rsakey) + bitlen * 9 / 16) return -1;
++
++    exp[0] = rsakey->pubexp & 0xff;
++    exp[1] = (rsakey->pubexp >> 8) & 0xff;
++    exp[2] = (rsakey->pubexp >> 16) & 0xff;
++    exp[3] = (rsakey->pubexp >> 24) & 0xff;
++
++    src = (const BYTE *)(rsakey + 1);
++    if (ms_component_to_datum( src, full, &m )) goto done; src += full;
++    if (ms_component_to_datum( src, half, &p )) goto done; src += half;
++    if (ms_component_to_datum( src, half, &q )) goto done; src += half;
++    src += half;   /* exponent1 - gnutls recomputes it */
++    src += half;   /* exponent2 - likewise */
++    if (ms_component_to_datum( src, half, &u )) goto done; src += half;
++    if (ms_component_to_datum( src, full, &d )) goto done;
++    if (ms_component_to_datum( exp, sizeof(exp), &e )) goto done;
++
++    if ((ret = pgnutls_x509_privkey_init( key_ret )) < 0) goto done;
++
++    /* gnutls wants u = p^-1 mod q; MS stores q^-1 mod p, so swap p and q. */
++    if ((ret = pgnutls_x509_privkey_import_rsa_raw( *key_ret, &m, &e, &d, &q, &p, &u )) < 0)
++    {
++        pgnutls_x509_privkey_deinit( *key_ret );
++        *key_ret = NULL;
++    }
++
++done:
++    free( m.data );
++    free( e.data );
++    free( d.data );
++    free( p.data );
++    free( q.data );
++    free( u.data );
++    return ret;
+ }
+ 
++static NTSTATUS export_cert_store( void *args )
++{
++    struct export_cert_store_params *params = args;
++    gnutls_pkcs12_t p12 = NULL;
++    gnutls_x509_privkey_t key = NULL;
++    gnutls_pkcs12_bag_t bag = NULL;
++    const BYTE *ptr = params->certs, *end;
++    unsigned char key_id[32];
++    gnutls_datum_t key_id_data = { key_id, 0 };
++    char *pwd = NULL;
++    DWORD count, i;
++    size_t size;
++    NTSTATUS status = STATUS_INVALID_PARAMETER;
++    int ret;
++
++    if (!libgnutls_handle) return STATUS_DLL_NOT_FOUND;
++    if (!params->certs || params->certs_size < sizeof(DWORD)) return STATUS_INVALID_PARAMETER;
++    if (params->password && !(pwd = password_to_ascii( params->password ))) return STATUS_NO_MEMORY;
++    if (!pwd && !(pwd = strdup( "" ))) return STATUS_NO_MEMORY;
++
++    end = (const BYTE *)params->certs + params->certs_size;
++    count = *(const DWORD *)ptr;
++    ptr += sizeof(DWORD);
++
++    if ((ret = pgnutls_pkcs12_init( &p12 )) < 0) goto done;
++
++    for (i = 0; i < count; i++)
++    {
++        gnutls_x509_crt_t crt;
++        gnutls_datum_t der;
++        DWORD der_size;
++
++        if (ptr + sizeof(DWORD) > end) goto done;
++        der_size = *(const DWORD *)ptr;
++        ptr += sizeof(DWORD);
++        if (ptr + der_size > end) goto done;
++
++        der.data = (unsigned char *)ptr;
++        der.size = der_size;
++        ptr += der_size;
++
++        if ((ret = pgnutls_x509_crt_init( &crt )) < 0) goto done;
++        if ((ret = pgnutls_x509_crt_import( crt, &der, GNUTLS_X509_FMT_DER )) < 0)
++        {
++            pgnutls_x509_crt_deinit( crt );
++            goto done;
++        }
++
++        if ((ret = pgnutls_pkcs12_bag_init( &bag )) < 0)
++        {
++            pgnutls_x509_crt_deinit( crt );
++            goto done;
++        }
++        ret = pgnutls_pkcs12_bag_set_crt( bag, crt );
++        if (ret >= 0 && !key_id_data.size)
++        {
++            /* PKCS#12 pairs a certificate with its private key by giving both
++             * bags the same localKeyId; without it the key is imported but
++             * never associated with the certificate. */
++            size_t id_size = sizeof(key_id);
++            if (pgnutls_x509_crt_get_key_id( crt, 0, key_id, &id_size ) >= 0)
++            {
++                key_id_data.size = id_size;
++                pgnutls_pkcs12_bag_set_key_id( bag, ret, &key_id_data );
++            }
++        }
++        pgnutls_x509_crt_deinit( crt );
++        if (ret < 0) goto done;
++
++        if ((ret = pgnutls_pkcs12_bag_encrypt( bag, pwd, GNUTLS_PKCS_USE_PKCS12_3DES )) < 0) goto done;
++        if ((ret = pgnutls_pkcs12_set_bag( p12, bag )) < 0) goto done;
++        pgnutls_pkcs12_bag_deinit( bag );
++        bag = NULL;
++    }
++
++    if (params->key && params->key_size)
++    {
++        gnutls_datum_t pkcs8 = {0};
++        size_t pkcs8_size = 0;
++
++        if ((ret = privkey_from_ms_blob( params->key, params->key_size, &key )) < 0) goto done;
++
++        pgnutls_x509_privkey_export_pkcs8( key, GNUTLS_X509_FMT_DER, pwd,
++                                           GNUTLS_PKCS_USE_PKCS12_3DES, NULL, &pkcs8_size );
++        if (!pkcs8_size) goto done;
++        if (!(pkcs8.data = malloc( pkcs8_size ))) { status = STATUS_NO_MEMORY; goto done; }
++        pkcs8.size = pkcs8_size;
++        if ((ret = pgnutls_x509_privkey_export_pkcs8( key, GNUTLS_X509_FMT_DER, pwd,
++                                                      GNUTLS_PKCS_USE_PKCS12_3DES,
++                                                      pkcs8.data, &pkcs8_size )) < 0)
++        {
++            free( pkcs8.data );
++            goto done;
++        }
++        pkcs8.size = pkcs8_size;
++
++        if ((ret = pgnutls_pkcs12_bag_init( &bag )) < 0) { free( pkcs8.data ); goto done; }
++        ret = pgnutls_pkcs12_bag_set_data( bag, GNUTLS_BAG_PKCS8_ENCRYPTED_KEY, &pkcs8 );
++        free( pkcs8.data );
++        if (ret < 0) goto done;
++        if (key_id_data.size) pgnutls_pkcs12_bag_set_key_id( bag, ret, &key_id_data );
++        if ((ret = pgnutls_pkcs12_set_bag( p12, bag )) < 0) goto done;
++        pgnutls_pkcs12_bag_deinit( bag );
++        bag = NULL;
++    }
++
++    if ((ret = pgnutls_pkcs12_generate_mac( p12, pwd )) < 0) goto done;
++
++    size = 0;
++    pgnutls_pkcs12_export( p12, GNUTLS_X509_FMT_DER, NULL, &size );
++    if (!size) goto done;
++
++    if (!params->buf || *params->buf_size < size)
++    {
++        *params->buf_size = size;
++        status = STATUS_BUFFER_TOO_SMALL;
++        goto done;
++    }
++
++    if ((ret = pgnutls_pkcs12_export( p12, GNUTLS_X509_FMT_DER, params->buf, &size )) < 0) goto done;
++    *params->buf_size = size;
++    status = STATUS_SUCCESS;
++
++done:
++    if (ret < 0 && status == STATUS_INVALID_PARAMETER) pgnutls_perror( ret );
++    if (bag) pgnutls_pkcs12_bag_deinit( bag );
++    if (key) pgnutls_x509_privkey_deinit( key );
++    if (p12) pgnutls_pkcs12_deinit( p12 );
++    free( pwd );
++    return status;
++}
++
+ static NTSTATUS close_cert_store( void *args )
+ {
+     struct close_cert_store_params *params = args;
+@@ -382,6 +617,7 @@
+ static NTSTATUS import_store_key( void *args ) { return STATUS_DLL_NOT_FOUND; }
+ static NTSTATUS import_store_cert( void *args ) { return STATUS_DLL_NOT_FOUND; }
+ static NTSTATUS close_cert_store( void *args ) { return STATUS_DLL_NOT_FOUND; }
++static NTSTATUS export_cert_store( void *args ) { return STATUS_DLL_NOT_FOUND; }
+ 
+ #endif /* SONAME_LIBGNUTLS */
+ 
+@@ -712,6 +948,7 @@
+     import_store_key,
+     import_store_cert,
+     close_cert_store,
++    export_cert_store,
+     enum_root_certs,
+ };
+ 
+@@ -765,6 +1002,33 @@
+     };
+ 
+     return import_store_key( &params );
++}
++
++static NTSTATUS wow64_export_cert_store( void *args )
++{
++    struct
++    {
++        PTR32 certs;
++        DWORD certs_size;
++        PTR32 key;
++        DWORD key_size;
++        PTR32 password;
++        PTR32 buf;
++        PTR32 buf_size;
++    } const *params32 = args;
++
++    struct export_cert_store_params params =
++    {
++        ULongToPtr( params32->certs ),
++        params32->certs_size,
++        ULongToPtr( params32->key ),
++        params32->key_size,
++        ULongToPtr( params32->password ),
++        ULongToPtr( params32->buf ),
++        ULongToPtr( params32->buf_size )
++    };
++
++    return export_cert_store( &params );
+ }
+ 
+ static NTSTATUS wow64_import_store_cert( void *args )
+@@ -815,6 +1079,7 @@
+     wow64_import_store_key,
+     wow64_import_store_cert,
+     close_cert_store,
++    wow64_export_cert_store,
+     wow64_enum_root_certs,
+ };
+ 
+--- a/dlls/crypt32/crypt32_private.h
++++ b/dlls/crypt32/crypt32_private.h
+@@ -503,6 +503,19 @@
+ struct close_cert_store_params
+ {
+     cert_store_data_t data;
++};
++
++/* certs is: DWORD count, then count x (DWORD size, size bytes of DER).
++ * key is an MS PRIVATEKEYBLOB, or NULL to export certificates only. */
++struct export_cert_store_params
++{
++    const void  *certs;
++    DWORD        certs_size;
++    const void  *key;
++    DWORD        key_size;
++    const WCHAR *password;
++    void        *buf;
++    DWORD       *buf_size;
+ };
+ 
+ struct enum_root_certs_params
+@@ -520,6 +533,7 @@
+     unix_import_store_key,
+     unix_import_store_cert,
+     unix_close_cert_store,
++    unix_export_cert_store,
+     unix_enum_root_certs,
+     unix_funcs_count,
+ };
+--- a/dlls/crypt32/Makefile.in
++++ b/dlls/crypt32/Makefile.in
+@@ -2,7 +2,7 @@
+ MODULE    = crypt32.dll
+ UNIXLIB   = crypt32.so
+ IMPORTLIB = crypt32
+-IMPORTS   = user32 advapi32 bcrypt
++IMPORTS   = user32 advapi32 bcrypt ncrypt
+ DELAYIMPORTS = cryptnet
+ UNIX_LIBS    = $(SECURITY_LIBS)
+ UNIX_CFLAGS  = $(GNUTLS_CFLAGS)
