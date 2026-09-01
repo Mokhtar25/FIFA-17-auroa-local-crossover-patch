@@ -26,7 +26,7 @@ do not run the *same* bottle in both at the same time.
 | A Mac with Apple silicon | M1 or newer. The installer checks, and stops on an Intel Mac |
 | **macOS 14 or newer** | built and tested on 15.7.8 |
 | **CrossOver 26.3** | exactly — not 26.2, not 26.4. See *Why the version matters* below |
-| Your own copy of FIFA 17 | retail build `17.0.3175939.0`, the only one supported |
+| Your own copy of FIFA 17 | build `17.0.3175939.0`, the only one supported |
 | Your own copy of Aurora17 | with its bottle already set up |
 
 None of those three are included here, and none of them can be shared.
