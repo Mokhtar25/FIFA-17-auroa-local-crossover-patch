@@ -23,8 +23,9 @@ do not run the *same* bottle in both at the same time.
 
 | | |
 |---|---|
-| A Mac with Apple silicon | M1 or newer |
-| **CrossOver 26.3** | not 26.2, not 26.4 — see *Why the version matters* below |
+| A Mac with Apple silicon | M1 or newer. The installer checks, and stops on an Intel Mac |
+| **macOS 14 or newer** | built and tested on 15.7.8 |
+| **CrossOver 26.3** | exactly — not 26.2, not 26.4. See *Why the version matters* below |
 | Your own copy of FIFA 17 | retail build `17.0.3175939.0`, the only one supported |
 | Your own copy of Aurora17 | with its bottle already set up |
 
@@ -96,6 +97,12 @@ If CrossOver is somewhere unusual and it cannot find it, tell it where:
 ./setup.sh /path/to/CrossOver.app
 ```
 
+To check an install at any time — it changes nothing:
+
+```
+./setup.sh --verify
+```
+
 To undo everything later, double-click **Uninstall.command**.
 
 ---
@@ -151,10 +158,15 @@ Two of the files need a line telling them where to find their neighbours. Paste
 these into Terminal, correcting the path if your CrossOver is elsewhere:
 
 ```
-W=/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix
+APP=/Applications/CrossOver-FIFA.app
+W="$APP/Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix"
 install_name_tool -add_rpath '@loader_path/../../../lib64' "$W/ntdll.so"
 install_name_tool -add_rpath '@loader_path/../../../lib64' "$W/crypt32.so"
 ```
+
+Every command from here on uses that same `$APP`. **It must be the copy.** If
+you point these at your real CrossOver you change the app all your other bottles
+run in, and you will hit the App Management wall as well.
 
 Skip either if it says the path is already there — that is fine, not an error.
 
@@ -167,27 +179,38 @@ Replacing files inside an app breaks its signature, so it has to be signed
 again. First save the permissions CrossOver came with:
 
 ```
-codesign -d --entitlements /tmp/cx.plist --xml /Applications/CrossOver.app
+codesign -d --entitlements /tmp/cx.plist --xml "$APP"
 ```
 
-Then sign the two changed Mac files, and the app itself with those permissions
-put back:
+Now add one permission to that file. Without it the app will not open at all:
 
 ```
-W=/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix
+/usr/libexec/PlistBuddy \
+  -c 'Add :com.apple.security.cs.disable-library-validation bool true' \
+  /tmp/cx.plist
+```
+
+Then sign the three changed Mac files, and the app itself with that file:
+
+```
 codesign --force --sign - "$W/ntdll.so" "$W/winecoreaudio.so" "$W/crypt32.so"
 
-codesign --force --sign - -o runtime --entitlements /tmp/cx.plist \
-  /Applications/CrossOver.app
+codesign --force --sign - -o runtime --entitlements /tmp/cx.plist "$APP"
+codesign --verify --deep --strict "$APP"
 ```
 
-**The permissions part matters.** If you sign without them, CrossOver silently
-loses its microphone and camera permissions. We made that mistake and it cost
-real debugging time.
+The last line must print nothing. If it complains, the app will not open.
+
+**Both parts matter.** Sign without the saved permissions and CrossOver silently
+loses its microphone and camera access. Sign without the added one and the app
+dies at launch with no window at all, naming `Sparkle.framework` and "different
+Team IDs" — because an ad-hoc signature has no Team ID, and the hardened runtime
+refuses to load CodeWeavers' own frameworks into it. We made both mistakes and
+each cost real debugging time.
 
 The three Windows files need no signing at all.
 
-### 6. Add four settings to your bottle
+### 6. Add three settings to your bottle
 
 This is what lets you play from CrossOver normally, with no Terminal.
 
@@ -240,13 +263,6 @@ This is not CrossOver's fault and not the game's. The same freeze happens to
 ordinary Mac programs that have nothing to do with either. The setting simply
 tells the game to skip that one device by name; everything else works normally
 and you get full sound.
-
-Deleting the Teams driver instead works just as well, if you would rather:
-
-```
-sudo rm -rf /Library/Audio/Plug-Ins/HAL/MSTeamsAudioDevice.driver
-sudo killall coreaudiod
-```
 
 ### 8. The one file that goes in your Aurora17 folder
 
@@ -317,18 +333,65 @@ own window once and it will be renewed.
 
 ## If something goes wrong
 
+### Start here, always
+
+```
+./setup.sh --verify
+```
+
+It changes nothing. It checks every file, the signature, the permissions, the
+bottle settings and the PowerShell stand-in, and prints `BAD` beside whatever is
+wrong. Do this before anything in the table below — most of the time it names
+the problem outright.
+
+### The first thing to check
+
+**Did you open CrossOver-FIFA, or your normal CrossOver?** They look identical
+in the Dock and they share the same bottles, so it is easy to launch the wrong
+one — and the fixes are only in the copy. If FIFA restarts in a loop, hangs on
+the loading screen, cannot reach EA, or says the servers are shut down, quit
+both, open **CrossOver-FIFA**, and try again before reading any further.
+
+### While the installer is running
+
 | what you see | what it means | what to do |
 |---|---|---|
-| The game opens and closes over and over, forever | `CX_DR_TRAP` is missing | Step 6 |
-| Stuck on the loading screen | the search path or the graphics setting | Steps 4 and 6 |
+| `macOS will not let this change ...` (stops, exit 3) | App Management permission is missing | Turn it on for your Terminal in System Settings → Privacy & Security → App Management, **quit Terminal completely**, reopen it, run again. Nothing was changed. |
+| `do not match their checksums` (exit 4) | the package is damaged or incomplete | Download and extract the package again. Do **not** install what is on disk now. |
+| `built for CrossOver 26.3 exactly` (exit 4) | wrong CrossOver version | See "Why the version matters" below. Nothing was changed. |
+| `Refusing ...` (exit 2) | `AURORA_TARGET` names something unsafe or not an app | Point it at a path ending in `.app` that is not `/Applications` itself. |
+| `Not enough disk space` (exit 2) | the 1 GB copy will not fit | Free the amount it names and run again. Nothing was changed. |
+| `is running. Quit it first` (exit 3) | CrossOver-FIFA is open | Quit it fully — ⌘Q, not just closing the window — and run again. |
+| `is set to something else` | a bottle setting exists with the wrong value | Open the `cxbottle.conf` it names, fix or delete that one line, run again. |
+| `Signing lost these permissions` / `did not verify` | signing went wrong | `./setup.sh --resign`. If that fails too, `./uninstall.sh` and install again. |
+| `NOT FINISHED` (exit 5) | CrossOver is patched but the bottle or the stand-in is not done | The missing piece is listed. Fix it, run again, confirm with `--verify`. |
+
+### After it is installed
+
+| what you see | what it means | what to do |
+|---|---|---|
+| The game opens and closes over and over, forever | `CX_DR_TRAP` is missing | `--verify`, then step 6 |
+| Stuck on the loading screen | the search path or the graphics setting | `--verify`, then steps 4 and 6 |
 | Freezes before the menu, no sound | the Teams audio driver | Step 7 |
-| "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | Steps 3 and 6 |
-| "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | Step 3 |
-| **PLAY does nothing at all** — no game, no error, and the button becomes clickable again | `powershell.exe` is not in your Aurora17 folder | Step 8 |
+| "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
+| "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
+| **PLAY does nothing at all** — no game, no error, and the button becomes clickable again | Aurora17 is not finding the stand-in: it is in neither place, or it is in a different bottle than the one you opened | `--verify` says which. If it is missing, `AURORA_DIR=/path/to/Aurora17 ./setup.sh` |
+| PLAY does nothing, and something is already using port 47170 | a server left running by an earlier attempt is holding the port | `lsof -nP -iTCP:47170 -sTCP:LISTEN`, then quit that process, then press PLAY again |
 | "Aurora17 could not finish — Success." | only `crypt32.dll` was installed, not `crypt32.so` | Step 3 — it is **two** files |
-| "REPAIR SETUP" closes the launcher | the fixes are not fully installed | re-run the installer; this was a real bug and it is fixed |
-| **CrossOver-FIFA crashes the moment you open it**, no window, a crash report naming `Sparkle.framework` and "different Team IDs" | its signature needs one more permission | `./setup.sh --resign` — a few seconds, nothing is re-copied |
-| setup.sh says the version is wrong | your CrossOver is not 26.3 | see below |
+| "REPAIR SETUP" closes the launcher | the fixes are not fully installed | `./setup.sh --verify` names the missing piece; install again if it lists any |
+| **CrossOver-FIFA crashes the moment you open it**, no window, a crash report naming `Sparkle.framework` and "different Team IDs" | its signature is missing the permission that lets it load its own frameworks | `./setup.sh --resign` — a few seconds, nothing is re-copied |
+| Microphone or camera stopped working in CrossOver-FIFA | it was signed without CrossOver's own permissions | `./setup.sh --resign`, which preserves and then verifies them |
+| A CrossOver update landed and FIFA broke | the update replaced the app; the copy is untouched but may now be a different version | Run `./setup.sh` again. If CrossOver moved past 26.3, see below. |
+
+### What the exit codes mean
+
+| code | meaning |
+|---:|---|
+| 0 | finished, and verified |
+| 2 | unsupported Mac, or a setting that cannot be used |
+| 3 | a permission problem — usually App Management |
+| 4 | the package or your CrossOver is not what it should be |
+| 5 | installed, but not finished — the game will not start yet |
 
 ---
 
@@ -357,9 +420,16 @@ from your Aurora17 folder. That is all of it — your own CrossOver was never
 changed, so there is nothing to put back. The bottle settings do nothing on
 their own and can be left.
 
-(If you used `AURORA_IN_PLACE=1` to patch your real CrossOver instead, copy each
-of the six `.orig` files back over the file it was made from and repeat the
-signing step. `./uninstall.sh` does that for you.)
+`uninstall.sh` reads the record written when it installed, and undoes exactly
+what is in it. It will not touch a CrossOver it did not patch, and it will not
+delete a `powershell.exe` that is not the one it put there.
+
+(If you used `AURORA_IN_PLACE=1` to patch your real CrossOver instead,
+`./uninstall.sh` puts the six `.orig` files back and re-signs it, keeping the
+permissions it has. It **cannot** restore CodeWeavers' own signature — six
+replaced files are not enough to rebuild that. The app works, but it now carries
+an ad-hoc signature. To have CrossOver exactly as it shipped, reinstall it.
+This is the main reason the default is a separate copy.)
 
 ---
 

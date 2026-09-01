@@ -21,6 +21,13 @@ cd FIFA-17-auroa-local-crossover-patch
 
 Or download the repo as a zip and double-click **START HERE.command**.
 
+To check an installation at any time — it changes nothing and prints `BAD`
+beside whatever is wrong:
+
+```sh
+./setup.sh --verify
+```
+
 ## It does not touch your CrossOver
 
 `setup.sh` copies `/Applications/CrossOver.app` to `/Applications/CrossOver-FIFA.app`
@@ -51,6 +58,9 @@ bottle's original `powershell.exe`.
 | `aurora17/` | the PowerShell stand-in, its source, and its checksum |
 | `patches/` | the source changes the six files were built from |
 | `SETUP.md` | the full instructions, including troubleshooting |
+
+Exit codes: `0` verified · `2` unsupported Mac or setting · `3` permission ·
+`4` wrong CrossOver or damaged package · `5` installed but not finished.
 
 ## Provenance
 
