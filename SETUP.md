@@ -271,6 +271,35 @@ What each one does:
 | `CX_DR_TRAP` | the game closes and reopens itself endlessly and never starts |
 | `WINE_SIMULATE_WRITECOPY` | online never connects; you get "servers have been shut down" |
 
+### 6a. Let the bottle load Aurora's shim
+
+Aurora's redirect shim is a `version.dll` that sits next to `FIFA17.exe`. Wine
+has a `version.dll` of its own and prefers it, which means the shim is never
+loaded and the game tells you the servers have been shut down — with everything
+else working perfectly.
+
+**Quit CrossOver completely first.** Then open:
+
+```
+~/Library/Application Support/CrossOver/Bottles/Aurora17/user.reg
+```
+
+Find the section headed `[Software\\Wine\\DllOverrides]` and add this line
+inside it:
+
+```
+"version"="native,builtin"
+```
+
+If that section is not in the file, add it at the end, on its own line, with the
+setting under it.
+
+There is a `"version"=` line elsewhere in that file, under a different heading.
+That one is a version number and has nothing to do with this. The line must go
+under `DllOverrides`.
+
+`./setup.sh` does this for you; this is the manual equivalent.
+
 ### 7. The sound fix — only some Macs need this
 
 Check whether this folder exists on your Mac:
@@ -373,9 +402,23 @@ own window once and it will be renewed.
 ```
 
 It changes nothing. It checks every file, the signature, the permissions, the
-bottle settings, name resolution and the PowerShell stand-in, and prints `BAD`
-beside whatever is wrong. Do this before anything in the table below — most of the time it names
-the problem outright.
+bottle settings, the version DLL override, name resolution and the PowerShell
+stand-in, and prints `BAD` beside whatever is wrong. Do this before anything in
+the table below — most of the time it names the problem outright.
+
+If it says everything is fine and the game still misbehaves, or if you are
+asking someone else for help:
+
+```
+./setup.sh --report
+```
+
+Also changes nothing. It prints one diagnosis — the checks above, plus which
+CrossOver is *actually* running, the bottle settings, the shim's fingerprint in
+the game folder, and whether the shim ever loaded — and saves it to
+`aurora17-report.txt`. Send that file rather than describing the symptom; it
+contains everything anyone would otherwise have to ask you for, and no keys,
+tokens or paths outside the game and the bottle.
 
 ### The first thing to check
 
@@ -408,6 +451,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | The game opens and closes over and over, forever | `CX_DR_TRAP` is missing | `--verify`, then step 6 |
 | Stuck on the loading screen | the search path or the graphics setting | `--verify`, then steps 4 and 6 |
 | Freezes before the menu, no sound | the Teams audio driver | Step 7 |
+| "Servers have been shut down", and `--verify` says everything is fine | the bottle is loading Wine's own `version.dll`, so Aurora's shim never loads | `--verify` now says `BAD` for this. Quit CrossOver fully and re-run `./setup.sh`, or step 6a by hand |
 | "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
 | The game cannot reach Aurora17 — a connection error at the redirector, but everything else works | `ws2_32.so` is not reading the bottle's hosts file, so the names still go to EA | `--verify` says `ws2_32.so still asks macOS to resolve names`. Run `./setup.sh` again, or step 3a by hand |
