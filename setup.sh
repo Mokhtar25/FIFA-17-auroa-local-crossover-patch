@@ -11,6 +11,7 @@
 #   ./setup.sh [/path/to/CrossOver.app]   install
 #   ./setup.sh --resign                   repair the signature, no re-copy
 #   ./setup.sh --verify                   check an install, change nothing
+#   ./setup.sh --report                   one pasteable diagnosis, change nothing
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -27,6 +28,7 @@ MODE=install
 case "${1:-}" in
     --resign) MODE=resign; shift ;;
     --verify) MODE=verify; shift ;;
+    --report) MODE=report; shift ;;
     --help|-h)
         sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
@@ -329,6 +331,68 @@ ent_reason() {
     esac
 }
 
+# ---------------------------------------------------- the version override
+# Wine implements version.dll itself, and by default loads its own. Aurora's
+# redirect shim IS a version.dll -- a proxy dropped next to FIFA17.exe that
+# re-exports all 17 entries and forwards them on. With the default load order
+# that file is never opened at all: no shim, no redirect, and the game reaches
+# EA's real servers, which are dead. The only thing the player sees is "servers
+# have been shut down", and every other check passes.
+#
+# The value is not a CrossOver default -- it is in no bottle template -- so
+# nothing puts it there but this.
+OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
+OVERRIDE_LINE='"version"="native,builtin"'
+
+bottle_user_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
+
+# awk, not grep: "version"= also appears under application keys elsewhere in the
+# same file, and setting one of those would do nothing while looking right.
+version_override_is_set() {
+    local reg; reg="$(bottle_user_reg)"
+    [ -f "$reg" ] || return 1
+    awk '
+        substr($0,1,1)=="[" { insec = (index($0,"[Software\\\\Wine\\\\DllOverrides]")==1); next }
+        insec && index($0,"\"version\"=\"native")==1 { found=1 }
+        END { exit !found }
+    ' "$reg"
+}
+
+# Rewrites the value in place, in the right section, keeping a backup. Returns
+# non-zero if it could not be made to stick.
+set_version_override() {
+    local reg tmp; reg="$(bottle_user_reg)"
+    [ -f "$reg" ] || return 1
+    version_override_is_set && return 0
+    cp -X "$reg" "$reg.bak-aurora17" 2>/dev/null || cp "$reg" "$reg.bak-aurora17" || return 1
+    tmp="$(mktemp -t a17reg)" || return 1
+    if grep -qF "$OVERRIDE_SECTION" "$reg"; then
+        # awk -v unescapes backslashes, and every key in this file is full of
+        # them, so nothing containing one is ever passed in that way.
+        awk -v line="$OVERRIDE_LINE" '
+            substr($0,1,1)=="[" {
+                if (insec && !wrote) { print line; wrote=1 }
+                insec = (index($0,"[Software\\\\Wine\\\\DllOverrides]")==1)
+                print; next
+            }
+            insec && index($0,"\"version\"=")==1 { next }
+            { print }
+            END { if (insec && !wrote) print line }
+        ' "$reg" > "$tmp" || { rm -f "$tmp"; return 1 }
+    else
+        # No such section yet. Wine merges a repeated one, so appending is safe.
+        { cat "$reg"
+          print -r -- ""
+          print -r -- "$OVERRIDE_SECTION 0"
+          print -r -- "$OVERRIDE_LINE"
+        } > "$tmp" || { rm -f "$tmp"; return 1 }
+    fi
+    [ -s "$tmp" ] || { rm -f "$tmp"; return 1 }
+    cat "$tmp" > "$reg" || { rm -f "$tmp"; return 1 }
+    rm -f "$tmp"
+    version_override_is_set
+}
+
 # The keys currently on a bundle, one per line.
 entitlement_keys() {
     local plist="$1"
@@ -509,6 +573,18 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # Without this the redirect shim is never loaded and the only symptom is
+    # "servers have been shut down" -- with every other check here passing.
+    if [ -f "$(bottle_user_reg)" ]; then
+        version_override_is_set \
+            && ok "version = native,builtin in the $BOTTLE bottle" \
+            || { say "  BAD   the $BOTTLE bottle loads Wine's own version.dll, so"
+                 say "        Aurora's redirect shim never loads and the game will"
+                 say "        say the servers are shut down. Quit CrossOver fully,"
+                 say "        then re-run ./setup.sh"
+                 problems=$((problems+1)); }
+    fi
+
     # PLAY only needs one of the two stand-in locations to be right.
     local psdir="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
     local found=0 d
@@ -578,6 +654,122 @@ verify_install() {
 say ""
 say "FIFA 17 fixes — setup"
 say "====================="
+
+# Everything a diagnosis needs, in one output, so a broken install on somebody
+# else's Mac is one paste instead of a dozen rounds of "now run this". The rule
+# for what belongs here: anything that has ever been the answer. It changes
+# nothing, and it prints no key, token or path outside the game and the bottle.
+report_mode() {
+    local app="$1"
+    local out="${TMPDIR:-/tmp}/aurora17-report.txt"
+
+    {
+        print -r -- "==== aurora17 report ===================================="
+        print -r -- "when      $(date '+%Y-%m-%d %H:%M:%S %z')"
+        print -r -- "macOS     $(sw_vers -productVersion) ($(uname -m))"
+        print -r -- "app       $app"
+        print -r -- "version   $(crossover_version "$app")"
+        print -r -- "bottle    $BOTTLE_DIR/$BOTTLE"
+        print -r -- ""
+
+        print -r -- "---- which CrossOver is actually running ----------------"
+        # Trimming at /Contents/ leaves a bundle path and turns every other
+        # match -- shells, editors, anything with the word in its command line
+        # -- into something that no longer ends in .app, which is the filter.
+        ps -Ao command= 2>/dev/null | grep -i crossover | grep -v grep \
+            | sed 's|/Contents/.*||' | grep -E '^/.*\.app$' | sort -u \
+            || print -r -- "(no CrossOver running)"
+        print -r -- ""
+
+        print -r -- "---- checks --------------------------------------------"
+        verify_install "$app" 2>&1 || true
+        print -r -- ""
+
+        print -r -- "---- bottle settings -----------------------------------"
+        sed -n '/^\[EnvironmentVariables\]/,$p' "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" 2>/dev/null \
+            || print -r -- "(no cxbottle.conf)"
+        print -r -- ""
+
+        print -r -- "---- version DLL override ------------------------------"
+        if version_override_is_set; then
+            print -r -- "version = native,builtin  OK"
+        else
+            print -r -- "NOT SET -- Aurora's redirect shim cannot load"
+        fi
+        print -r -- ""
+
+        print -r -- "---- the shim in the game folder -----------------------"
+        # The connector records where the game is; that is the folder whose
+        # version.dll matters, and it is not always the one that was installed.
+        local conn gamedir=""
+        conn="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Connector/connector.json"
+        if [ -f "$conn" ]; then
+            gamedir="$(sed -n 's/.*"gameDirectory": *"\([^"]*\)".*/\1/p' "$conn" | head -1)"
+            print -r -- "connector says: ${gamedir:-(not recorded)}"
+            # Y:\Downloads\FIFA 17 -> a real path, via the bottle's own mapping.
+            # The separators arrive doubled, having been through JSON, so a run
+            # of backslashes of any length collapses to one slash.
+            local drive rest unixdir
+            drive="${gamedir%%:*}"
+            rest="$(print -r -- "$gamedir" | sed -e 's|^[A-Za-z]:||' -e 's|\\\\*|/|g')"
+            unixdir="$BOTTLE_DIR/$BOTTLE/dosdevices/${(L)drive}:$rest"
+            if [ -d "$unixdir" ]; then
+                print -r -- "which is:       $unixdir"
+                local f
+                for f in version.dll aurora17-redirect.ini; do
+                    if [ -f "$unixdir/$f" ]; then
+                        print -r -- "  $f  $(shasum -a 256 "$unixdir/$f" | cut -c1-16)  $(stat -f%z "$unixdir/$f") bytes"
+                    else
+                        print -r -- "  $f  MISSING"
+                    fi
+                done
+            else
+                print -r -- "which does not resolve to a folder -- the game dir is wrong"
+            fi
+        else
+            print -r -- "(no connector.json -- Aurora has not run in this bottle)"
+        fi
+        print -r -- ""
+
+        print -r -- "---- did the shim load? --------------------------------"
+        # This is the single most useful line in the whole report. The shim
+        # writes this file the moment it loads, so its absence after a launch
+        # means it never loaded at all -- which no other check reveals.
+        local logs="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Logs"
+        if [ -f "$logs/redirect-shim.log" ]; then
+            print -r -- "redirect-shim.log exists, last 25 lines:"
+            tail -25 "$logs/redirect-shim.log"
+        else
+            print -r -- "NO redirect-shim.log -- the shim has never loaded."
+            print -r -- "That is the version DLL override, above, nine times in ten."
+        fi
+        print -r -- ""
+
+        print -r -- "---- newest connector log ------------------------------"
+        local newest
+        newest="$(ls -t "$logs"/connector-*.log 2>/dev/null | head -1)"
+        if [ -n "$newest" ]; then
+            print -r -- "${newest:t}"
+            tail -20 "$newest"
+        else
+            print -r -- "(none)"
+        fi
+        print -r -- "==== end ==============================================="
+    } 2>&1 | tee "$out"
+
+    print -r -- ""
+    print -r -- "Saved to $out — send that file, or paste everything above."
+}
+
+if [ "$MODE" = report ]; then
+    if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
+       && [ -d "$HOME/Applications/${TARGET:t}" ]; then
+        TARGET="$HOME/Applications/${TARGET:t}"
+    fi
+    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET."
+    report_mode "$TARGET"
+    exit 0
+fi
 
 if [ "$MODE" = verify ]; then
     if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
@@ -949,6 +1141,25 @@ else
     else
         ok "no Teams audio driver here, sound fix not needed"
     fi
+    # See the comment on set_version_override. Nothing else puts this there,
+    # and without it every other part of the install is wasted.
+    if [ -f "$(bottle_user_reg)" ]; then
+        if version_override_is_set; then
+            ok "version = native,builtin — already set"
+        elif set_version_override; then
+            ok "version = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
+            say "        this is what lets Aurora's redirect shim load at all"
+        else
+            fail "Could not set the version DLL override in
+             $(bottle_user_reg)
+         Without it the game will say the servers have been shut down.
+         Quit CrossOver completely and run this again."
+        fi
+    else
+        note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once,"
+        say "        then run ./setup.sh again so the version override can be set"
+    fi
+
     BOTTLE_OK=1
 fi
 
