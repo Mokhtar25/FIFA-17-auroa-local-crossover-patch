@@ -491,10 +491,15 @@ two markers a person would look for by hand:
 | `FAIL: FIFA exited on its own` | the connector logged a non-zero exit, usually `0xFFFFFFFA` |
 | `FAIL: the shim was refused an auth code` | `origin-auth-code-refused` |
 | `FAIL: the auth-code bridge kept failing` | `origin-auth-code-sync-bridge-failed`, repeating every ~19 s |
+| `INCONCLUSIVE` | the game exited cleanly (`0x00000000`) before any session was issued — normal if you closed it yourself. It prints the last thing the shim reported |
 | `nothing launched` | no new connector log — PLAY was never pressed, so nothing was tested |
 
 A `FAIL` here with a clean `--verify` is the one case the install cannot
 diagnose itself. Send the zip from `./setup.sh --bundle`.
+
+Let the game reach Ultimate Team before closing it. A launch can load the
+shim, patch its gate and resolve a user without ever requesting an auth
+code, so quitting early reads as `INCONCLUSIVE` rather than as a pass.
 
 If it says everything is fine and the game still misbehaves, or if you are
 asking someone else for help:
