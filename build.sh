@@ -237,8 +237,15 @@ say ""
 say "6. Collecting"
 mkdir -p "$OUT/x86_64-unix" "$OUT/x86_64-windows"
 collect() {  # <built path> <destination under OUT>
-    [ -f "$WINE/build64/$1" ] || fail "$1 was not built. Look for it above."
-    cp "$WINE/build64/$1" "$OUT/$2"
+    # The PE half lands in dlls/<name>/x86_64-windows/<file> in this tree (the
+    # unix .so files stay in dlls/<name>/); accept either layout.
+    local src
+    for src in "$WINE/build64/$1" "$WINE/build64/${1:h}/x86_64-windows/${1:t}"; do
+        [ -f "$src" ] && break
+        src=""
+    done
+    [ -n "$src" ] || fail "$1 was not built. Look for it above."
+    cp "$src" "$OUT/$2"
     ok "$2"
 }
 collect dlls/ntdll/ntdll.so                     x86_64-unix/ntdll.so
