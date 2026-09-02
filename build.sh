@@ -21,10 +21,32 @@ set -eu
 HERE="${0:A:h}"
 OUT="${2:-$HERE/build-out}"
 
-say()  { print -r -- "$@" }
-ok()   { print -r -- "  ok    $@" }
-note() { print -r -- "  note  $@" }
-fail() { print -r -- ""; print -r -- "STOPPED: $@"; exit 1 }
+# Colour only when writing to a terminal; NO_COLOR=1 turns it off.
+_paint() {
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+        C_RED=$'\e[1;31m' C_GRN=$'\e[32m' C_YEL=$'\e[33m' C_OFF=$'\e[0m'
+    else
+        C_RED='' C_GRN='' C_YEL='' C_OFF=''
+    fi
+}
+say()  { print -r -- "$@"; }
+ok()   { _paint; print -r -- "  ${C_GRN}ok${C_OFF}    $@"; }
+note() { _paint; print -r -- "  ${C_YEL}note${C_OFF}  $@"; }
+bad()  { _paint; print -r -- "  ${C_RED}BAD${C_OFF}   $@"; }
+red()  { _paint; print -r -- "${C_RED}$@${C_OFF}"; }
+green() { _paint; print -r -- "${C_GRN}$@${C_OFF}"; }
+# A stop: first line red says what went wrong, the rest says what to do.
+fail() {
+    local msg="$*" first rest
+    first="${msg%%$'\n'*}"
+    rest="${msg#*$'\n'}"
+    _paint
+    print -r -- ""
+    print -r -- "${C_RED}STOPPED: ${first}${C_OFF}"
+    [ "$rest" = "$msg" ] || print -r -- "$rest"
+    print -r -- ""
+    exit 1
+}
 
 # Apply order matters and is not alphabetical. cng sits on top of online -- both
 # touch dlls/crypt32/pfx.c -- so applying them in directory order produces a
@@ -34,7 +56,11 @@ PATCHES=(
   crossover-26.3-fifa17-online.patch
   crossover-26.3-fifa17-audio.patch
   crossover-26.3-fifa17-cng.patch
+  crossover-26.3-topdown-alloc-limit.patch
 )
+# The fifth one is FIFA 15's (patches/README-fifa15-wine-fixes.md). It changes
+# nothing unless the bottle sets CX_TOPDOWN_LIMIT, which only the FIFA 15
+# bottle profile does, so FIFA 17 bottles run the same code as before.
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(
@@ -56,14 +82,14 @@ check_deps() {
     ok "macOS, and x86_64 runs"
 
     xcrun --find clang >/dev/null 2>&1 \
-        || { say "  BAD   no clang. Install the Xcode command line tools:"
+        || { bad "no clang. Install the Xcode command line tools:"
              say "            xcode-select --install"; missing=1 }
     [ "$missing" = 1 ] || ok "clang"
 
     if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
         ok "mingw-w64 (builds the .dll half)"
     else
-        say "  BAD   no x86_64-w64-mingw32-gcc. Without it --with-mingw fails and"
+        bad "no x86_64-w64-mingw32-gcc. Without it --with-mingw fails and"
         say "        you get no Windows-side DLLs at all:  brew install mingw-w64"
         missing=1
     fi
@@ -76,7 +102,7 @@ check_deps() {
     if [ -n "$BISON" ]; then
         ok "bison at $BISON"
     else
-        say "  BAD   no homebrew bison. macOS's own is too old for Wine:"
+        bad "no homebrew bison. macOS's own is too old for Wine:"
         say "            brew install bison"
         missing=1
     fi
@@ -90,7 +116,7 @@ check_deps() {
     if [ -n "$GNUTLS_INC" ]; then
         ok "gnutls headers in $GNUTLS_INC"
     else
-        say "  BAD   no gnutls headers. Without them the whole unix half of crypt32"
+        bad "no gnutls headers. Without them the whole unix half of crypt32"
         say "        builds to stubs that return \"call not implemented\", and it"
         say "        compiles cleanly while doing so:  brew install gnutls"
         missing=1
