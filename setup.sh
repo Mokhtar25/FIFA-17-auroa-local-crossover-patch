@@ -858,25 +858,22 @@ unix_path_to_win() {
     print -r -- "${dl}:${rest//\//\\}"
 }
 
-# The game and its loader in THIS bottle, and no other. Two signals, either of
-# which is proof: the process's working directory is inside the prefix, or its
-# environment names the prefix (ps -E shows it for our own processes). The game
-# runs with its cwd in the game folder, outside the prefix, so the cwd test
-# alone -- the one --unstick uses -- would miss it.
+# The game and its loader in THIS bottle, and no other.
+#
+# Neither of the obvious tests works on the game itself. FIFA17.exe runs with
+# its working directory in the game folder, which is outside the prefix, so
+# prefix_holders -- the cwd test --unstick uses -- never sees it; and its ps
+# line is the bare image name, with no prefix anywhere in the command line or
+# the environment. What it does have is the prefix open: the registry, its own
+# drive_c files, the wineserver socket. So ask lsof, and only about the few
+# pids whose image name matches, because lsof per pid is not free.
 bottle_game_pids() {
     local pfx="$BOTTLE_DIR/$BOTTLE" pid rest
-    {
-        ps -Ewwo pid=,command= 2>/dev/null | while read -r pid rest; do
-            case "$rest" in (*FIFA17.exe*|*_fifa17.exe*) ;; (*) continue ;; esac
-            case "$rest" in (*"$pfx"*) print -r -- "$pid" ;; esac
-        done
-        for pid in ${(f)"$(prefix_holders)"}; do
-            [ -n "$pid" ] || continue
-            case "$(ps -o command= -p "$pid" 2>/dev/null || true)" in
-                (*FIFA17.exe*|*_fifa17.exe*) print -r -- "$pid" ;;
-            esac
-        done
-    } | sort -u
+    ps -Ao pid=,command= 2>/dev/null | while read -r pid rest; do
+        case "$rest" in (*FIFA17.exe*|*_fifa17.exe*) ;; (*) continue ;; esac
+        /usr/sbin/lsof -p "$pid" -Fn 2>/dev/null | grep -qF -- "$pfx" \
+            && print -r -- "$pid"
+    done | sort -u
     return 0
 }
 
