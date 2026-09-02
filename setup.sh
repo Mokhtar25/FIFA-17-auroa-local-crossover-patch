@@ -17,6 +17,9 @@
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
 #
+#   AURORA_GAME=fifa15 ./setup.sh --bottle   set a bottle up for FIFA 15 instead
+#                                            (experimental; see SETUP.md "FIFA 15")
+#
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
 #              1 is not a designed outcome: it means a stop nobody gave a code
@@ -382,7 +385,33 @@ fi
 [ "$IN_PLACE" = "1" ] && { TARGET="$SRC"; TARGET_EXPLICIT=1; }
 
 BOTTLE_DIR="${CX_BOTTLE_PATH:-$HOME/Library/Application Support/CrossOver/Bottles}"
-BOTTLE="${AURORA_BOTTLE:-Aurora17}"
+# Which game the bottle is for. FIFA 17 is the default and the only one every
+# mode supports. FIFA 15 (AURORA_GAME=fifa15) shares the same patched CrossOver
+# -- its one Wine patch is inert until CX_TOPDOWN_LIMIT is set, which is what
+# its bottle profile does -- and differs only in the bottle settings and in
+# skipping the Aurora17-only steps. See SETUP.md, "FIFA 15".
+GAME="${AURORA_GAME:-fifa17}"
+case "$GAME" in
+    fifa17|fifa15) ;;
+    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17 or fifa15)"; exit $E_UNSUPPORTED ;;
+esac
+if [ "$GAME" = fifa15 ]; then
+    BOTTLE="${AURORA_BOTTLE:-Aurora15}"
+    # No CX_DR_TRAP: the FIFA 15 protector was never seen to need it, and the
+    # bottle this was proven in did not have it. CX_TOPDOWN_LIMIT is the fix
+    # for its start-up crash (patches/README-fifa15-wine-fixes.md).
+    BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" "CX_TOPDOWN_LIMIT=0x1ffffffff" )
+    GAME_LABEL="FIFA 15"
+    case "$MODE" in
+        smoke|report) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for FIFA 15 yet."
+                      print -r -- "Use  AURORA_GAME=fifa15 AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify  instead."
+                      exit $E_UNSUPPORTED ;;
+    esac
+else
+    BOTTLE="${AURORA_BOTTLE:-Aurora17}"
+    BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
+    GAME_LABEL="FIFA 17"
+fi
 
 # --------------------------------------------------------- safety guards
 # Everything below eventually reaches "rm -rf $TARGET" or "ditto ... $TARGET".
@@ -1284,7 +1313,7 @@ verify_install() {
 
     local conf="$BOTTLE_DIR/$BOTTLE/cxbottle.conf" k v kv
     if [ -f "$conf" ]; then
-        for kv in "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1"; do
+        for kv in $BOTTLE_SETTINGS; do
             k="${kv%%=*}"; v="${kv#*=}"
             grep -q "^\"$k\" = \"$v\"\$" "$conf" \
                 && ok "$k" \
@@ -1945,9 +1974,29 @@ configure_bottle() {
             fi
         }
         grep -q '^\[EnvironmentVariables\]' "$CONF" || printf '\n[EnvironmentVariables]\n' >> "$CONF"
-        add_setting CX_GRAPHICS_BACKEND d3dmetal
-        add_setting CX_DR_TRAP 2
-        add_setting WINE_SIMULATE_WRITECOPY 1
+        for kv in $BOTTLE_SETTINGS; do add_setting "${kv%%=*}" "${kv#*=}"; done
+
+        # FIFA 15 only: the game must run in a window. Full screen asks for a
+        # display-mode switch that the Mac driver applies only while the game
+        # is the active application, and the switch never lands, so the game
+        # sits on a black screen. The file is read at start-up; an existing one
+        # is the player's own and is left alone.
+        if [ "$GAME" = fifa15 ]; then
+            F15INI="$HOME/Documents/FIFA 15/fifasetup.ini"
+            if [ -f "$F15INI" ]; then
+                if grep -q '^FULLSCREEN = 0' "$F15INI"; then
+                    ok "fifasetup.ini — windowed already"
+                else
+                    note "$F15INI sets full screen; the game may show a black window."
+                    say "        Set  FULLSCREEN = 0  in it if it does."
+                fi
+            else
+                mkdir -p "${F15INI:h}" \
+                    && printf 'RESOLUTIONWIDTH = 1280\nRESOLUTIONHEIGHT = 800\nASPECTRATIO = 1.600\nRENDERINGQUALITY = 3\nWAITFORVSYNC = 1\nVOICECHAT = 1\nFULLSCREEN = 0\n' > "$F15INI" \
+                    && ok "fifasetup.ini — windowed 1280x800 (in ~/Documents/FIFA 15)" \
+                    || note "could not write $F15INI"
+            fi
+        fi
 
         # The sound fix. A Microsoft Teams audio driver, if you have one, stops
         # answering and freezes any program that asks it anything -- including the
@@ -2022,6 +2071,19 @@ configure_bottle() {
         esac
 
         BOTTLE_OK=1
+    fi
+
+    if [ "$GAME" = fifa15 ]; then
+        # Steps 8, 9 and 9a are FIFA 17's: the PowerShell stand-in exists for
+        # Aurora17's Play.ps1, the six names are Aurora17's redirect targets,
+        # and 1027460.dlf is FIFA 17's licence. Aurora15Connector is a single
+        # self-contained program and FIFA 15's crack serves its own licence.
+        # What Aurora15 needs inside a bottle beyond this is not yet known:
+        # the connector has not been run under CrossOver. Nothing to install.
+        say ""
+        say "8-9a. Skipped — these three steps are FIFA 17's (Aurora17 stand-in, EA names, licence)"
+        PS_OK=1; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""; HOSTS_OK=1; LICENCE_OK=1
+        return 0
     fi
 
     # ------------------------------------------------ 8. the PowerShell stand-in
@@ -2529,7 +2591,11 @@ if [ "$MODE" = bottle ]; then
     configure_bottle "$TARGET"
     say ""
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
-        green "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
+        if [ "$GAME" = fifa15 ]; then
+            green "Done. Open ${TARGET:t:r}, then run FIFA 15 (or Aurora15Connector) in the $BOTTLE bottle."
+        else
+            green "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
+        fi
         say ""
         say "To check:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
         say ""
@@ -2984,7 +3050,11 @@ say ""
 if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
     green "Done."
     say ""
-    if [ "$IN_PLACE" = "1" ]; then
+    if [ "$GAME" = fifa15 ]; then
+        say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
+        say "          $BOTTLE bottle and run fifa15.exe from the game folder, or"
+        say "          Aurora15Connector once it is known to work here (SETUP.md, FIFA 15)."
+    elif [ "$IN_PLACE" = "1" ]; then
         say "To play:  open CrossOver, then open Aurora17 in the $BOTTLE bottle"
         say "          and press PLAY FIFA 17."
     else
