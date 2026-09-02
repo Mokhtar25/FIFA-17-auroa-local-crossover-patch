@@ -26,22 +26,18 @@ do not run the *same* bottle in both at the same time.
 | A Mac with Apple silicon | M1 or newer. The installer checks, and stops on an Intel Mac |
 | **macOS 14 or newer** | built and tested on 15.7.8 |
 | **CrossOver 26.3** | exactly — not 26.2, not 26.4. See *Why the version matters* below |
+| Apple's command line tools | in Terminal: `xcode-select --install`. The installer checks, and stops if they are missing |
 | Your own copy of FIFA 17 | build `17.0.3175939.0`, the only one supported |
 | Your own copy of Aurora17 | with its bottle already set up |
 
-None of those three are included here, and none of them can be shared.
+CrossOver, the game and Aurora17 are not included here, and cannot be shared.
 
 ---
 
 ## Setting up the bottle — where the game and Aurora go
 
 > **Give FIFA 17 a bottle of its own, and put nothing else in it.**
-> A Windows 10 64-bit bottle, used for this game and nothing else. It is still
-> the right way to set this up. A brand-new bottle used to hit a bug where every
-> check passed and the game quit about twenty seconds in; that was a missing
-> licence file, and step 9a and the launcher now make it. See *The game quits
-> about twenty seconds in* below if it ever comes back.
-
+> A Windows 10 64-bit bottle, used for this game and nothing else.
 
 Nothing has to be "pointed at" the bottle, and this trips people up, so here it
 is plainly.
@@ -91,13 +87,17 @@ piece CrossOver was missing is what this package supplies.
 
 Double-click **START HERE.command**.
 
-That is all. It finds CrossOver on its own, prints what it is doing at every
-step, and stops with a plain explanation if anything is wrong. Then skip to
-**Playing**.
+That is all. It finds CrossOver on its own and prints what it is doing at every
+step. If it has to stop, the reason is in **red**, followed by the steps to fix
+it. Then skip to **Playing**.
 
 > **The first time, macOS may refuse to open it** because it came from the
-> internet. If it does: **right-click** it → **Open** → **Open**. You only have
-> to do that once.
+> internet ("Apple could not verify..."). If it does: open **System Settings →
+> Privacy & Security**, scroll down, and click **Open Anyway**. On macOS 14 and
+> older, **right-click** the file → **Open** works too. You only do this once.
+>
+> Or avoid it altogether: open Terminal, type `zsh ` (with a space), drag
+> `START HERE.command` into the window, and press Return.
 
 If CrossOver is somewhere unusual and it cannot find it, tell it where:
 
@@ -246,8 +246,7 @@ The last line must print nothing. If it complains, the app will not open.
 loses its microphone and camera access. Sign without the added one and the app
 dies at launch with no window at all, naming `Sparkle.framework` and "different
 Team IDs" — because an ad-hoc signature has no Team ID, and the hardened runtime
-refuses to load CodeWeavers' own frameworks into it. We made both mistakes and
-each cost real debugging time.
+refuses to load CodeWeavers' own frameworks into it.
 
 The three Windows files need no signing at all.
 
@@ -513,9 +512,6 @@ certificate and hosts checks without starting FIFA; **CHECK AGAIN** just looks;
 and **100M + RESET CLUB** empties the club and grants 100,000,000 coins. Leave
 Ultimate Team before using that last one, and re-enter it afterwards.
 
-**This is tested, not theory.** The game was started exactly this way, from that
-button, and confirmed playing online on 2026-09-01.
-
 ### If you would rather not use the launcher
 
 You do not have to. In CrossOver, choose **Run Command**, tick the option to save
@@ -544,8 +540,9 @@ own window once and it will be renewed.
 It changes nothing. It checks every file, the signature, the permissions, the
 bottle settings, the version DLL override, the bottle's proxy auto-detect, the
 bottle's own shortcuts, whether anything is still holding the bottle, name
-resolution and the PowerShell stand-in, and prints `BAD` beside whatever is wrong. Do this before anything in
-the table below — most of the time it names the problem outright.
+resolution and the PowerShell stand-in, and prints `BAD` in red beside whatever
+is wrong. Do this before anything in the table below — most of the time it
+names the problem outright.
 
 Every one of those checks is static. A bottle can pass all of them and still
 fail to play, so when `--verify` is clean and the game still does not work:
@@ -646,8 +643,12 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 
 ### While the installer is running
 
+Every stop is printed in red as `STOPPED: ...`, with the steps to fix it right
+under it. The table is the same information, for reference.
+
 | what you see | what it means | what to do |
 |---|---|---|
+| `Apple's command line tools are not installed` (exit 2) | two Apple tools the installer needs are missing | In Terminal: `xcode-select --install`, press Install, run again. Nothing was changed. |
 | `macOS will not let this change ...` (stops, exit 3) | App Management permission is missing | Turn it on for your Terminal in System Settings → Privacy & Security → App Management, **quit Terminal completely**, reopen it, run again. Nothing was changed. |
 | `do not match their checksums` (exit 4) | the package is damaged or incomplete | Download and extract the package again. Do **not** install what is on disk now. |
 | `built for CrossOver 26.3 exactly` (exit 4) | wrong CrossOver version | See "Why the version matters" below. Nothing was changed. |
@@ -658,7 +659,6 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | `leftover process(es) are still inside the ... bottle` (exit 3) | a previous session never closed; it would overwrite whatever the installer writes, and the bottle will hang on loading | `./setup.sh --unstick`, then run the installer again. Nothing was changed. |
 | `is set to something else` | a bottle setting exists with the wrong value | Open the `cxbottle.conf` it names, fix or delete that one line, run again. |
 | `could not read the permissions on ...` (a note, not a stop) | that CrossOver's signature was replaced at some point, so it no longer carries its own permission list | Nothing to do. The installer signs with the four CrossOver 26.3 ships with instead, then verifies they landed. Microphone, camera and Apple Events keep working. |
-| `Could not read CrossOver's own permissions` (older versions, stops) | same cause, but the older installer had nothing to fall back on | Use this version of `setup.sh` — it carries the list and continues. |
 | `Signing lost these permissions` / `did not verify` | signing went wrong | `./setup.sh --resign`. If that fails too, `./uninstall.sh` and install again. |
 | `NOT FINISHED` (exit 5) | CrossOver is patched but the bottle or the stand-in is not done | The missing piece is listed. Fix it, run again, confirm with `--verify`. |
 
@@ -685,7 +685,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | You have an `AURORA17` block in `/etc/hosts` from an older setup | it is no longer needed — the fix works inside the bottle now | It does no harm. To remove it: edit `/etc/hosts` (needs a password), delete the block, then `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder` |
 | **PLAY does nothing at all** — no game, no error, and the button becomes clickable again | Aurora17 is not finding the stand-in: it is in neither place, or it is in a different bottle than the one you opened | `--verify` says which. If it is missing, `AURORA_DIR=/path/to/Aurora17 ./setup.sh` |
 | PLAY does nothing, and something is already using port 47170 | a server left running by an earlier attempt is holding the port | `./setup.sh --unstick` frees ports 47170-47173. To see what holds it first: `lsof -nP -iTCP:47170 -sTCP:LISTEN` |
-| **`ERROR [Code 13]: The server did not pass its authenticated readiness check`** | Aurora's server started and bound its port, but never answered its health check as ready. On a working bottle the first poll succeeds in about two seconds, so a four-minute timeout is never "the server was slow" — it is a condition that was never going to become true. The message now names which one. | **Read the `Last probe:` line in the error.** If it says the server rejected the control key (HTTP 403 or 401), a server from an earlier attempt is still listening with a different key, or `%LOCALAPPDATA%\Aurora17\control-key.txt` was replaced: run `./setup.sh --unstick` and press PLAY again. If it says `readiness.ready was not true`, the server is ours and genuinely did not finish starting — the reason is in the `server-*.log` the message names. Note those logs carry no timestamps, so they cannot be lined up against the connector logs by time. Still failing: `AURORA_BOTTLE='yourbottle' ./setup.sh --bundle`. Until 2026-09-02 a server that timed out here was **left running**, so the next PLAY found it listening and reported *"A server is running but is not answering its readiness check"* instead — two messages, one bug. |
+| **`ERROR [Code 13]: The server did not pass its authenticated readiness check`** | Aurora's server started and bound its port, but never answered its health check as ready. On a working bottle the first poll succeeds in about two seconds, so a four-minute timeout is never "the server was slow" — it is a condition that was never going to become true. The message now names which one. | **Read the `Last probe:` line in the error.** If it says the server rejected the control key (HTTP 403 or 401), a server from an earlier attempt is still listening with a different key, or `%LOCALAPPDATA%\Aurora17\control-key.txt` was replaced: run `./setup.sh --unstick` and press PLAY again. If it says `readiness.ready was not true`, the server is ours and genuinely did not finish starting — the reason is in the `server-*.log` the message names. Note those logs carry no timestamps, so they cannot be lined up against the connector logs by time. Still failing: `AURORA_BOTTLE='yourbottle' ./setup.sh --bundle`. |
 | "Aurora17 could not finish — Success." | only `crypt32.dll` was installed, not `crypt32.so` | Step 3 — it is **two** files |
 | "REPAIR SETUP" closes the launcher | the fixes are not fully installed | `./setup.sh --verify` names the missing piece; install again if it lists any |
 | **CrossOver-FIFA crashes the moment you open it**, no window, a crash report naming `Sparkle.framework` and "different Team IDs" | its signature is missing the permission that lets it load its own frameworks | `./setup.sh --resign` — a few seconds, nothing is re-copied |
@@ -694,7 +694,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 
 ### The game quits about twenty seconds in
 
-The symptom is specific. `./setup.sh --verify` used to say **Everything checks
+The symptom is specific. `./setup.sh --verify` says **Everything checks
 out**, `redirect-shim.log` reaches `origin-auth-code-sync-bridge-enabled
 verified-build`, and the game still dies:
 
@@ -707,8 +707,7 @@ verified-build`, and the game still dies:
 followed by `origin-auth-code-sync-bridge-failed pipe-capability` lines in
 `redirect-shim.log` every twenty seconds, and the launcher stuck on *WORKING...*.
 
-**The cause is one missing file** (found 2026-09-02, after two weeks of wrong
-theories about certificates and prefix state):
+**The cause is one missing file:**
 
 ```
 C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf
@@ -720,8 +719,6 @@ exits `0xFFFFFFFA`, the helper discards the session, and the relaunched copy has
 no pipe to talk to — the `pipe-capability` lines are that copy failing, after
 the fact. Your own `_fifa17.exe` writes the file within four seconds of
 starting. Every bottle that ever played had it; every bottle that failed did not.
-The one "fresh bottle that played without the loader" had in fact failed its
-first PLAY, and the orphaned relaunch wrote the file 24 seconds later.
 
 What fixes it, in order of least effort:
 
@@ -881,6 +878,7 @@ This is the main reason the default is a separate copy.)
 
 | | |
 |---|---|
+| `README.md` | the short version of this file |
 | `START HERE.command` | double-click to install |
 | `Uninstall.command` | double-click to undo |
 | `fixes/` | the seven files that go into the CrossOver copy, their source, and their checksums |

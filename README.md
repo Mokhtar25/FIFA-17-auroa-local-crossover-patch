@@ -1,70 +1,58 @@
-# FIFA 17 + Aurora17 on CrossOver — Apple Silicon patch
+# FIFA 17 on a Mac — CrossOver fixes for Apple silicon
 
-FIFA 17 and the Aurora17 local server do not work on Apple Silicon macOS under stock
-CrossOver. This package patches a **copy** of CrossOver so they do.
+FIFA 17 and its Aurora17 local server do not run on an Apple silicon Mac under
+stock CrossOver. This package fixes that in a **copy** of CrossOver. Your own
+CrossOver, and every other bottle in it, are left alone.
 
-Full instructions are in [SETUP.md](SETUP.md). Read that before running anything.
+## You need
 
-## What you need
-
-- Apple Silicon Mac, macOS 14 or newer
-- **CrossOver 26.3** — the installer refuses any other version rather than guessing
-- FIFA 17 and Aurora17 already installed in a CrossOver bottle
+- A Mac with Apple silicon (M1 or newer), macOS 14 or newer
+- **CrossOver 26.3** exactly. The installer refuses any other version.
+- Apple's command line tools. In Terminal: `xcode-select --install`
+- Your own FIFA 17 and Aurora17, set up in a bottle called `Aurora17` (SETUP.md shows how)
 
 ## Install
 
+1. Download this package as a zip and unzip it.
+2. Double-click **START HERE.command**.
+3. Open **CrossOver-FIFA** (the copy, not your normal CrossOver), open the
+   Aurora17 bottle, and press **PLAY FIFA 17**.
+
+If macOS refuses to open the file ("Apple could not verify..."): open
+System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
+On macOS 14 and older, right-click the file → Open works too.
+Or skip that: open Terminal, type `zsh ` (with a space), drag
+`START HERE.command` into the window, and press Return.
+
+The installer prints what it does at every step. If it has to stop, the reason
+is in **red**, followed by the steps to fix it.
+
+## If something goes wrong
+
 ```sh
-git clone git@github.com:Mokhtar25/FIFA-17-auroa-local-crossover-patch.git
-cd FIFA-17-auroa-local-crossover-patch
-./setup.sh
+./setup.sh --verify     # checks everything, changes nothing, marks problems BAD
+./setup.sh --bundle     # zips the logs for a bug report (no passwords or keys in it)
 ```
 
-Or download the repo as a zip and double-click **START HERE.command**.
-
-To check an installation at any time — it changes nothing and prints `BAD`
-beside whatever is wrong:
-
-```sh
-./setup.sh --verify
-```
-
-## It does not touch your CrossOver
-
-`setup.sh` copies `/Applications/CrossOver.app` to `/Applications/CrossOver-FIFA.app`
-and patches the copy. Your normal CrossOver, and every other bottle you run in it, are
-left alone. Launch **CrossOver-FIFA** to play; launch CrossOver as usual for everything
-else.
-
-`AURORA_IN_PLACE=1` patches the real CrossOver instead, if you would rather.
-`AURORA_TARGET`, `AURORA_BOTTLE`, `AURORA_DIR` and `CX_BOTTLE_PATH` override the paths.
+SETUP.md has the full troubleshooting table.
 
 ## Undo
 
-```sh
-./uninstall.sh
-```
-
-Or double-click **Uninstall.command**. It deletes `CrossOver-FIFA.app` and restores the
-bottle's original `powershell.exe`.
+Double-click **Uninstall.command**. It deletes the CrossOver-FIFA copy and the
+PowerShell stand-in it put in your Aurora17 folder. Your own CrossOver was
+never changed.
 
 ## What is in here
 
 | | |
 |---|---|
-| `START HERE.command` | double-click to install |
-| `Uninstall.command` | double-click to undo |
-| `setup.sh` `uninstall.sh` | what the two `.command` files run |
-| `fixes/` | the six replacement CrossOver files, and their checksums |
-| `aurora17/` | the PowerShell stand-in, its source, and its checksum |
-| `patches/` | the source changes the six files were built from |
-| `SETUP.md` | the full instructions, including troubleshooting |
+| `START HERE.command`, `Uninstall.command` | double-click to install, or to undo |
+| `setup.sh`, `uninstall.sh` | what those two run |
+| `fixes/` | the seven files that go into the CrossOver copy, with source and checksums |
+| `aurora17/` | the PowerShell stand-in and the certificate Aurora needs, with source and checksums |
+| `patches/` | the Wine source changes the fixes were built from |
+| `build.sh` | rebuilds `fixes/` from source, so you need not take ours on trust |
+| `SETUP.md` | full instructions and troubleshooting |
+| `NOTICE.md` | licences: MIT for our parts, LGPL for the Wine parts |
 
-Exit codes: `0` verified · `2` unsupported Mac or setting · `3` permission ·
-`4` wrong CrossOver or damaged package · `5` installed but not finished.
-
-## Provenance
-
-The six CrossOver files are built from freely published CrossOver source, and the
-changes that produced them are included in `patches/` as that requires. The PowerShell
-stand-in is original work; its source is `aurora17/aurora-pwsh.c`. No game, CrossOver,
-or Aurora binaries are redistributed here.
+Nothing here belongs to anyone else: no game, no CrossOver, no Aurora17.
