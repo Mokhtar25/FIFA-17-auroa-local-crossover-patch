@@ -747,6 +747,14 @@ is why `setup.sh` refuses rather than trying.
 afterwards. If the update moved to a newer version, you will need to rebuild
 from `patches/` first.
 
+**An Aurora17 update does not.** Nothing here is tied to one Aurora17 build:
+the installer looks only for `Aurora17Connector.exe` and the `server/` folder,
+and the PowerShell stand-in reproduces Aurora's own scripts, which have not
+changed between builds. Tested with `0.1.0-dev.404a406c33de` and
+`0.1.0-dev.e3cd78725d62` (2 September 2026). After extracting a new build, run
+`./setup.sh` once more so step 8 and 8a put the stand-in and the certificate
+into the new folder — newer builds ship without `redirector-dev.pfx`.
+
 ---
 
 ## Undoing it
