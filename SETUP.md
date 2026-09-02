@@ -847,8 +847,11 @@ into the new folder — newer builds ship without `redirector-dev.pfx`.
 ## FIFA 15 — experimental
 
 The same CrossOver copy also runs FIFA 15 (the 2015 CPY release), with a bottle of its own.
-Nothing about FIFA 17 changes: FIFA 15's one Wine patch is inert unless the bottle sets
-`CX_TOPDOWN_LIMIT`, and only the FIFA 15 bottle profile does.
+Nothing about FIFA 17 changes: FIFA 15's top-down Wine patch is inert unless the bottle sets
+`CX_TOPDOWN_LIMIT`, which only the FIFA 15 bottle profile does, and its other fix, a `gdiplus.dll`
+that stops Aurora15Connector crashing when it closes, is installed only when setup runs as
+`AURORA_GAME=fifa15 ./setup.sh`. A copy made by plain `./setup.sh` lacks that one file and still
+runs FIFA 15; the connector then shows a Wine crash dialog on its way out, which is harmless.
 
 1. Run `./setup.sh` as above, so the CrossOver copy exists.
 2. In that copy make a new bottle, **Windows 10, 64-bit**, called `Aurora15`.
@@ -860,10 +863,13 @@ Nothing about FIFA 17 changes: FIFA 15's one Wine patch is inert unless the bott
    `fifa15.exe` from the game folder in the `Aurora15` bottle. Without this patch the game hangs
    at the language screen with the flag mid-wave (`fifa15/README.md` says why).
    With Aurora15Connector: revert that patch first (`fifa15-offline.sh revert`); the connector
-   brings its own version of the same file. Running the connector under CrossOver has not been
-   tried yet.
+   brings its own version of the same file. The connector runs under CrossOver: start
+   `Aurora15Connector-*.exe` in the `Aurora15` bottle, sign in, press PLAY; it starts the game
+   itself and hosts the Origin stand-in the game talks to. One connector at a time: a second
+   instance fails with "Local port 3216 is in use".
 
-Verified: language screen, title, intro and the attract-mode match, on Apple silicon.
+Verified: language screen, title, intro and the attract-mode match, on Apple silicon; with
+Aurora15Connector, sign-in, content download, game launch and the Origin handshake.
 Not yet: input, sound, saves. `AURORA_GAME=fifa15 ./setup.sh --verify` checks the copy and
 the three bottle settings; its Aurora17 lines (stand-in, EA names, licence, version.dll) do not
 apply to FIFA 15 and can be ignored. `--smoke` and `--report` are FIFA 17 only and say so.
