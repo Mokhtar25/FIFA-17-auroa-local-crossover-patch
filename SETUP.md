@@ -570,6 +570,13 @@ processes it is waiting on were never CrossOver's to begin with.
 `--unstick` closes them and removes the abandoned lock. It touches nothing in
 the bottle itself: no files, no settings, no saves.
 
+It looks at **every** bottle, not only the Aurora17 one. CrossOver's window
+waits on all of them at once, so one leftover in any bottle leaves every bottle
+spinning. It also picks up the `conhost.exe` that Aurora's server leaves behind,
+which sits outside the bottle but holds the same lock. Anything that still has a
+living `wineserver` — a Wine session that is genuinely running — is listed and
+left alone.
+
 This is also worth running if you have ever opened the Aurora17 bottle in your
 **normal** CrossOver. Each copy leaves its own session behind, and one copy
 cannot adopt the other's.
@@ -787,7 +794,11 @@ This is the main reason the default is a separate copy.)
 | `build.sh` | rebuilds every file in `fixes/` from source, so you need not take ours on trust |
 | `LICENSE` | MIT, for the parts that are ours |
 | `NOTICE.md` | which files are MIT and which are LGPL, and how to rebuild the LGPL ones |
-| `setup.sh` `uninstall.sh` | what the two `.command` files run |
+| `dev/` | the Terminal scripts, and tools we used |
+| `BUGS.md` | all sixteen problems, what causes each, who owns the code |
+| `HANDOFF.md` | the full engineering record |
+| `HANDOFF-AURORA-GUI.md` | how Aurora's own launcher was made to work |
+| `PORTABLE.md` | how this package is put together |
 
 The six CrossOver files are built from freely published CrossOver source code,
 and the changes are in `patches/` as their licence requires — `./build.sh` puts

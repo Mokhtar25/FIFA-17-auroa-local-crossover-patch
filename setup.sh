@@ -12,7 +12,7 @@
 #   ./setup.sh --resign                   repair the signature, no re-copy
 #   ./setup.sh --verify                   check an install, change nothing
 #   ./setup.sh --report                   one pasteable diagnosis, change nothing
-#   ./setup.sh --unstick                  free a bottle that is stuck loading
+#   ./setup.sh --unstick                  free bottles that are stuck loading
 #   ./setup.sh --bundle                   zip up everything a bug report needs
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
@@ -447,6 +447,67 @@ stale_wine_sockets() {
         [ -n "$(/usr/sbin/lsof +D "$d" -F p 2>/dev/null | grep '^p')" ] \
             || print -r -- "$d"
     done
+}
+
+# --unstick's view. The bottle named by AURORA_BOTTLE is not the only one that
+# can be stuck: CrossOver's own window waits on every bottle it lists, so an
+# orphan in *any* bottle leaves *every* bottle spinning -- and until 2026-09-02
+# --unstick looked at one bottle, said "nothing was holding the bottle", and the
+# spinner stayed. Two kinds of leftover, one rule:
+#
+#   * Wine processes whose working directory is inside any bottle under
+#     BOTTLE_DIR (services.exe, explorer.exe, rpcss.exe and friends).
+#   * Wine processes whose working directory is somewhere else entirely but
+#     which still hold a server-* directory under /tmp -- the conhost.exe that
+#     Aurora's server leaves behind sits in ~/Downloads, not in the bottle, and
+#     stale_wine_sockets() cannot remove a directory it has open.
+#
+# Only Wine's own processes count: a Windows binary (its command line starts
+# with a drive letter), wineserver, winewrapper.exe or a preloader. A Terminal
+# tab that happens to be cd'ed into a bottle is not a holder and is never
+# signalled. And anything attached to a server-* directory that a wineserver
+# still holds is a live session -- another CrossOver copy, a wine command run
+# from a shell -- and is left alone; it is reported, not killed.
+is_wine_command() {
+    case "$1" in
+        [A-Za-z]:\\*) return 0 ;;
+        *wineserver*|*winewrapper.exe*|*wine-preloader*|*wine64-preloader*) return 0 ;;
+    esac
+    return 1
+}
+
+live_server_dirs() {
+    local d
+    for d in /tmp/.wine-*/server-*(N/); do
+        /usr/sbin/lsof +D "$d" -F c 2>/dev/null | grep -q '^cwineserver' \
+            && print -r -- "${d%/}"
+    done
+    return 0
+}
+
+# Prints "pid<TAB>state<TAB>command" for every Wine process found anywhere, with
+# state being "orphan" or "live".
+wine_leftovers() {
+    local live pid ppid cmd cwd held h state
+    live="$(live_server_dirs)"
+    ps -Ao pid=,ppid=,command= 2>/dev/null | while read -r pid ppid cmd; do
+        is_wine_command "$cmd" || continue
+        cwd="$(/usr/sbin/lsof -a -d cwd -p "$pid" -F n 2>/dev/null | sed -n 's/^n//p' | head -1)"
+        # lsof reports /private/tmp where the glob above says /tmp, so the
+        # server-* directory name is what gets compared, never the full path.
+        held="$(/usr/sbin/lsof -p "$pid" -F n 2>/dev/null \
+                | sed -n 's|^n.*/\.wine-[^/]*/\(server-[^/]*\)/.*|\1|p' | sort -u)"
+        # Inside a bottle, or holding a server directory -- otherwise not ours.
+        if [ "$cwd" != "$BOTTLE_DIR" ] && [ "${cwd#"$BOTTLE_DIR"/}" = "$cwd" ] && [ -z "$held" ]; then
+            continue
+        fi
+        state=orphan
+        for h in ${(f)held}; do
+            [ -n "$h" ] && [ "${live}" != "${live#*"/$h"}" ] && state=live
+        done
+        print -r -- "${pid}"$'\t'"${state}"$'\t'"${cmd}"
+    done
+    return 0
 }
 
 # ------------------------------------------------------------- signing
@@ -2039,7 +2100,7 @@ smoke_failed() {
 # could legitimately be using it.
 if [ "$MODE" = unstick ]; then
     say ""
-    say "Freeing the $BOTTLE bottle"
+    say "Freeing every CrossOver bottle"
     say ""
     RUNNING="$(crossovers_running)"
     if [ -n "$RUNNING" ]; then
@@ -2050,12 +2111,26 @@ if [ "$MODE" = unstick ]; then
     fi
     ok "no CrossOver is running"
 
-    HOLDING=( ${(f)"$(prefix_holders)"} )
-    HOLDING=( ${HOLDING:#} )
+    FOUND=( ${(f)"$(wine_leftovers)"} )
+    FOUND=( ${FOUND:#} )
+    HOLDING=()
+    LIVE=()
+    for L in ${FOUND}; do
+        case "${${(s:	:)L}[2]}" in
+            orphan) HOLDING+=( "${${(s:	:)L}[1]}" ) ;;
+            live)   LIVE+=( "$L" ) ;;
+        esac
+    done
+    if [ "${#LIVE}" -gt 0 ]; then
+        say "  ${#LIVE} process(es) belong to a Wine session that is still running -- left alone:"
+        for L in ${LIVE}; do
+            print -r -- "        ${${(s:	:)L}[1]}  ${${(s:	:)L}[3]}"
+        done
+    fi
     if [ "${#HOLDING}" -eq 0 ]; then
-        ok "nothing was holding the bottle"
+        ok "nothing was holding any bottle"
     else
-        say "  ${#HOLDING} leftover process(es) in the bottle:"
+        say "  ${#HOLDING} leftover process(es) with no wineserver behind them:"
         ps -o pid=,etime=,command= -p "${(j:,:)HOLDING}" 2>/dev/null \
             | sed 's/^/        /' || true
         # Ask first. A wineserver that is somehow still alive flushes the
@@ -2063,18 +2138,16 @@ if [ "$MODE" = unstick ]; then
         kill -TERM ${HOLDING} 2>/dev/null || true
         WAITED=0
         while [ "$WAITED" -lt 10 ]; do
-            LEFT=( ${(f)"$(prefix_holders)"} )
-            LEFT=( ${LEFT:#} )
+            LEFT=()
+            for P in ${HOLDING}; do kill -0 "$P" 2>/dev/null && LEFT+=( "$P" ); done
             [ "${#LEFT}" -eq 0 ] && break
             /bin/sleep 1
             WAITED=$((WAITED + 1))
         done
-        LEFT=( ${(f)"$(prefix_holders)"} )
-        LEFT=( ${LEFT:#} )
         [ "${#LEFT}" -eq 0 ] || kill -KILL ${LEFT} 2>/dev/null || true
         /bin/sleep 1
-        LEFT=( ${(f)"$(prefix_holders)"} )
-        LEFT=( ${LEFT:#} )
+        LEFT=()
+        for P in ${HOLDING}; do kill -0 "$P" 2>/dev/null && LEFT+=( "$P" ); done
         [ "${#LEFT}" -eq 0 ] \
             && ok "cleared ${#HOLDING} process(es)" \
             || die $E_PERMISSION "${#LEFT} process(es) would not close. Restart the Mac and
@@ -2104,7 +2177,7 @@ if [ "$MODE" = unstick ]; then
     fi
 
     say ""
-    say "The $BOTTLE bottle is free. Open CrossOver again."
+    say "The bottles are free. Open CrossOver again."
     say ""
     exit 0
 fi
