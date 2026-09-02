@@ -736,7 +736,14 @@ ent_reason() {
 # The value is not a CrossOver default -- it is in no bottle template -- so
 # nothing puts it there but this.
 OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
-OVERRIDE_LINE='"version"="native,builtin"'
+# Which DLL depends on the game. FIFA 17: Aurora17's redirect shim is a proxy
+# version.dll. FIFA 15: Aurora15Connector's EA-MITM hook (it rewrites the
+# game's ProtoSSLConnect target to Aurora's server) is a proxy dinput8.dll next
+# to fifa15.exe. Without the override the game loads Wine's own dinput8, talks
+# to spring14.gosredirector.ea.com and says the servers are closed -- with the
+# Origin/LSX side working perfectly (FIFA 15 checkpoint fact 81).
+if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; else OVERRIDE_DLL=version; fi
+OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 
 bottle_user_reg()   { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
 bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
@@ -805,7 +812,7 @@ set_reg_line() {
 }
 
 version_override_is_set() { reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE"; }
-set_version_override()    { set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE" '"version"'; }
+set_version_override()    { set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE" "\"$OVERRIDE_DLL\""; }
 
 # ------------------------------------------------- the controller (BUGS.md §20)
 # On a Mac, CrossOver's winebus offers a game controller to the bottle two ways
@@ -1368,9 +1375,9 @@ verify_install() {
     # "servers have been shut down" -- with every other check here passing.
     if [ -f "$(bottle_user_reg)" ]; then
         version_override_is_set \
-            && ok "version = native,builtin in the $BOTTLE bottle" \
-            || { bad "the $BOTTLE bottle loads Wine's own version.dll, so"
-                 say "        Aurora's redirect shim never loads and the game will"
+            && ok "$OVERRIDE_DLL = native,builtin in the $BOTTLE bottle" \
+            || { bad "the $BOTTLE bottle loads Wine's own $OVERRIDE_DLL.dll, so"
+                 say "        Aurora's redirect never loads and the game will"
                  say "        say the servers are shut down. Quit CrossOver fully,"
                  say "        then re-run ./setup.sh"
                  problems=$((problems+1)); }
@@ -1382,11 +1389,18 @@ verify_install() {
     if [ -f "$(bottle_user_reg)" ]; then
         proxy_autodetect_is_off \
             && ok "proxy auto-detect off in the $BOTTLE bottle" \
-            || { bad "proxy auto-detect is on in the $BOTTLE bottle, so Aurora's"
-                 say "        helper spends five seconds looking for a proxy and misses"
-                 say "        the deadline for the Origin auth code. The game will quit"
-                 say "        saying the Origin client was terminated. Quit CrossOver"
-                 say "        fully, then re-run ./setup.sh"
+            || { if [ "$GAME" = fifa15 ]; then
+                   bad "proxy auto-detect is on in the $BOTTLE bottle, so every fresh"
+                   say "        .NET process (Aurora15Connector, its client) waits five seconds"
+                   say "        for a proxy lookup before its first request. Quit CrossOver"
+                   say "        fully, then re-run  AURORA_GAME=fifa15 ./setup.sh --bottle"
+                 else
+                   bad "proxy auto-detect is on in the $BOTTLE bottle, so Aurora's"
+                   say "        helper spends five seconds looking for a proxy and misses"
+                   say "        the deadline for the Origin auth code. The game will quit"
+                   say "        saying the Origin client was terminated. Quit CrossOver"
+                   say "        fully, then re-run ./setup.sh"
+                 fi
                  problems=$((problems+1)); }
     fi
 
@@ -1416,6 +1430,11 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # FIFA 15 has no PowerShell stand-in: Aurora15Connector is one program. The
+    # checks below are FIFA 17's and are skipped for it (not re-indented).
+    if [ "$GAME" = fifa15 ]; then
+        ok "FIFA 15: no Aurora17 stand-in to check"
+    else
     # PLAY only needs one of the two stand-in locations to be right. "Wrong
     # build" and "not there at all" are different faults and had been reported
     # as the same one -- an older stand-in sitting in both places was described
@@ -1447,6 +1466,7 @@ verify_install() {
         bad "the PowerShell stand-in is in neither place — PLAY will do nothing"
         problems=$((problems+1))
     fi
+    fi
 
     # Name resolution. Two halves: the reader has to be installed and wired in,
     # and the file it reads has to say something. The second half is Aurora17's
@@ -1471,6 +1491,12 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # EA names, hosts receipt, redirect shim, licence and certificate are all
+    # Aurora17's. Aurora15's hook redirects by address (EA-MITM.ini) and the
+    # game serves its own licence, so for FIFA 15 none of this applies.
+    if [ "$GAME" = fifa15 ]; then
+        ok "FIFA 15: Aurora17's EA names, licence and certificate checks do not apply"
+    else
     local -a miss; local bh; bh="$(bottle_hosts_file)"
     miss=( ${(f)"$(hosts_missing)"} )
     if [ "${#miss}" -eq 0 ]; then
@@ -1577,6 +1603,7 @@ verify_install() {
         say "        Windows PowerShell's PKI module, which a bottle does not"
         say "        have. Re-run ./setup.sh — it copies the shipped one."
         problems=$((problems+1))
+    fi
     fi
 
     # Which CrossOver is open. Three copies share one bundle identifier, so the
@@ -1687,7 +1714,7 @@ report_mode() {
 
         print -r -- "---- version DLL override ------------------------------"
         if version_override_is_set; then
-            print -r -- "version = native,builtin  OK"
+            print -r -- "$OVERRIDE_DLL = native,builtin  OK"
         else
             print -r -- "NOT SET -- Aurora's redirect shim cannot load"
         fi
@@ -2019,12 +2046,12 @@ configure_bottle() {
         # and without it every other part of the install is wasted.
         if [ -f "$(bottle_user_reg)" ]; then
             if version_override_is_set; then
-                ok "version = native,builtin — already set"
+                ok "$OVERRIDE_DLL = native,builtin — already set"
             elif set_version_override; then
-                ok "version = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
-                say "        this is what lets Aurora's redirect shim load at all"
+                ok "$OVERRIDE_DLL = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
+                say "        this is what lets Aurora's redirect load at all"
             else
-                die $E_PERMISSION "Could not set the version DLL override in
+                die $E_PERMISSION "Could not set the $OVERRIDE_DLL DLL override in
                  $(bottle_user_reg)
              Without it the game will say the servers have been shut down.
              Quit CrossOver completely and run this again."
@@ -2084,8 +2111,9 @@ configure_bottle() {
         # Aurora17's Play.ps1, the six names are Aurora17's redirect targets,
         # and 1027460.dlf is FIFA 17's licence. Aurora15Connector is a single
         # self-contained program and FIFA 15's crack serves its own licence.
-        # What Aurora15 needs inside a bottle beyond this is not yet known:
-        # the connector has not been run under CrossOver. Nothing to install.
+        # Aurora15Connector runs under CrossOver as is; what it needs from the
+        # bottle is the dinput8 override set above (its EA-MITM hook is a proxy
+        # dinput8.dll) and the three settings. Nothing to install.
         say ""
         say "8-9a. Skipped — these three steps are FIFA 17's (Aurora17 stand-in, EA names, licence)"
         PS_OK=1; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""; HOSTS_OK=1; LICENCE_OK=1
