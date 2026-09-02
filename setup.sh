@@ -646,54 +646,78 @@ ent_reason() {
 OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
 OVERRIDE_LINE='"version"="native,builtin"'
 
-bottle_user_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
+bottle_user_reg()   { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
+bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
 
-# awk, not grep: "version"= also appears under application keys elsewhere in the
-# same file, and setting one of those would do nothing while looking right.
-version_override_is_set() {
-    local reg; reg="$(bottle_user_reg)"
+# Is LINE there, exactly, under SECTION in the registry file REG?
+# awk, not grep: the same value name turns up under other keys in the same file
+# -- "version"= does, under application keys -- and setting one of those would
+# do nothing while looking right. The section and line go in through the
+# environment, not -v: awk -v unescapes backslashes, and every key in this file
+# is full of them.
+reg_line_is_set() {
+    local reg="$1"
     [ -f "$reg" ] || return 1
-    awk '
-        substr($0,1,1)=="[" { insec = (index($0,"[Software\\\\Wine\\\\DllOverrides]")==1); next }
-        insec && index($0,"\"version\"=\"native")==1 { found=1 }
+    A17_SEC="$2" A17_LINE="$3" awk '
+        substr($0,1,1)=="[" { insec = (index($0, ENVIRON["A17_SEC"])==1); next }
+        insec && index($0, ENVIRON["A17_LINE"])==1 { found=1 }
         END { exit !found }
     ' "$reg"
 }
 
-# Rewrites the value in place, in the right section, keeping a backup. Returns
-# non-zero if it could not be made to stick.
-set_version_override() {
-    local reg tmp; reg="$(bottle_user_reg)"
+# Writes LINE under SECTION in REG, in place of any other value of that NAME
+# there, keeping a backup as <file>.bak-aurora17. NAME is the quoted value name,
+# e.g. '"version"'. Returns non-zero if it could not be made to stick.
+set_reg_line() {
+    local reg="$1" sec="$2" line="$3" name="$4" tmp
     [ -f "$reg" ] || return 1
-    version_override_is_set && return 0
+    reg_line_is_set "$reg" "$sec" "$line" && return 0
     cp -X "$reg" "$reg.bak-aurora17" 2>/dev/null || cp "$reg" "$reg.bak-aurora17" || return 1
     tmp="$(mktemp -t a17reg)" || return 1
-    if grep -qF "$OVERRIDE_SECTION" "$reg"; then
-        # awk -v unescapes backslashes, and every key in this file is full of
-        # them, so nothing containing one is ever passed in that way.
-        awk -v line="$OVERRIDE_LINE" '
+    if grep -qF "$sec" "$reg"; then
+        A17_SEC="$sec" A17_LINE="$line" A17_NAME="$name=" awk '
             substr($0,1,1)=="[" {
-                if (insec && !wrote) { print line; wrote=1 }
-                insec = (index($0,"[Software\\\\Wine\\\\DllOverrides]")==1)
+                if (insec && !wrote) { print ENVIRON["A17_LINE"]; wrote=1 }
+                insec = (index($0, ENVIRON["A17_SEC"])==1)
                 print; next
             }
-            insec && index($0,"\"version\"=")==1 { next }
+            insec && index($0, ENVIRON["A17_NAME"])==1 { next }
             { print }
-            END { if (insec && !wrote) print line }
+            END { if (insec && !wrote) print ENVIRON["A17_LINE"] }
         ' "$reg" > "$tmp" || { rm -f "$tmp"; return 1 }
     else
         # No such section yet. Wine merges a repeated one, so appending is safe.
         { cat "$reg"
           print -r -- ""
-          print -r -- "$OVERRIDE_SECTION 0"
-          print -r -- "$OVERRIDE_LINE"
+          print -r -- "$sec 0"
+          print -r -- "$line"
         } > "$tmp" || { rm -f "$tmp"; return 1 }
     fi
     [ -s "$tmp" ] || { rm -f "$tmp"; return 1 }
     cat "$tmp" > "$reg" || { rm -f "$tmp"; return 1 }
     rm -f "$tmp"
-    version_override_is_set
+    reg_line_is_set "$reg" "$sec" "$line"
 }
+
+version_override_is_set() { reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE"; }
+set_version_override()    { set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE" '"version"'; }
+
+# ------------------------------------------------- the controller (BUGS.md §20)
+# On a Mac, CrossOver's winebus offers a game controller to the bottle two ways
+# at once: raw, as the HID device itself ("hidraw"), and through SDL, which
+# recognises the pad and presents it as an Xbox-style controller. FIFA 17 takes
+# the raw one. A DualShock 4's raw report numbers its buttons in Sony's order
+# and the game reads them in Microsoft's, so Cross registers as Circle and R1
+# as R2: every button works, and most of them do the wrong thing. Turning the
+# raw path off leaves the SDL pad, which the game reads correctly. The value is
+# winebus's own (it is in the driver's strings), and a bottle on this machine
+# that already carried it showed the same controller as an XInput pad
+# (Enum\HID\VID_054C&PID_09CC&IG_00) where this bottle showed it raw. It lives
+# in system.reg, not user.reg, and is not in the template a new bottle gets.
+WINEBUS_SECTION='[System\\CurrentControlSet\\Services\\winebus]'
+WINEBUS_LINE='"DisableHidraw"=dword:00000001'
+hidraw_is_disabled() { reg_line_is_set "$(bottle_system_reg)" "$WINEBUS_SECTION" "$WINEBUS_LINE"; }
+disable_hidraw()     { set_reg_line "$(bottle_system_reg)" "$WINEBUS_SECTION" "$WINEBUS_LINE" '"DisableHidraw"'; }
 
 # --------------------------------------------- the bottle's own shortcuts
 # CrossOver writes a small sh script per Start Menu entry and hardcodes the
@@ -1149,6 +1173,17 @@ verify_install() {
                  problems=$((problems+1)); }
     fi
 
+    # A PlayStation controller with its buttons in the wrong places. A note, not
+    # a BAD: the game runs and a keyboard is unaffected -- but it is the first
+    # thing a player with a pad will hit.
+    if [ -f "$(bottle_system_reg)" ]; then
+        hidraw_is_disabled \
+            && ok "DisableHidraw = 1 in the $BOTTLE bottle (controller buttons in the right places)" \
+            || { note "DisableHidraw is not set in the $BOTTLE bottle, so a PlayStation"
+                 say "        controller's buttons land in the wrong places (Cross acts as"
+                 say "        Circle). Quit CrossOver fully, then re-run ./setup.sh"; }
+    fi
+
     # A shortcut that starts the game through the unpatched CrossOver undoes
     # every other thing on this list, while all of them still report ok.
     local -a stray
@@ -1438,6 +1473,14 @@ report_mode() {
             print -r -- "version = native,builtin  OK"
         else
             print -r -- "NOT SET -- Aurora's redirect shim cannot load"
+        fi
+        print -r -- ""
+
+        print -r -- "---- controller (winebus) ------------------------------"
+        if hidraw_is_disabled; then
+            print -r -- "DisableHidraw = 1  OK"
+        else
+            print -r -- "NOT SET -- a PlayStation controller's buttons land in the wrong places"
         fi
         print -r -- ""
 
@@ -1741,6 +1784,22 @@ configure_bottle() {
         else
             note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once,"
             say "        then run ./setup.sh again so the version override can be set"
+        fi
+
+        # See disable_hidraw. Without it a PlayStation controller's buttons land
+        # in the wrong places. Not a stop: the game plays, wrongly, and a
+        # keyboard is unaffected.
+        if [ -f "$(bottle_system_reg)" ]; then
+            if hidraw_is_disabled; then
+                ok "DisableHidraw = 1 — already set"
+            elif disable_hidraw; then
+                ok "DisableHidraw = 1 (kept the old system.reg as system.reg.bak-aurora17)"
+                say "        this is what puts a PlayStation controller's buttons in the right places"
+            else
+                note "could not set DisableHidraw in $(bottle_system_reg)"
+                say "        a PlayStation controller's buttons will be in the wrong places."
+                say "        Quit CrossOver completely and run this again."
+            fi
         fi
 
         # See repoint_menu_shims. Done last in this step so it also catches a
@@ -2468,9 +2527,9 @@ if [ "$IN_PLACE" = "1" ] && app_is_running "$SRC"; then
     die $E_PERMISSION "$SRC is running. Quit it first, then run this again."
 fi
 
-# Step 7 edits the bottle's user.reg. A live Wine session keeps the registry in
-# memory and writes it back out when it exits, so the version override added
-# here would be thrown away silently the next time CrossOver quits -- and the
+# Step 7 edits the bottle's user.reg and system.reg. A live Wine session keeps
+# the registry in memory and writes it back out when it exits, so the two values
+# added here would be thrown away silently the next time CrossOver quits -- and the
 # game would say the servers have been shut down with every check in --verify
 # saying ok. See prefix_holders.
 HOLDING=( ${(f)"$(prefix_holders)"} )

@@ -308,6 +308,33 @@ under `DllOverrides`.
 
 `./setup.sh` does this for you; this is the manual equivalent.
 
+### 6b. Put a PlayStation controller's buttons in the right places
+
+If you play with a controller and Cross acts as Circle, R1 as R2 and so on, this
+is the fix. Wine offers the pad to the game twice — once raw, once through SDL
+as an Xbox-style controller — and FIFA 17 takes the raw one, whose buttons are
+numbered in Sony's order while the game reads them in Microsoft's. Turning the
+raw one off leaves the one the game reads correctly. A keyboard is not affected
+either way.
+
+**Quit CrossOver completely first.** Then open:
+
+```
+~/Library/Application Support/CrossOver/Bottles/Aurora17/system.reg
+```
+
+(`system.reg`, not `user.reg` this time.) Find the section headed
+`[System\\CurrentControlSet\\Services\\winebus]` and add this line inside it:
+
+```
+"DisableHidraw"=dword:00000001
+```
+
+If that section is not in the file, add it at the end, on its own line, with the
+setting under it. Reconnect the controller once the bottle is running.
+
+`./setup.sh` does this for you; this is the manual equivalent.
+
 ### 7. The sound fix — only some Macs need this
 
 Check whether this folder exists on your Mac:
