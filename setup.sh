@@ -13,6 +13,7 @@
 #   ./setup.sh --verify                   check an install, change nothing
 #   ./setup.sh --report                   one pasteable diagnosis, change nothing
 #   ./setup.sh --unstick                  free a bottle that is stuck loading
+#   ./setup.sh --bundle                   zip up everything a bug report needs
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -31,8 +32,9 @@ case "${1:-}" in
     --verify) MODE=verify; shift ;;
     --report) MODE=report; shift ;;
     --unstick) MODE=unstick; shift ;;
+    --bundle) MODE=bundle; shift ;;
     --help|-h)
-        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
     -*) print -r -- "Unknown option: $1"; exit $E_UNSUPPORTED ;;
 esac
@@ -114,6 +116,165 @@ hosts_missing() {
         grep -qE "^[[:space:]]*127\.0\.0\.1[[:space:]]+${h//./\\.}([[:space:]]|\$)" \
             "$f" 2>/dev/null || print -r -- "$h"
     done
+}
+
+# ---------------------------------------------- seeding the hosts mappings
+# Aurora17's launcher writes the six mappings itself -- but on a bottle where
+# they are not already there it does that through what it calls "the elevated
+# setup step", a second, Administrator copy of itself. Wine has no UAC, that
+# child exits 1, and the launcher stops with
+#
+#     Aurora17 could not finish: The elevated setup step exited with code 1
+#
+# before the server is ever started. The game then launches with no session,
+# the shim asks the helper for an Origin auth code, is refused, and FIFA quits.
+# That is the whole of "the game works but the server does not" on a fresh Mac.
+#
+# There is nothing to elevate for here: the file is inside the bottle and owned
+# by the user. So write it ourselves, byte for byte as Aurora writes it, and
+# leave Aurora's own recovery receipt beside it. The launcher then finds the
+# mappings already present and receipt-owned, logs
+#
+#     Verified six receipt-owned hosts mappings 077E26292282.
+#
+# and never reaches the elevated path at all.
+#
+# The line format, the CRLF endings and the "# aurora17" tag are Aurora's, not
+# ours; they were read back off a working install and must not be changed --
+# the launcher matches on the tag when it replaces its own block later.
+HOSTS_TAG_RE='[[:space:]]#[[:space:]]*aurora17[[:space:]]*$'
+
+# Aurora keeps its receipts per Windows user. "crossover" is the account every
+# CrossOver bottle has; anything else is a bottle somebody made by hand.
+bottle_appdata() {
+    local u b="$BOTTLE_DIR/$BOTTLE/drive_c/users"
+    if [ -d "$b/crossover" ]; then
+        print -r -- "$b/crossover/AppData/Local/Aurora17"; return 0
+    fi
+    for u in "$b"/*(N/); do
+        case "${u:t}" in Public) continue ;; esac
+        print -r -- "$u/AppData/Local/Aurora17"; return 0
+    done
+    return 1
+}
+
+hosts_receipt_file() {
+    local a; a="$(bottle_appdata)" || return 1
+    print -r -- "$a/ShimReceipts/hosts-mapping.json"
+}
+
+# Everything in the file that is not one of Aurora's tagged lines, with CRLF
+# endings -- which is exactly what Aurora calls the preimage and what it puts
+# back if its block is ever removed.
+hosts_preimage() {
+    local f="$1" line
+    [ -f "$f" ] || return 0
+    /usr/bin/sed -e 's/\r$//' "$f" | /usr/bin/grep -v -E "$HOSTS_TAG_RE" || true
+}
+
+# Writes the file and the receipt. Prints one ok/note line. Returns non-zero
+# only if it could not write, which is a real failure: without these mappings
+# the game reaches EA.
+seed_bottle_hosts() {
+    local f; f="$(bottle_hosts_file)"
+    local dir="${f:h}"
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
+        note "no bottle to seed the hosts file in"
+        return 0
+    fi
+    mkdir -p "$dir" 2>/dev/null || { say "  BAD   could not create $dir"; return 1 }
+
+    # Two files: what the hosts file will become, and the preimage the receipt
+    # has to record. Both are built from the same read, so they cannot disagree.
+    local tmp="$dir/.hosts.aurora17.$$"
+    local pretmp="$dir/.hosts-pre.aurora17.$$"
+    local pre line h
+    pre="$(hosts_preimage "$f")"
+    : > "$pretmp" || { say "  BAD   could not write in $dir"; return 1 }
+    if [ -n "$pre" ]; then
+        print -r -- "$pre" | while IFS= read -r line; do printf '%s\r\n' "$line" >> "$pretmp"; done
+    fi
+    cp "$pretmp" "$tmp"
+    for h in $AURORA_HOSTS; do printf '127.0.0.1 %s # aurora17\r\n' "$h" >> "$tmp"; done
+
+    if [ -f "$f" ] && cmp -s "$tmp" "$f"; then
+        rm -f "$tmp"
+        ok "the bottle's hosts file already has all ${#AURORA_HOSTS} mappings"
+    else
+        # Keep whatever was there once, so uninstall has something to put back.
+        if [ -f "$f" ] && [ ! -f "$f.bak-aurora17" ]; then
+            cp "$f" "$f.bak-aurora17" || true
+        fi
+        if ! mv "$tmp" "$f"; then
+            rm -f "$tmp" "$pretmp"
+            say "  BAD   could not write $f"
+            return 1
+        fi
+        ok "wrote the ${#AURORA_HOSTS} EA mappings into the bottle's hosts file"
+    fi
+
+    # The receipt. Aurora writes one itself after its own run; writing it here
+    # is what stops it wanting to elevate on the first PLAY. An Aurora-written
+    # one is never touched -- it may record a preimage we never saw.
+    local rcpt
+    if ! rcpt="$(hosts_receipt_file)"; then
+        rm -f "$pretmp"
+        note "no Windows user folder in the bottle yet — receipt not written"
+        return 0
+    fi
+    if [ -f "$rcpt" ]; then
+        rm -f "$pretmp"
+        ok "Aurora17 already has its own hosts receipt — left alone"
+        return 0
+    fi
+    if ! mkdir -p "${rcpt:h}" 2>/dev/null; then
+        rm -f "$pretmp"
+        note "could not create ${rcpt:h}"
+        return 0
+    fi
+
+    local plen clen psha csha pb64 i
+    plen=$(wc -c < "$pretmp" | tr -d ' ')
+    clen=$(wc -c < "$f" | tr -d ' ')
+    psha=$(shasum -a 256 "$pretmp" | cut -d' ' -f1 | tr 'a-f' 'A-F')
+    csha=$(shasum -a 256 "$f"      | cut -d' ' -f1 | tr 'a-f' 'A-F')
+    pb64=$(base64 < "$pretmp" | tr -d '\n')
+    rm -f "$pretmp"
+    # Byte-for-byte in the shape Aurora writes it: CRLF, and no newline after
+    # the closing brace. It parses either way; matching it costs nothing and
+    # means a receipt of ours is indistinguishable from one of its own.
+    local -a j
+    j=(
+        '{'
+        '  "schemaVersion": 2,'
+        '  "hostsPath": "C:\\windows\\system32\\drivers\\etc\\hosts",'
+        '  "mapping": null,'
+        '  "mappings": ['
+    )
+    i=1
+    for h in $AURORA_HOSTS; do
+        if [ "$i" -eq "${#AURORA_HOSTS}" ]; then
+            j+=( "    \"127.0.0.1 $h # aurora17\"" )
+        else
+            j+=( "    \"127.0.0.1 $h # aurora17\"," )
+        fi
+        i=$((i+1))
+    done
+    j+=(
+        '  ],'
+        "  \"preimageLength\": $plen,"
+        "  \"preimageSha256\": \"$psha\","
+        "  \"preimageBase64\": \"$pb64\","
+        "  \"currentLength\": $clen,"
+        "  \"currentSha256\": \"$csha\","
+        "  \"installedAtUtc\": \"$(date -u '+%Y-%m-%dT%H:%M:%S.000000+00:00')\""
+    )
+    {
+        for line in $j; do printf '%s\r\n' "$line"; done
+        printf '}'
+    } > "$rcpt" || { note "could not write $rcpt"; return 0 }
+    ok "wrote Aurora17's hosts receipt, so PLAY never asks to elevate"
+    return 0
 }
 
 # Is ws2_32.so reading the bottle's hosts file, or still the system resolver?
@@ -697,6 +858,20 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # Check whether any Aurora ports (47170-47173) are held by orphaned processes
+    local port_pids
+    port_pids="$(/usr/sbin/lsof -nP -iTCP:47170,47171,47172,47173 -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+    port_pids="${port_pids% }"
+    if [ -z "$port_pids" ]; then
+        ok "all Aurora ports (47170-47173) are free"
+    elif [ -n "$(crossovers_running)" ]; then
+        note "Aurora service is active on port(s) 47170-47173 (PID: $port_pids)"
+    else
+        say "  BAD   orphaned process(es) holding Aurora port(s) (PID: $port_pids) with CrossOver closed."
+        say "        The launcher will fail with 'A server is already listening'. Run:  ./setup.sh --unstick"
+        problems=$((problems+1))
+    fi
+
     # Without this the redirect shim is never loaded and the only symptom is
     # "servers have been shut down" -- with every other check here passing.
     if [ -f "$(bottle_user_reg)" ]; then
@@ -781,6 +956,21 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # No receipt means Aurora17 believes it still has to install the mappings,
+    # and installing them is the step it tries to elevate for. See
+    # seed_bottle_hosts: that elevation is what fails under Wine.
+    local rc; rc="$(hosts_receipt_file 2>/dev/null || true)"
+    if [ -z "$rc" ]; then
+        note "no Windows user folder in the bottle yet — open it in CrossOver once"
+    elif [ -f "$rc" ]; then
+        ok "Aurora17 owns those mappings (no elevated step on PLAY)"
+    else
+        say "  BAD   Aurora17 has no hosts receipt, so its first PLAY will try to"
+        say "        elevate and stop with 'The elevated setup step exited with"
+        say "        code 1'. Re-run ./setup.sh"
+        problems=$((problems+1))
+    fi
+
     say ""
     if [ "$problems" -eq 0 ]; then
         say "Everything checks out."
@@ -832,6 +1022,14 @@ report_mode() {
         local orphaned
         orphaned="$(stale_wine_sockets)"
         print -r -- "${orphaned:-(none)}"
+        print -r -- ""
+
+        print -r -- "---- aurora port status (47170-47173) ------------------"
+        local ports_out
+        # lsof exits 1 when it finds nothing, which under set -e ended the
+        # report here -- on exactly the machines where the ports were fine.
+        ports_out="$(/usr/sbin/lsof -nP -iTCP:47170,47171,47172,47173 -sTCP:LISTEN 2>/dev/null || true)"
+        print -r -- "${ports_out:-(all ports free)}"
         print -r -- ""
 
         print -r -- "---- checks --------------------------------------------"
@@ -911,20 +1109,164 @@ report_mode() {
         fi
         print -r -- ""
 
+        print -r -- "---- the six network mappings --------------------------"
+        # The launcher will not start the server until it is satisfied about
+        # these, and the step it uses to fix them cannot run under Wine. See
+        # seed_bottle_hosts.
+        local bh rc
+        bh="$(bottle_hosts_file)"
+        if [ -f "$bh" ]; then
+            print -r -- "$bh"
+            print -r -- "  $(shasum -a 256 "$bh" | cut -c1-16)  $(wc -c < "$bh" | tr -d ' ') bytes"
+            local m; m="$(hosts_missing)"
+            print -r -- "  missing: ${m:-(none — all ${#AURORA_HOSTS} present)}"
+        else
+            print -r -- "NO hosts file in the bottle at all"
+        fi
+        rc="$(hosts_receipt_file 2>/dev/null || true)"
+        if [ -n "$rc" ] && [ -f "$rc" ]; then
+            print -r -- "receipt: $rc"
+            grep -E '"(preimageLength|preimageSha256|currentLength|currentSha256|installedAtUtc)"' "$rc" || true
+        else
+            print -r -- "receipt: NONE — PLAY will try to elevate and exit 1"
+        fi
+        print -r -- ""
+
+        print -r -- "---- the Aurora17 folder -------------------------------"
+        # Two files decide whether the launcher can get past its own checks:
+        # the PowerShell stand-in, and the certificate it cannot mint here.
+        local ad="${AURORA_DIR:-}" d
+        if [ -z "$ad" ]; then
+            for d in "$HOME/Downloads/Aurora17" "$HOME/Aurora17" "$HOME/Desktop/Aurora17"; do
+                if [ -f "$d/Aurora17Connector.exe" ]; then ad="$d"; break; fi
+            done
+        fi
+        if [ -n "$ad" ]; then
+            print -r -- "$ad"
+            if [ -f "$ad/powershell.exe" ]; then
+                if cmp -s "$ad/powershell.exe" "$HERE/aurora17/powershell.exe"; then
+                    print -r -- "  powershell.exe        the shipped stand-in  OK"
+                else
+                    print -r -- "  powershell.exe        NOT the shipped stand-in — re-run ./setup.sh"
+                fi
+            else
+                print -r -- "  powershell.exe        MISSING — PLAY does nothing"
+            fi
+            if [ -f "$ad/server/Aurora17Server/redirector-dev.pfx" ]; then
+                print -r -- "  redirector-dev.pfx    present  OK"
+            else
+                print -r -- "  redirector-dev.pfx    MISSING — the launcher will try to mint one"
+                print -r -- "                        and stop: no PKI module in this bottle"
+            fi
+        else
+            print -r -- "(no Aurora17 folder found — run  AURORA_DIR=... ./setup.sh --report)"
+        fi
+        print -r -- ""
+
         print -r -- "---- newest connector log ------------------------------"
         local newest
         newest="$(ls -t "$logs"/connector-*.log 2>/dev/null | head -1)"
         if [ -n "$newest" ]; then
             print -r -- "${newest:t}"
-            tail -20 "$newest"
+            tail -30 "$newest"
         else
             print -r -- "(none)"
+        fi
+        print -r -- ""
+
+        print -r -- "---- newest server log ---------------------------------"
+        # "The server does not work with the game" is usually visible here as a
+        # redirector handshake that never completes.
+        local srv
+        srv="$(ls -t "$logs"/server-*.log 2>/dev/null | head -1)"
+        if [ -n "$srv" ]; then
+            print -r -- "${srv:t}"
+            tail -30 "$srv"
+        else
+            print -r -- "(none — the server has never started in this bottle)"
         fi
         print -r -- "==== end ==============================================="
     } 2>&1 | tee "$out"
 
     print -r -- ""
     print -r -- "Saved to $out — send that file, or paste everything above."
+}
+
+# Everything --report prints, plus the log files themselves, in one zip. A
+# tester's first run is the only cheap chance to collect this: by the time they
+# have been asked three questions they have already deleted the bottle.
+#
+# Nothing here leaves the machine on its own. It writes a file and says where.
+bundle_mode() {
+    setopt localoptions nullglob
+    local app="$1"
+    local stamp; stamp="$(date '+%Y%m%d-%H%M%S')"
+    local dest="$HOME/Desktop"
+    [ -d "$dest" ] || dest="${TMPDIR:-/tmp}"
+    local work="${TMPDIR:-/tmp}/aurora17-bundle-$stamp"
+    local zipf="$dest/aurora17-bundle-$stamp.zip"
+
+    rm -rf "$work"
+    mkdir -p "$work/logs"
+
+    say "Collecting..."
+    report_mode "$app" > "$work/report.txt" 2>&1 || true
+
+    local logs="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Logs"
+    local f kind
+    # The newest of each kind, not all of them: a bottle that has been played in
+    # for a week holds hundreds, and the old ones answer nothing.
+    for kind in connector server client; do
+        for f in ${(f)"$(/bin/ls -t -- "$logs"/$kind-*.log(N) 2>/dev/null | head -3)"}; do
+            [ -n "$f" ] && cp "$f" "$work/logs/" 2>/dev/null || true
+        done
+    done
+    for f in redirect-shim.log wire-transcript.log; do
+        [ -f "$logs/$f" ] && cp "$logs/$f" "$work/logs/" 2>/dev/null || true
+    done
+
+    local bh; bh="$(bottle_hosts_file)"
+    [ -f "$bh" ] && cp "$bh" "$work/bottle-hosts.txt" 2>/dev/null || true
+    local rc; rc="$(hosts_receipt_file 2>/dev/null || true)"
+    [ -n "$rc" ] && [ -f "$rc" ] && cp "$rc" "$work/hosts-mapping.json" 2>/dev/null || true
+    [ -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] \
+        && sed -n '/^\[EnvironmentVariables\]/,$p' "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" \
+           > "$work/bottle-environment.txt" 2>/dev/null || true
+    [ -f "$RECEIPT" ] && cp "$RECEIPT" "$work/install-receipt.conf" 2>/dev/null || true
+
+    # What is actually installed, so a mismatched or half-copied payload shows
+    # up without another round trip.
+    {
+        print -r -- "shipped:"
+        ( cd "$HERE/fixes" && shasum -a 256 -c SHA256SUMS 2>&1 ) || true
+        ( cd "$HERE/aurora17" && shasum -a 256 -c SHA256SUMS 2>&1 ) || true
+        print -r -- ""
+        print -r -- "installed in $app: (the .so hashes differ from the shipped"
+        print -r -- "ones by design -- they are re-signed on install. --verify"
+        print -r -- "compares Mach-O UUIDs, which signing does not change.)"
+        local w="$app/Contents/SharedSupport/CrossOver/lib/wine"
+        for f in $FILES $RESOLVER x86_64-unix/ws2_32.so; do
+            if [ -f "$w/$f" ]; then
+                print -r -- "  $(shasum -a 256 "$w/$f" | cut -c1-16)  $f"
+            else
+                print -r -- "  MISSING                    $f"
+            fi
+        done
+    } > "$work/payload.txt" 2>&1
+
+    rm -f "$zipf"
+    ( cd "${work:h}" && zip -qr "$zipf" "${work:t}" ) \
+        || { say "Could not write $zipf"; rm -rf "$work"; return 1 }
+    rm -rf "$work"
+
+    say ""
+    say "Wrote $zipf"
+    say ""
+    say "Send that file. It contains the checks above, the Aurora17 logs, the"
+    say "bottle's hosts file and its settings, and the hashes of what is"
+    say "installed. It contains no account, password or session token."
+    say ""
+    return 0
 }
 
 # ------------------------------------------------------ --unstick, and stop
@@ -988,6 +1330,17 @@ if [ "$MODE" = unstick ]; then
         ok "removed ${#STALE} abandoned wineserver director$([ ${#STALE} -eq 1 ] && print -n y || print -n ies)"
     fi
 
+    # Free any lingering network ports (47170-47173)
+    local port_pids
+    port_pids="$(/usr/sbin/lsof -nP -iTCP:47170,47171,47172,47173 -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+    port_pids="${port_pids% }"
+    if [ -n "$port_pids" ]; then
+        kill -9 ${(z)port_pids} 2>/dev/null || true
+        ok "freed Aurora ports 47170-47173 (terminated PID: $port_pids)"
+    else
+        ok "no lingering processes on Aurora ports 47170-47173"
+    fi
+
     say ""
     say "The $BOTTLE bottle is free. Open CrossOver again."
     say ""
@@ -1001,6 +1354,16 @@ if [ "$MODE" = report ]; then
     fi
     [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET."
     report_mode "$TARGET"
+    exit 0
+fi
+
+if [ "$MODE" = bundle ]; then
+    if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
+       && [ -d "$HOME/Applications/${TARGET:t}" ]; then
+        TARGET="$HOME/Applications/${TARGET:t}"
+    fi
+    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET."
+    bundle_mode "$TARGET" || exit $E_PERMISSION
     exit 0
 fi
 
@@ -1470,6 +1833,16 @@ if [ -n "$AURORA_FOUND" ]; then
     cp -X "$HERE/aurora17/powershell.exe" "$AURORA_FOUND/powershell.exe" \
         || die $E_PERMISSION "Could not write into $AURORA_FOUND."
     ok "into $AURORA_FOUND"
+
+    # Aurora17 does not ship redirector-dev.pfx by default and relies on Windows
+    # PowerShell PKI cmdlets to mint it. On macOS Wine, supply our ready-made
+    # redirector-dev.pfx if missing so certificate minting is never attempted.
+    local pfx_dest="$AURORA_FOUND/server/Aurora17Server/redirector-dev.pfx"
+    if [ -d "$AURORA_FOUND/server/Aurora17Server" ] && [ ! -f "$pfx_dest" ] && [ -f "$HERE/aurora17/redirector-dev.pfx" ]; then
+        cp -X "$HERE/aurora17/redirector-dev.pfx" "$pfx_dest" 2>/dev/null || true
+        [ -f "$pfx_dest" ] && ok "supplied redirector-dev.pfx into $AURORA_FOUND/server/Aurora17Server"
+    fi
+
     PS_AURORA_DIR="$AURORA_FOUND"
     PS_OK=1
 else
@@ -1495,6 +1868,20 @@ if [ -d "$BOTTLE_DIR/$BOTTLE" ]; then
     PS_OK=1
 fi
 
+# ------------------------------------------- 9. the six network mappings
+# See seed_bottle_hosts. Without this the launcher's first PLAY on a fresh
+# bottle stops at "The elevated setup step exited with code 1" and the server
+# is never started -- which reads, from the outside, as "the game runs but
+# nothing connects".
+say ""
+say "9. Putting the six EA name mappings in the bottle"
+HOSTS_OK=0
+if seed_bottle_hosts; then
+    HOSTS_OK=1
+else
+    note "the game will not reach Aurora17 until this file can be written"
+fi
+
 # ------------------------------------------------------------- the receipt
 # Uninstall reads this instead of guessing at default locations.
 mkdir -p "$RECEIPT_DIR"
@@ -1515,7 +1902,7 @@ mkdir -p "$RECEIPT_DIR"
 # "Done" has to mean the game will start. A missing bottle or a missing
 # stand-in means PLAY does nothing, and saying Done to that wastes an evening.
 say ""
-if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ]; then
+if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
     say "Done."
     say ""
     if [ "$IN_PLACE" = "1" ]; then
@@ -1532,6 +1919,7 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ]; then
     fi
     say ""
     say "To check an install at any time:  ./setup.sh --verify"
+    say "If anything goes wrong:           ./setup.sh --bundle   (then send the zip)"
     say "To undo everything:               ./uninstall.sh"
     say ""
     exit 0
@@ -1545,6 +1933,11 @@ fi
 if [ "$PS_OK" != 1 ]; then
     say "  * the PowerShell stand-in is nowhere Aurora17 will find it, so PLAY"
     say "    will appear to work and do nothing at all"
+fi
+if [ "$HOSTS_OK" != 1 ]; then
+    say "  * the six EA name mappings are not in the bottle's hosts file, so the"
+    say "    launcher will try to elevate on PLAY and stop with"
+    say "    'The elevated setup step exited with code 1'"
 fi
 say ""
 say "Fix whichever is listed above, then run this again. ./setup.sh --verify"

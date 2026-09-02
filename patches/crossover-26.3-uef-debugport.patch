@@ -1,0 +1,42 @@
+--- a/dlls/kernelbase/debug.c
++++ b/dlls/kernelbase/debug.c
+@@ -757,8 +757,21 @@
+ 
+     return exe_len <= path_len && !lstrcmpiW( path + path_len - exe_len, L"UpdateIcons.exe" );
+ }
++
+ 
++/* Windows' UnhandledExceptionFilter decides whether a debugger is attached from the
++ * process debug port, not from PEB->BeingDebugged: patching that byte (a common
++ * anti-debug trick) must not stop the process's own top-level filter from running. */
++static BOOL debugger_attached( void )
++{
++    DWORD_PTR port = 0;
+ 
++    if (NtQueryInformationProcess( GetCurrentProcess(), ProcessDebugPort, &port, sizeof(port), NULL ))
++        return !!NtCurrentTeb()->Peb->BeingDebugged;
++    return !!port;
++}
++
++
+ /*******************************************************************
+  *         UnhandledExceptionFilter   (kernelbase.@)
+  */
+@@ -778,7 +791,7 @@
+         }
+     }
+ 
+-    if (!NtCurrentTeb()->Peb->BeingDebugged)
++    if (!debugger_attached())
+     {
+         if (rec->ExceptionCode == CONTROL_C_EXIT)
+         {
+@@ -801,7 +814,7 @@
+         }
+ 
+         if ((GetErrorMode() & SEM_NOGPFAULTERRORBOX) ||
+-            !start_debugger_atomic( epointers ) || !NtCurrentTeb()->Peb->BeingDebugged)
++            !start_debugger_atomic( epointers ) || !debugger_attached())
+             return nested ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER;
+     }
+     return EXCEPTION_CONTINUE_SEARCH;

@@ -251,6 +251,22 @@ for d in $ps_dirs; do
     fi
 done
 
+# --------------------------------------------- the bottle's hosts file
+# setup.sh writes the six EA mappings there so Aurora17's launcher never tries
+# to elevate for them. The backup is only made the first time it writes, so it
+# holds whatever the bottle had before we ever touched it.
+#
+# Aurora17's own receipt is deliberately left alone: if the launcher has run
+# since, that receipt is its record, not ours, and Aurora17 is the thing that
+# should undo it -- `Aurora17Connector.exe uninstall-hosts`.
+say ""
+BHOSTS="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/drivers/etc/hosts"
+if [ -f "$BHOSTS.bak-aurora17" ]; then
+    mv -f "$BHOSTS.bak-aurora17" "$BHOSTS"
+    ok "put the $BOTTLE bottle's hosts file back as it was"
+    undone=$((undone+1))
+fi
+
 # ------------------------------------------------------------- the receipt
 if [ -f "$RECEIPT" ]; then
     rm -f "$RECEIPT"
@@ -268,5 +284,8 @@ say "Left in place, on purpose:"
 say "  * the settings in your '$BOTTLE' bottle. They do nothing without the"
 say "    fixes. To remove them, open that bottle's cxbottle.conf and delete"
 say "    them from the [EnvironmentVariables] section."
+say "  * Aurora17's own hosts receipt, if its launcher has run since. That is"
+say "    Aurora17's record, not ours. To clear it, run in the Aurora17 folder:"
+say "        .\\Aurora17Connector.exe uninstall-hosts"
 say "  * the game, your bottles, and everything in them."
 say ""
