@@ -591,12 +591,14 @@ static int fifa_quit_early(DWORD seconds, DWORD connector_code, BOOL have_connec
     if (have_connector_code)
         return fail_code(ERR_FIFA_QUIT_EARLY,
             L"FIFA 17 quit %lu seconds after starting; the Aurora17 launch connector exited with "
-            L"code %lu (0x%08lx). See the newest client-*.log in %%LOCALAPPDATA%%\\Aurora17\\Logs.",
+            L"code %lu (0x%08lx). If you closed FIFA yourself, ignore this. Otherwise see the "
+            L"newest client-*.log in %%LOCALAPPDATA%%\\Aurora17\\Logs.",
             (unsigned long)seconds, (unsigned long)connector_code, (unsigned long)connector_code);
     return fail_code(ERR_FIFA_QUIT_EARLY,
             L"FIFA 17 quit %lu seconds after starting (the launch connector still owns the "
-            L"process, so its exit code is not visible here). See the newest client-*.log in "
-            L"%%LOCALAPPDATA%%\\Aurora17\\Logs.", (unsigned long)seconds);
+            L"process, so its exit code is not visible here). If you closed FIFA yourself, ignore "
+            L"this. Otherwise see the newest client-*.log in %%LOCALAPPDATA%%\\Aurora17\\Logs.",
+            (unsigned long)seconds);
 }
 
 /* --------------------------------------------------------------- shim state */
