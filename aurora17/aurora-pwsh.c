@@ -31,6 +31,11 @@
 #define CDN_PORT       47175
 #define SERVER_READY_TIMEOUT_MS  (4 * 60 * 1000)
 #define FIFA_LAUNCH_TIMEOUT_MS   (5 * 60 * 1000)
+#define LICENCE_SEED_TIMEOUT_MS  (30 * 1000)
+/* How long after the launch a disappearing FIFA17.exe still counts as "it never
+ * really started" rather than "the player quit". BUGS.md §18's game died 17-25 s
+ * in, every time. */
+#define FIFA_EARLY_QUIT_MS       (60 * 1000)
 
 /* Distinct error codes */
 #define ERR_MUTEX_LOCKED         10
@@ -47,6 +52,8 @@
 #define ERR_RESET_CLUB_FAIL      21
 #define ERR_PKI_MISSING          22
 #define ERR_UNSUPPORTED_CMD      23
+#define ERR_LICENCE_MISSING      24
+#define ERR_FIFA_QUIT_EARLY      25
 
 /* ------------------------------------------------------------------ output */
 
@@ -438,6 +445,158 @@ static HANDLE spawn(const wchar_t *cmdline, const wchar_t *cwd,
     CloseHandle(pi.hThread);
     if (pid_out) *pid_out = pi.dwProcessId;
     return pi.hProcess;
+}
+
+/* ------------------------------------------------------------------ licence */
+
+/* BUGS.md §18. Aurora's connector starts FIFA17.exe directly, and FIFA 17 only
+ * takes its normal start-up path when EA's licence file is present:
+ *
+ *   C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf
+ *
+ * Without it the game goes into Origin activation, relaunches itself, and the
+ * first process -- the one the connector is bound to -- exits 0xFFFFFFFA about
+ * twenty seconds in. The connector then discards the session and the launcher
+ * sits on "WORKING..." forever. The game's own loader, _fifa17.exe, writes the
+ * file within a few seconds of starting, so one loader run per bottle is the
+ * whole fix. The file is not machine-bound; it is the same bytes in every
+ * bottle that has ever worked. */
+
+static void licence_file_path(wchar_t *dst, size_t cap)
+{
+    wchar_t programdata[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"ProgramData", programdata, MAX_PATH))
+        wcscpy(programdata, L"C:\\ProgramData");
+    _snwprintf(dst, cap - 1, L"%s\\Electronic Arts\\EA Services\\License\\1027460.dlf", programdata);
+    dst[cap - 1] = 0;
+}
+
+static BOOL licence_present(void)
+{
+    wchar_t lic[MAX_PATH];
+    licence_file_path(lic, MAX_PATH);
+    return file_exists(lic);
+}
+
+/* The connector records the folder it launches the game from; that is where
+ * _fifa17.exe is. The value arrives as JSON, so its separators are doubled. */
+static BOOL connector_game_dir(const wchar_t *localappdata, wchar_t *dst, size_t cap)
+{
+    wchar_t conn[MAX_PATH];
+    join(conn, MAX_PATH, localappdata, L"Aurora17\\Connector\\connector.json");
+    char *j = read_all_utf8(conn, NULL);
+    if (!j) return FALSE;
+    char *raw = json_string(j, "gameDirectory");
+    free(j);
+    if (!raw) return FALSE;
+
+    char clean[1024];
+    size_t n = 0;
+    for (const char *q = raw; *q && n + 1 < sizeof(clean); q++)
+    {
+        if (*q == '\\' && q[1]) { clean[n++] = q[1]; q++; }
+        else clean[n++] = *q;
+    }
+    clean[n] = 0;
+    free(raw);
+    if (!n) return FALSE;
+    return MultiByteToWideChar(CP_UTF8, 0, clean, -1, dst, (int)cap) > 0;
+}
+
+static int kill_all(const wchar_t *exe_name)
+{
+    procid list[16];
+    int n = find_processes(exe_name, list, 16);
+    for (int i = 0; i < n; i++) kill_pid(list[i].pid);
+    return n;
+}
+
+/* The loader starts the game, so stopping it means stopping both, and the next
+ * step refuses to run while any FIFA17.exe is left. */
+static void stop_loader_tree(void)
+{
+    for (int round = 0; round < 30; round++)
+    {
+        if (!(kill_all(L"FIFA17.exe") + kill_all(L"_fifa17.exe"))) return;
+        Sleep(500);
+    }
+}
+
+/* Returns 0 when the bottle has a licence file, seeding one if it can. */
+static int ensure_licence(const wchar_t *localappdata)
+{
+    wchar_t lic[MAX_PATH];
+    licence_file_path(lic, MAX_PATH);
+    if (file_exists(lic)) return 0;
+
+    procid running[8];
+    if (find_processes(L"FIFA17.exe", running, 8) > 0)
+    {
+        /* A running game writes the file itself; killing it to seed one would
+         * be worse than going on without. */
+        out(L"FIFA 17 is already running, so the licence file is left to it.\n");
+        return 0;
+    }
+
+    wchar_t gamedir[MAX_PATH], loader[MAX_PATH];
+    BOOL have_dir = connector_game_dir(localappdata, gamedir, MAX_PATH);
+    if (have_dir) join(loader, MAX_PATH, gamedir, L"_fifa17.exe");
+    if (!have_dir || !file_exists(loader))
+        return fail_code(ERR_LICENCE_MISSING,
+            L"FIFA 17 has no licence file in this bottle and no _fifa17.exe to make one. "
+            L"Start FIFA 17 once from CrossOver, then PLAY again.");
+
+    out(L"Seeding the FIFA 17 licence file (first launch in this bottle)...\n");
+    wchar_t cmd[MAX_PATH + 8];
+    _snwprintf(cmd, MAX_PATH + 7, L"\"%s\"", loader);
+    cmd[MAX_PATH + 7] = 0;
+    DWORD pid = 0;
+    HANDLE h = spawn(cmd, gamedir, NULL, NULL, NULL, &pid);
+    if (!h)
+        return fail_code(ERR_LICENCE_MISSING,
+            L"Windows did not start the FIFA 17 loader %s (%lu), so this bottle still has no "
+            L"licence file. Start FIFA 17 once from CrossOver, then PLAY again.",
+            loader, GetLastError());
+    CloseHandle(h);
+
+    BOOL made = FALSE;
+    for (DWORD waited = 0; waited < LICENCE_SEED_TIMEOUT_MS; waited += 250)
+    {
+        Sleep(250);
+        if (file_exists(lic)) { made = TRUE; break; }
+    }
+    stop_loader_tree();
+
+    if (!made)
+        return fail_code(ERR_LICENCE_MISSING,
+            L"The FIFA 17 loader ran for %d seconds but did not write %s. Start FIFA 17 once "
+            L"from CrossOver, let it reach its menu, then PLAY again.",
+            LICENCE_SEED_TIMEOUT_MS / 1000, lic);
+
+    out(L"Licence file written; the loader has been stopped.\n");
+    return 0;
+}
+
+/* FIFA is gone within a minute of the launch. Which of the two failures is it? */
+static int fifa_quit_early(DWORD seconds, DWORD connector_code, BOOL have_connector_code)
+{
+    wchar_t lic[MAX_PATH];
+    licence_file_path(lic, MAX_PATH);
+    if (!file_exists(lic))
+        return fail_code(ERR_LICENCE_MISSING,
+            L"FIFA 17 quit %lu seconds after starting and this bottle still has no licence file "
+            L"at %s. That is the Origin activation path: the game relaunches itself and the "
+            L"process Aurora17 is watching exits 0xFFFFFFFA. Start FIFA 17 once from CrossOver, "
+            L"then PLAY again.", (unsigned long)seconds, lic);
+    if (have_connector_code)
+        return fail_code(ERR_FIFA_QUIT_EARLY,
+            L"FIFA 17 quit %lu seconds after starting; the Aurora17 launch connector exited with "
+            L"code %lu (0x%08lx). See the newest client-*.log in %%LOCALAPPDATA%%\\Aurora17\\Logs.",
+            (unsigned long)seconds, (unsigned long)connector_code, (unsigned long)connector_code);
+    return fail_code(ERR_FIFA_QUIT_EARLY,
+            L"FIFA 17 quit %lu seconds after starting (the launch connector still owns the "
+            L"process, so its exit code is not visible here). See the newest client-*.log in "
+            L"%%LOCALAPPDATA%%\\Aurora17\\Logs.", (unsigned long)seconds);
 }
 
 /* --------------------------------------------------------------- shim state */
@@ -874,6 +1033,11 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
     ULONGLONG server_start, launch_start;
     state_read(&server_pid, &server_start, &launch_pid, &launch_start);
 
+    /* BUGS.md §18. The licence file is checked -- and made -- before the server
+     * is started or restarted, so a bottle that cannot play never ends up with
+     * a server left running behind a failed launch. */
+    if (!server_only && (rc = ensure_licence(localappdata))) goto done;
+
     if (port_is_listening(CONTROL_PORT))
     {
         if (server_healthy(key))
@@ -903,10 +1067,26 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
             }
             else
             {
-                rc = fail_code(ERR_PORT_UNOWNED,
-                               L"A non-Aurora process is already listening on port %d. "
-                               L"Run './setup.sh --unstick' or close it and try again.", CONTROL_PORT);
-                goto done;
+                /* A server that is mid-start answers late; two more probes cost
+                 * two seconds and save a wrong diagnosis. */
+                BOOL late = FALSE;
+                for (int i = 0; i < 2 && !late; i++) { Sleep(1000); late = server_healthy(key); }
+                if (late)
+                    out(L"The server passed its readiness check on a later attempt - it was "
+                        L"still starting. Leaving it alone.\n");
+                else
+                {
+                    /* Not "a non-Aurora process": our own leaked Aurora17.Server.exe
+                     * from a previous launcher session is invisible to this one --
+                     * different wineserver session, same listening socket -- and
+                     * that is what this almost always is. Say only what is known. */
+                    rc = fail_code(ERR_PORT_UNOWNED,
+                                   L"Port %d is busy and the holder is not visible from this launch. "
+                                   L"It is almost always the Aurora server left over from an earlier "
+                                   L"launch. Quit the launcher completely, run ./setup.sh --unstick "
+                                   L"in Terminal, then PLAY again.", CONTROL_PORT);
+                    goto done;
+                }
             }
         }
     }
@@ -1032,9 +1212,20 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
             if (!game_pid)
             {
                 CloseHandle(lh);
-                rc = fail_code(ERR_CONNECTOR_FAIL,
-                               L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
-                               L"before FIFA 17 started. See the connector log.", code, code);
+                if (!licence_present())
+                {
+                    wchar_t lic[MAX_PATH];
+                    licence_file_path(lic, MAX_PATH);
+                    rc = fail_code(ERR_LICENCE_MISSING,
+                                   L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
+                                   L"before FIFA 17 started, and this bottle has no licence file at "
+                                   L"%s. Start FIFA 17 once from CrossOver, then PLAY again.",
+                                   code, code, lic);
+                }
+                else
+                    rc = fail_code(ERR_CONNECTOR_FAIL,
+                                   L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
+                                   L"before FIFA 17 started. See the connector log.", code, code);
                 goto done;
             }
         }
@@ -1046,8 +1237,18 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
         if (game_pid)
         {
             Sleep(2000);
+            waited += 2000;
             if (process_is(game_pid, L"FIFA17.exe", 0)) break;
+            /* Gone in two seconds. Without a licence the game relaunches itself,
+             * so look for the replacement before calling the launch dead. */
+            n = find_processes(L"FIFA17.exe", fifa, 8);
             game_pid = 0;
+            for (int i = 0; i < n; i++)
+                if (fifa[i].start >= lstart) { game_pid = fifa[i].pid; break; }
+            if (game_pid) continue;
+            CloseHandle(lh);
+            rc = fifa_quit_early(waited / 1000, 0, FALSE);
+            goto done;
         }
         if (waited >= FIFA_LAUNCH_TIMEOUT_MS)
         {
@@ -1056,8 +1257,30 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
             goto done;
         }
     }
-    CloseHandle(lh);
     out(L"FIFA 17 is running (pid %lu). Go to Ultimate Team.\n", (unsigned long)game_pid);
+
+    /* §18 again: on a bottle without the licence file the game gets exactly this
+     * far every time, then exits 0xFFFFFFFA seventeen to twenty-five seconds in
+     * while the connector reports nothing and the launcher shows "WORKING...".
+     * Watching the first minute is what turns that silence into an error code. */
+    DWORD watch_until = waited + 25000;
+    if (watch_until < FIFA_EARLY_QUIT_MS) watch_until = FIFA_EARLY_QUIT_MS;
+    while (waited < watch_until)
+    {
+        Sleep(1000);
+        waited += 1000;
+        if (process_is(game_pid, L"FIFA17.exe", 0)) continue;
+        int alive = find_processes(L"FIFA17.exe", fifa, 8);
+        if (alive > 0) { game_pid = fifa[alive - 1].pid; continue; }
+
+        DWORD ccode = 0;
+        BOOL have_ccode = (WaitForSingleObject(lh, 0) == WAIT_OBJECT_0) &&
+                          GetExitCodeProcess(lh, &ccode);
+        CloseHandle(lh);
+        rc = fifa_quit_early(waited / 1000, ccode, have_ccode);
+        goto done;
+    }
+    CloseHandle(lh);
 
 done:
     if (mutex) { if (held) ReleaseMutex(mutex); CloseHandle(mutex); }
