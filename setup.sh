@@ -804,6 +804,152 @@ win_path_to_unix() {
     print -r -- "$BOTTLE_DIR/$BOTTLE/dosdevices/${(L)drive}:$rest"
 }
 
+# ------------------------------------------- the EA licence file (BUGS.md §18)
+# FIFA 17 only takes its normal start-up path when EA's licence file is in the
+# bottle. Without it the game goes into Origin activation, relaunches itself,
+# and the first process -- the one Aurora's connector is bound to -- exits
+# 0xFFFFFFFA about twenty seconds in, which reads from outside as "PLAY does
+# nothing". The game's own loader writes the file in about four seconds, and
+# the bytes are the same in every bottle that has ever worked, so one loader
+# run per bottle is the whole fix. Nothing here ships the file: it is made
+# from the user's own copy of the game.
+bottle_licence_file() {
+    print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/ProgramData/Electronic Arts/EA Services/License/1027460.dlf"
+}
+
+# Where FIFA 17 is, in macOS terms. The connector records it, but only once
+# Aurora has run in the bottle -- and the licence is missing exactly when
+# nothing has run yet -- so fall back to AURORA_GAME_DIR and the usual places.
+game_dir_find() {
+    local gd u d
+    gd="$(connector_game_dir 2>/dev/null || true)"
+    if [ -n "$gd" ]; then
+        u="$(win_path_to_unix "$gd" 2>/dev/null || true)"
+        if [ -n "$u" ] && [ -f "$u/_fifa17.exe" ]; then print -r -- "$u"; return 0; fi
+    fi
+    for d in "${AURORA_GAME_DIR:-}" "$HOME/Downloads/FIFA 17" "$HOME/FIFA 17" "$HOME/Desktop/FIFA 17"; do
+        [ -n "$d" ] || continue
+        if [ -f "$d/_fifa17.exe" ]; then print -r -- "$d"; return 0; fi
+    done
+    return 1
+}
+
+# /Users/me/Downloads/FIFA 17 -> Y:\Downloads\FIFA 17, through the bottle's own
+# dosdevices links, longest match first so y: beats z:. The loader is started by
+# drive letter because that is how CrossOver starts it, and how the run that
+# proved this worked.
+unix_path_to_win() {
+    local p="${1%/}" link target dl best_drive="" best_target="" rest
+    for link in "$BOTTLE_DIR/$BOTTLE"/dosdevices/?:(N@); do
+        target="$(readlink "$link" 2>/dev/null || true)"
+        [ -n "$target" ] || continue
+        case "$target" in
+            ../drive_c) target="$BOTTLE_DIR/$BOTTLE/drive_c" ;;
+        esac
+        target="${target%/}"
+        [ "$p" = "$target" ] || [ "${p#$target/}" != "$p" ] || continue
+        if [ -z "$best_drive" ] || [ "${#target}" -gt "${#best_target}" ]; then
+            best_target="$target"; best_drive="${link:t}"
+        fi
+    done
+    [ -n "$best_drive" ] || return 1
+    rest="${p#$best_target}"
+    dl="${(U)best_drive%:}"
+    print -r -- "${dl}:${rest//\//\\}"
+}
+
+# The game and its loader in THIS bottle, and no other. Two signals, either of
+# which is proof: the process's working directory is inside the prefix, or its
+# environment names the prefix (ps -E shows it for our own processes). The game
+# runs with its cwd in the game folder, outside the prefix, so the cwd test
+# alone -- the one --unstick uses -- would miss it.
+bottle_game_pids() {
+    local pfx="$BOTTLE_DIR/$BOTTLE" pid rest
+    {
+        ps -Ewwo pid=,command= 2>/dev/null | while read -r pid rest; do
+            case "$rest" in (*FIFA17.exe*|*_fifa17.exe*) ;; (*) continue ;; esac
+            case "$rest" in (*"$pfx"*) print -r -- "$pid" ;; esac
+        done
+        for pid in ${(f)"$(prefix_holders)"}; do
+            [ -n "$pid" ] || continue
+            case "$(ps -o command= -p "$pid" 2>/dev/null || true)" in
+                (*FIFA17.exe*|*_fifa17.exe*) print -r -- "$pid" ;;
+            esac
+        done
+    } | sort -u
+    return 0
+}
+
+# Stops them, politely then not. Only ever the pids above.
+stop_bottle_game() {
+    local -a victims left
+    local waited=0
+    victims=( ${(f)"$(bottle_game_pids)"} )
+    victims=( ${victims:#} )
+    [ "${#victims}" -gt 0 ] || return 0
+    kill -TERM ${victims} 2>/dev/null || true
+    while [ "$waited" -lt 15 ]; do
+        left=( ${(f)"$(bottle_game_pids)"} )
+        left=( ${left:#} )
+        [ "${#left}" -eq 0 ] && return 0
+        /bin/sleep 1
+        waited=$((waited + 1))
+    done
+    left=( ${(f)"$(bottle_game_pids)"} )
+    left=( ${left:#} )
+    [ "${#left}" -eq 0 ] || kill -KILL ${left} 2>/dev/null || true
+    return 0
+}
+
+# Runs the loader once, waits for the file, then stops what it started.
+seed_bottle_licence() {
+    local app="$1" lic gdu gwin wine waited=0 wpid
+    lic="$(bottle_licence_file)"
+    if [ -f "$lic" ]; then
+        ok "the licence file is already there ($(stat -f%z "$lic") bytes)"
+        return 0
+    fi
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
+        note "no bottle to seed the licence file in"
+        return 1
+    fi
+    gdu="$(game_dir_find 2>/dev/null || true)"
+    if [ -z "$gdu" ]; then
+        note "no FIFA 17 folder with _fifa17.exe in it was found, so the licence"
+        say "        file cannot be made here. The launcher makes it on the first"
+        say "        PLAY instead. For a game kept elsewhere:"
+        say "        AURORA_GAME_DIR='/path/to/FIFA 17' ./setup.sh --bottle"
+        return 1
+    fi
+    wine="$app/Contents/SharedSupport/CrossOver/bin/wine"
+    gwin="$(unix_path_to_win "$gdu" 2>/dev/null || true)"
+    if [ ! -x "$wine" ] || [ -z "$gwin" ]; then
+        note "cannot start the loader (no wine at $wine, or the bottle has no"
+        say "        drive letter for $gdu). The launcher will do it on PLAY."
+        return 1
+    fi
+    say "        running _fifa17.exe once in $gdu"
+    "$wine" --bottle "$BOTTLE" --workdir "$gdu" --cx-app "$gwin\\_fifa17.exe" \
+        >/dev/null 2>&1 &
+    wpid=$!
+    while [ "$waited" -lt 60 ]; do
+        [ -f "$lic" ] && break
+        /bin/sleep 1
+        waited=$((waited + 1))
+    done
+    kill -TERM "$wpid" 2>/dev/null || true
+    stop_bottle_game
+    wait "$wpid" 2>/dev/null || true
+    if [ -f "$lic" ]; then
+        ok "wrote the licence file after ${waited}s ($(stat -f%z "$lic") bytes)"
+        return 0
+    fi
+    note "the loader ran for ${waited}s and wrote no licence file:"
+    say "        $lic"
+    say "        Start FIFA 17 once from CrossOver and let it reach its menu."
+    return 1
+}
+
 # The Aurora17 folder, by override or by the three places it is normally put.
 aurora_dir_find() {
     local d
@@ -1091,6 +1237,21 @@ verify_install() {
         fi
     fi
 
+    # BUGS.md §18: the one file whose absence made a fully verified bottle die
+    # twenty seconds into every launch, with nothing static wrong anywhere.
+    local lic; lic="$(bottle_licence_file)"
+    if [ -f "$lic" ]; then
+        ok "licence file present ($(stat -f%z "$lic") bytes)"
+    else
+        say "  BAD   no licence file (step 9a):"
+        say "        $lic"
+        say "        Without it FIFA 17 takes its Origin activation path, relaunches"
+        say "        itself, and the process Aurora watches exits 0xFFFFFFFA about"
+        say "        twenty seconds in. PLAY now seeds the file itself; to do it"
+        say "        first:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --bottle"
+        problems=$((problems+1))
+    fi
+
     # The certificate the launcher cannot mint inside a bottle: there is no PKI
     # module here, so a missing pfx is a dead stop at PLAY, not a slow path.
     local adir; adir="$(aurora_dir_find 2>/dev/null || true)"
@@ -1258,6 +1419,17 @@ report_mode() {
             fi
         else
             print -r -- "(no connector.json -- Aurora has not run in this bottle)"
+        fi
+        print -r -- ""
+
+        print -r -- "---- the EA licence file (BUGS.md §18) -----------------"
+        local lic; lic="$(bottle_licence_file)"
+        if [ -f "$lic" ]; then
+            print -r -- "$lic"
+            print -r -- "  $(shasum -a 256 "$lic" | cut -c1-16)  $(stat -f%z "$lic") bytes"
+        else
+            print -r -- "MISSING: $lic"
+            print -r -- "  FIFA exits 0xFFFFFFFA about twenty seconds in without it."
         fi
         print -r -- ""
 
@@ -1616,6 +1788,20 @@ configure_bottle() {
     else
         note "the game will not reach Aurora17 until this file can be written"
     fi
+
+    # ------------------------------------------------ 9a. the EA licence file
+    # BUGS.md §18. Doing it here means the first PLAY in a new bottle is a
+    # normal launch instead of the 0xFFFFFFFA one. It is not required -- the
+    # launcher's stand-in seeds the file itself when PLAY finds it missing --
+    # so a failure here is a note, not a stop.
+    say ""
+    say "9a. Making sure FIFA 17's licence file is in the bottle"
+    LICENCE_OK=0
+    if seed_bottle_licence "$APP"; then
+        LICENCE_OK=1
+    else
+        note "without it the first PLAY seeds it, which takes a few seconds longer"
+    fi
 }
 
 # ------------------------------------------------- the launch that is watched
@@ -1742,7 +1928,12 @@ smoke_mode() {
         if [ -n "$conn" ] && [ "$conn" != "$conn_before" ] && [ -f "$conn" ]; then
             line="$(grep 'exited with code 0x' "$conn" | grep -v '0x00000000' | tail -1 || true)"
             if [ -n "$line" ]; then
-                smoke_failed "FIFA exited on its own" "$line" "$conn" "$lsx"
+                if [ ! -f "$(bottle_licence_file)" ]; then
+                    smoke_failed "FIFA exited on its own, and this bottle has no licence file" \
+                                 "$line" "$conn" "$lsx"
+                else
+                    smoke_failed "FIFA exited on its own" "$line" "$conn" "$lsx"
+                fi
                 return 1
             fi
             # A clean exit is not a pass. The game can load, patch its gate and
@@ -1810,6 +2001,20 @@ smoke_failed() {
     say "        $line"
     [ -n "$conn" ] && say "        connector log: ${conn:t}"
     say ""
+    # BUGS.md §18. Said before anything else, because when it is true it is the
+    # whole answer and every other line below is a distraction.
+    if [ ! -f "$(bottle_licence_file)" ]; then
+        say "This bottle has no EA licence file:"
+        say "    $(bottle_licence_file)"
+        say ""
+        say "That alone explains an exit of 0xFFFFFFFA about twenty seconds in:"
+        say "FIFA takes its Origin activation path, relaunches itself, and the"
+        say "process the connector is watching dies. Press PLAY again -- the"
+        say "launcher now makes the file first -- or seed it here with:"
+        say ""
+        say "    AURORA_BOTTLE='$BOTTLE' ./setup.sh --bottle"
+        say ""
+    fi
     # Which side of the handover it died on. This is sharper than the exit code
     # and it is the first thing to say, because it decides where to look next.
     if [ "$lsx" -eq 1 ]; then
