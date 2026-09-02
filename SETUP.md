@@ -856,9 +856,12 @@ runs FIFA 15; the connector then shows a Wine crash dialog on its way out, which
 1. Run `./setup.sh` as above, so the CrossOver copy exists.
 2. In that copy make a new bottle, **Windows 10, 64-bit**, called `Aurora15`.
 3. `AURORA_GAME=fifa15 ./setup.sh --bottle` — adds the three settings the bottle needs
-   (`CX_GRAPHICS_BACKEND`, `WINE_SIMULATE_WRITECOPY`, `CX_TOPDOWN_LIMIT`) and writes a windowed
-   `~/Documents/FIFA 15/fifasetup.ini` if there is none. Steps 8 to 9a are skipped: they are
-   FIFA 17's.
+   (`CX_GRAPHICS_BACKEND`, `WINE_SIMULATE_WRITECOPY`, `CX_TOPDOWN_LIMIT`), sets the `dinput8`
+   DLL override to `native,builtin`, and writes a windowed `~/Documents/FIFA 15/fifasetup.ini` if
+   there is none. The override is what makes Aurora work: Aurora15Connector's EA-MITM hook is a
+   proxy `dinput8.dll` beside `fifa15.exe`, and without it the bottle loads Wine's own, the game
+   reaches the real EA redirector and says the servers are closed while everything else looks
+   fine. Steps 8 to 9a are skipped: they are FIFA 17's.
 4. Without Aurora15Connector: `./fifa15/fifa15-offline.sh apply "/path/to/FIFA 15"`, then run
    `fifa15.exe` from the game folder in the `Aurora15` bottle. Without this patch the game hangs
    at the language screen with the flag mid-wave (`fifa15/README.md` says why).
