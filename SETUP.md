@@ -335,6 +335,34 @@ setting under it. Reconnect the controller once the bottle is running.
 
 `./setup.sh` does this for you; this is the manual equivalent.
 
+### 6c. Turn the bottle's proxy auto-detect off
+
+A brand-new bottle has no Internet settings of its own, and Wine reads that as
+"Automatically detect settings" being ticked. Every fresh .NET program in the
+bottle — Aurora's helper is one — then spends up to five seconds hunting for a
+proxy before its first request, even for an address on your own Mac. Aurora's
+shim only waits five seconds for that helper, so it gives up first and the game
+puts up a box saying the Origin client was terminated. Nothing here needs a
+proxy: everything Aurora talks to is this Mac.
+
+**Quit CrossOver completely first.** Then open:
+
+```
+~/Library/Application Support/CrossOver/Bottles/Aurora17/user.reg
+```
+
+Add this at the end, on its own two lines:
+
+```
+[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections] 0
+"DefaultConnectionSettings"=hex:46,00,00,00,00,00,00,00,01,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+```
+
+That is one long line, all on one line, however your editor wraps it. It is the
+same thing as unticking that box on Windows.
+
+`./setup.sh` does this for you; this is the manual equivalent.
+
 ### 7. The sound fix — only some Macs need this
 
 Check whether this folder exists on your Mac:
@@ -514,8 +542,8 @@ own window once and it will be renewed.
 ```
 
 It changes nothing. It checks every file, the signature, the permissions, the
-bottle settings, the version DLL override, the bottle's own shortcuts, whether
-anything is still holding the bottle, name
+bottle settings, the version DLL override, the bottle's proxy auto-detect, the
+bottle's own shortcuts, whether anything is still holding the bottle, name
 resolution and the PowerShell stand-in, and prints `BAD` beside whatever is wrong. Do this before anything in
 the table below — most of the time it names the problem outright.
 
@@ -648,6 +676,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
 | The game cannot reach Aurora17 — a connection error at the redirector, but everything else works | `ws2_32.so` is not reading the bottle's hosts file, so the names still go to EA | `--verify` says `ws2_32.so still asks macOS to resolve names`. Run `./setup.sh` again, or step 3a by hand |
 | **Everything verifies, the shim loads, and the game still quits ~20 s in** — the connector logs `exited with code 0xFFFFFFFA` | the bottle has no EA licence file (`C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf`); Aurora starts `FIFA17.exe` directly and only your `_fifa17.exe` writes it | press PLAY again — the launcher now seeds it — or `AURORA_BOTTLE='yourbottle' ./setup.sh --bottle`. See *The game quits about twenty seconds in* below |
+| **A popup outside the game: "FIFA 17 is shutting down because the Origin client was terminated"** | the bottle's proxy auto-detect was on, so Aurora's helper spent five seconds looking for a proxy and missed the shim's five-second deadline for the Origin auth code | `--verify` says `proxy auto-detect` is on; quit CrossOver fully and run `./setup.sh` again (or `AURORA_BOTTLE='yourbottle' ./setup.sh --bottle`) |
 | **"Aurora17 could not finish: The elevated setup step exited with code 1"** | the launcher is trying to write the six EA names into the bottle's hosts file through an Administrator copy of itself, and Wine has no UAC | `./setup.sh` writes them, and Aurora's receipt, itself — step 9. Then press PLAY again. `--verify` reports both |
 | **The game starts and quits by itself a few seconds later**, and `redirect-shim.log` ends in `origin-auth-code-refused helper-declined` | the launcher never got past its own setup, so no session was ever enrolled — nine times in ten that is the elevated step, above | Fix that first, then start the game from **PLAY FIFA 17**, never by running `FIFA17.exe` |
 | **"Creating a new redirector certificate needs Windows PowerShell's PKI module"** | Aurora is trying to mint its HTTPS certificate and there is no PKI module in a bottle | Step 8a — copy `aurora17/redirector-dev.pfx` into `server/Aurora17Server/`. `./setup.sh` does it |
@@ -722,6 +751,45 @@ carry over. What does not carry over is the Ultimate Team club, which lives at
 `drive_c\users\crossover\AppData\Local\Aurora17\Server\fut-state.json`
 inside the old bottle. Copy that one file across if you want your progress; leave
 `access-sessions.json` behind, it is regenerated.
+
+### "The Origin client was terminated"
+
+A box appears *outside* the game, after it has already reached the servers:
+
+> FIFA 17 is shutting down because the Origin client was terminated
+
+`--verify` says everything is fine, the game launches, and it still happens. Look
+in `%LOCALAPPDATA%\Aurora17\Logs` for these three lines:
+
+```
+redirect-shim.log   origin-auth-code-pipe-request begin
+                    origin-auth-code-refused helper-declined   (five seconds later)
+client-*.log        The one-use Origin auth bridge request failed closed
+                    ERROR Client failed: TaskCanceledException: A task was canceled.
+```
+
+Five seconds between the first two is the whole story. A new bottle has no
+Internet settings of its own, and Wine reads that as "Automatically detect
+settings" being ticked, so Aurora's helper spends five seconds hunting for a
+proxy before it makes its first request — and Aurora's shim only waits five
+seconds for it. The helper loses, exits, and the connection the game believes is
+Origin drops with it. Nothing in the install is wrong; the bottle is just slow
+off the mark. On most networks that hunt fails instantly and you never see this.
+
+The fix is one bottle setting. Quit CrossOver completely, then:
+
+```
+./setup.sh
+```
+
+or, if the rest is already installed:
+
+```
+AURORA_BOTTLE='yourbottle' ./setup.sh --bottle
+```
+
+`./setup.sh --verify` then says `proxy auto-detect off`. Step 6c is the manual
+equivalent.
 
 ### What Aurora's error codes mean
 
@@ -821,11 +889,7 @@ This is the main reason the default is a separate copy.)
 | `build.sh` | rebuilds every file in `fixes/` from source, so you need not take ours on trust |
 | `LICENSE` | MIT, for the parts that are ours |
 | `NOTICE.md` | which files are MIT and which are LGPL, and how to rebuild the LGPL ones |
-| `dev/` | the Terminal scripts, and tools we used |
-| `BUGS.md` | all sixteen problems, what causes each, who owns the code |
-| `HANDOFF.md` | the full engineering record |
-| `HANDOFF-AURORA-GUI.md` | how Aurora's own launcher was made to work |
-| `PORTABLE.md` | how this package is put together |
+| `setup.sh` `uninstall.sh` | what the two `.command` files run |
 
 The six CrossOver files are built from freely published CrossOver source code,
 and the changes are in `patches/` as their licence requires — `./build.sh` puts

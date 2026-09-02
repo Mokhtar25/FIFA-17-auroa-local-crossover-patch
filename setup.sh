@@ -668,6 +668,11 @@ reg_line_is_set() {
 # Writes LINE under SECTION in REG, in place of any other value of that NAME
 # there, keeping a backup as <file>.bak-aurora17. NAME is the quoted value name,
 # e.g. '"version"'. Returns non-zero if it could not be made to stick.
+#
+# A value Wine wrote itself can be wrapped over several lines -- fifteen bytes
+# to a line, each continued one ending in a backslash -- so dropping the old
+# value means dropping its continuation lines too. Leaving them behind would
+# leave half a hex blob loose in the section.
 set_reg_line() {
     local reg="$1" sec="$2" line="$3" name="$4" tmp
     [ -f "$reg" ] || return 1
@@ -677,11 +682,19 @@ set_reg_line() {
     if grep -qF "$sec" "$reg"; then
         A17_SEC="$sec" A17_LINE="$line" A17_NAME="$name=" awk '
             substr($0,1,1)=="[" {
+                dropping = 0
                 if (insec && !wrote) { print ENVIRON["A17_LINE"]; wrote=1 }
                 insec = (index($0, ENVIRON["A17_SEC"])==1)
                 print; next
             }
-            insec && index($0, ENVIRON["A17_NAME"])==1 { next }
+            dropping && substr($0,1,1)!="[" {
+                if (substr($0, length($0), 1) != "\\") dropping = 0
+                next
+            }
+            insec && index($0, ENVIRON["A17_NAME"])==1 {
+                if (substr($0, length($0), 1) == "\\") dropping = 1
+                next
+            }
             { print }
             END { if (insec && !wrote) print ENVIRON["A17_LINE"] }
         ' "$reg" > "$tmp" || { rm -f "$tmp"; return 1 }
@@ -718,6 +731,95 @@ WINEBUS_SECTION='[System\\CurrentControlSet\\Services\\winebus]'
 WINEBUS_LINE='"DisableHidraw"=dword:00000001'
 hidraw_is_disabled() { reg_line_is_set "$(bottle_system_reg)" "$WINEBUS_SECTION" "$WINEBUS_LINE"; }
 disable_hidraw()     { set_reg_line "$(bottle_system_reg)" "$WINEBUS_SECTION" "$WINEBUS_LINE" '"DisableHidraw"'; }
+
+# ------------------------------------- proxy auto-detect (BUGS.md §21)
+# Wine's winhttp tells every program in the bottle that "Automatically detect
+# settings" is ticked whenever the bottle has no DefaultConnectionSettings value
+# of its own -- and a new bottle never has one. .NET believes it, so the first
+# web request a fresh .NET process makes goes looking for a proxy first, even
+# for an address on this Mac. Wine looks one up by resolving wpad.<the bottle's
+# DNS domain>, and gives that name five seconds. On a network where the lookup
+# does not fail fast, every fresh .NET process loses those five seconds before
+# it says anything at all.
+#
+# Aurora's helper is one of those processes, and the redirect shim gives it
+# exactly five seconds to hand back an Origin auth code. So the shim gives up
+# first, every time: origin-auth-code-refused, the helper exits, the socket the
+# game thinks is Origin drops, and the game puts up a box saying "FIFA 17 is
+# shutting down because the Origin client was terminated". Nothing else is
+# wrong, and every other check passes.
+#
+# Everything Aurora talks to is on this Mac, at 127.0.0.1, so no proxy is ever
+# wanted in this bottle. The value below is exactly what Windows writes when you
+# untick that box: 56 bytes -- the magic 0x46, a zero, the flags (1, meaning go
+# direct, with the auto-detect bit 0x08 clear), three empty strings for the
+# proxy, the bypass list and the PAC url, and padding Wine never reads.
+PROXY_SECTION='[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections]'
+PROXY_LINE='"DefaultConnectionSettings"=hex:46,00,00,00,00,00,00,00,01,00,00,00'
+PROXY_LINE+=',00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00'
+PROXY_LINE+=',00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00'
+PROXY_LINE+=',00,00,00,00'
+
+# Is auto-detect off? This cannot use reg_line_is_set: that matches one line, and
+# once Wine has saved the registry itself the value comes back wrapped over four
+# lines. So join the continuation lines first (a line ending in a backslash
+# continues on the next one), then read the two bytes that decide it: the magic
+# must be 0x46, and bit 0x08 of the flags -- auto-detect -- must be clear.
+# Anything else at all, including no value and a magic we do not recognise,
+# counts as not off.
+proxy_autodetect_is_off() {
+    local reg="$(bottle_user_reg)"
+    [ -f "$reg" ] || return 1
+    A17_SEC="$PROXY_SECTION" A17_NAME='"DefaultConnectionSettings"=hex:' awk '
+        function hex(t,   i, c, d, v) {
+            gsub(/[ \t\\]/, "", t)
+            t = tolower(t)
+            if (t == "") return -1
+            v = 0
+            for (i = 1; i <= length(t); i++) {
+                d = index("0123456789abcdef", substr(t, i, 1)) - 1
+                if (d < 0) return -1
+                v = v * 16 + d
+            }
+            return v
+        }
+        BEGIN { name = ENVIRON["A17_NAME"]; nl = length(name) }
+        substr($0,1,1)=="[" { insec = (index($0, ENVIRON["A17_SEC"])==1); cont = 0; next }
+        cont {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            if (substr(line, length(line), 1) == "\\") line = substr(line, 1, length(line)-1)
+            else { cont = 0; done = 1 }
+            val = val line
+            next
+        }
+        insec && !done && index($0, name)==1 {
+            val = substr($0, nl+1)
+            if (substr(val, length(val), 1) == "\\") { val = substr(val, 1, length(val)-1); cont = 1 }
+            else done = 1
+            next
+        }
+        END {
+            if (!done) exit 1
+            n = split(val, b, ",")
+            if (n < 12) exit 1
+            if (hex(b[1]) != 70) exit 1          # the magic, 0x46
+            f = hex(b[9])                        # the low byte of the flags
+            if (f < 0) exit 1
+            if (int(f / 8) % 2 == 1) exit 1      # 0x08 = auto-detect, must be clear
+            exit 0
+        }
+    ' "$reg"
+}
+
+# Written as one line. Wine reads either shape, and one line is the shape the
+# rest of this script knows how to replace.
+disable_proxy_autodetect() {
+    proxy_autodetect_is_off && return 0
+    set_reg_line "$(bottle_user_reg)" "$PROXY_SECTION" "$PROXY_LINE" \
+        '"DefaultConnectionSettings"' || return 1
+    proxy_autodetect_is_off
+}
 
 # --------------------------------------------- the bottle's own shortcuts
 # CrossOver writes a small sh script per Start Menu entry and hardcodes the
@@ -1173,6 +1275,20 @@ verify_install() {
                  problems=$((problems+1)); }
     fi
 
+    # Without this Aurora's helper spends five seconds looking for a proxy before
+    # its first request, and the shim's five-second deadline for the Origin auth
+    # code runs out first. See BUGS.md §21.
+    if [ -f "$(bottle_user_reg)" ]; then
+        proxy_autodetect_is_off \
+            && ok "proxy auto-detect off in the $BOTTLE bottle" \
+            || { say "  BAD   proxy auto-detect is on in the $BOTTLE bottle, so Aurora's"
+                 say "        helper spends five seconds looking for a proxy and misses"
+                 say "        the deadline for the Origin auth code. The game will quit"
+                 say "        saying the Origin client was terminated. Quit CrossOver"
+                 say "        fully, then re-run ./setup.sh"
+                 problems=$((problems+1)); }
+    fi
+
     # A PlayStation controller with its buttons in the wrong places. A note, not
     # a BAD: the game runs and a keyboard is unaffected -- but it is the first
     # thing a player with a pad will hit.
@@ -1476,6 +1592,14 @@ report_mode() {
         fi
         print -r -- ""
 
+        print -r -- "---- proxy auto-detect ---------------------------------"
+        if proxy_autodetect_is_off; then
+            print -r -- "proxy auto-detect  off  OK"
+        else
+            print -r -- "proxy auto-detect  ON  (see SETUP.md: The Origin client was terminated)"
+        fi
+        print -r -- ""
+
         print -r -- "---- controller (winebus) ------------------------------"
         if hidraw_is_disabled; then
             print -r -- "DisableHidraw = 1  OK"
@@ -1523,7 +1647,7 @@ report_mode() {
         fi
         print -r -- ""
 
-        print -r -- "---- the EA licence file (BUGS.md §18) -----------------"
+        print -r -- "---- the EA licence file (SETUP.md step 9a) ------------"
         local lic; lic="$(bottle_licence_file)"
         if [ -f "$lic" ]; then
             print -r -- "$lic"
@@ -1781,9 +1905,24 @@ configure_bottle() {
              Without it the game will say the servers have been shut down.
              Quit CrossOver completely and run this again."
             fi
+            # See disable_proxy_autodetect. Same file, so it is done here rather
+            # than in a block of its own. Not a stop: without it the game still
+            # launches, and on a network where the wpad lookup fails fast it
+            # still plays.
+            if proxy_autodetect_is_off; then
+                ok "proxy auto-detect off — already set"
+            elif disable_proxy_autodetect; then
+                ok "proxy auto-detect off (kept the old user.reg as user.reg.bak-aurora17)"
+                say "        this is what keeps Aurora's helper inside its five-second limit"
+            else
+                note "could not turn proxy auto-detect off in $(bottle_user_reg)"
+                say "        the game may quit saying the Origin client was terminated."
+                say "        Quit CrossOver completely and run this again."
+            fi
         else
             note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once,"
-            say "        then run ./setup.sh again so the version override can be set"
+            say "        then run ./setup.sh again so the version override and the"
+            say "        proxy setting can be set"
         fi
 
         # See disable_hidraw. Without it a PlayStation controller's buttons land
@@ -1935,6 +2074,8 @@ configure_bottle() {
 #   pass   redirect-shim.log gains   origin-auth-code-issued
 #   fail   the connector log gains   exited with code 0x...  (non-zero)
 #   fail   redirect-shim.log gains   origin-auth-code-refused
+#          (helper-declined, five seconds after origin-auth-code-pipe-request
+#          begin, is proxy auto-detect -- BUGS.md §21; run --verify)
 #          or repeated              origin-auth-code-sync-bridge-failed
 #
 # and one marker that decides nothing by itself but tells the two shapes of
@@ -2132,6 +2273,25 @@ smoke_failed() {
         say "    AURORA_BOTTLE='$BOTTLE' ./setup.sh --bottle"
         say ""
     fi
+    # BUGS.md §21, and the same shape as the licence file above: when it is
+    # true it is the whole answer. The shim waits five seconds for the auth
+    # code, and a bottle with proxy auto-detect on costs the helper five
+    # seconds before it makes its first request.
+    case "$why" in
+        *"refused an auth code"*)
+            if [ -f "$(bottle_user_reg)" ] && ! proxy_autodetect_is_off; then
+                say "Proxy auto-detect is on in this bottle. That alone explains a"
+                say "helper-declined refusal about five seconds after"
+                say "origin-auth-code-pipe-request begin: Aurora's helper spends"
+                say "those five seconds looking for a proxy it does not need, and"
+                say "the shim's deadline runs out first. Quit CrossOver fully and:"
+                say ""
+                say "    ./setup.sh"
+                say ""
+                say "Then check it with:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
+                say ""
+            fi ;;
+    esac
     # Which side of the handover it died on. This is sharper than the exit code
     # and it is the first thing to say, because it decides where to look next.
     if [ "$lsx" -eq 1 ]; then
@@ -2527,11 +2687,12 @@ if [ "$IN_PLACE" = "1" ] && app_is_running "$SRC"; then
     die $E_PERMISSION "$SRC is running. Quit it first, then run this again."
 fi
 
-# Step 7 edits the bottle's user.reg and system.reg. A live Wine session keeps
-# the registry in memory and writes it back out when it exits, so the two values
-# added here would be thrown away silently the next time CrossOver quits -- and the
-# game would say the servers have been shut down with every check in --verify
-# saying ok. See prefix_holders.
+# Step 7 edits the bottle's user.reg and system.reg: the version override and
+# the proxy setting in one, the controller setting in the other. A live Wine
+# session keeps the registry in memory and writes it back out when it exits, so
+# the values added here would be thrown away silently the next time CrossOver
+# quits -- and the game would say the servers have been shut down with every
+# check in --verify saying ok. See prefix_holders.
 HOLDING=( ${(f)"$(prefix_holders)"} )
 HOLDING=( ${HOLDING:#} )
 if [ "${#HOLDING}" -gt 0 ]; then
