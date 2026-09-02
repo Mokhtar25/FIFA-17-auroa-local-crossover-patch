@@ -2,7 +2,9 @@
 
 Patches against `crossover-sources-26.3.0`. Since the `fifa15` branch, `build.sh` applies
 `crossover-26.3-topdown-alloc-limit.patch` after the four FIFA 17 patches; it is env-gated, so
-FIFA 17 is unaffected. The others here are records of the investigation and are not built.
+FIFA 17 is unaffected. It also applies `crossover-26.3-gdiplus-delete-font-collection.patch`
+and builds `gdiplus.dll`, which only the FIFA 15 profile installs (the launcher's exit crash,
+below). The others here are records of the investigation and are not built.
 Full history lives outside the repo (the FIFA 15 checkpoint documents, sessions 1-9).
 
 ## Status of FIFA 15 itself (2026-09-02): runs to the attract-mode match
@@ -56,6 +58,18 @@ Applies cleanly on pristine sources and on top of the four FIFA 17 patches.
 (`NtQueryInformationProcess(ProcessDebugPort)`); writing the PEB byte does not fool Windows.
 FIFA 15's protection sets that byte itself, so under Wine its `SetUnhandledExceptionFilter`
 handlers were never called. Falls back to the PEB flag if the query fails.
+
+## crossover-26.3-gdiplus-delete-font-collection.patch  (Aurora15Connector's exit crash)
+Aurora15Connector (.NET, NativeAOT) dies when it shuts down: `page fault on read access to 0`
+at `gdiplus+0x157ac` = `GdipDeletePrivateFontCollection+0x4c`, `movq (%rdx,%rbx,8),%rcx` with
+`rdx` = `FontFamilies` = NULL and `rbx` = 0. Wine walked `count` entries of a collection whose
+family list was already gone (a stale pointer after an earlier delete, or a private font that
+never loaded); Windows GDI+ survives the same call and clears the caller's pointer, which Wine
+did not do either. Seen on every connector run in the bottle, after the game or when the
+launcher window is closed; the game itself is unaffected. The patch skips the walk when the
+list is NULL, rejects a NULL collection with `InvalidParameter`, and sets `*fontCollection` to
+NULL as Windows does. `AURORA_GAME=fifa15 ./setup.sh` installs the resulting `gdiplus.dll`
+(`fixes/x86_64-windows/gdiplus.dll`); FIFA 17 setups do not touch gdiplus. Upstream-worthy.
 
 ## crossover-26.3-unwind-fault-guard.patch  (robustness; not load-bearing for FIFA 15)
 `call_seh_handlers` could fault inside `RtlVirtualUnwind2` when a frame's unwind data sends the

@@ -108,7 +108,8 @@ APP_MGMT_HINT='         Usually macOS refusing the write. To fix:
               If it is not listed, use Full Disk Access instead.
            3. Quit that app completely, reopen it, and run this again.'
 
-# The six Wine files the fixes replace.
+# The six Wine files the fixes replace. The FIFA 15 profile adds a seventh,
+# gdiplus.dll, where GAME is decided below.
 FILES=(
   x86_64-unix/ntdll.so
   x86_64-unix/winecoreaudio.so
@@ -397,6 +398,11 @@ case "$GAME" in
 esac
 if [ "$GAME" = fifa15 ]; then
     BOTTLE="${AURORA_BOTTLE:-Aurora15}"
+    # Aurora15Connector (.NET) dies at exit in Wine's GdipDeletePrivateFontCollection:
+    # it walks a font collection whose family list is already gone. Windows GDI+
+    # survives the same call. The patched gdiplus.dll is FIFA 15's alone; FIFA 17
+    # never needed it, so main does not ship it (sync-repo.sh drops it there).
+    FILES+=( x86_64-windows/gdiplus.dll )
     # No CX_DR_TRAP: the FIFA 15 protector was never seen to need it, and the
     # bottle this was proven in did not have it. CX_TOPDOWN_LIMIT is the fix
     # for its start-up crash (patches/README-fifa15-wine-fixes.md).
