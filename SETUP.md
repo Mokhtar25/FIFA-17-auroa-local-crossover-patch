@@ -37,12 +37,10 @@ None of those three are included here, and none of them can be shared.
 
 > **Give FIFA 17 a bottle of its own, and put nothing else in it.**
 > A Windows 10 64-bit bottle, used for this game and nothing else. It is still
-> the right way to set this up — but be aware it is not a guarantee. A brand-new
-> bottle can also hit the bug where every check here passes and the game quits
-> about twenty seconds in and relaunches itself forever. That was measured on
-> 2026-09-02: a bottle created from scratch, installed into cleanly, verified,
-> and its **first ever** launch died that way. See *The prefix has gone bad*
-> below for what is and is not known.
+> the right way to set this up. A brand-new bottle used to hit a bug where every
+> check passed and the game quit about twenty seconds in; that was a missing
+> licence file, and step 9a and the launcher now make it. See *The game quits
+> about twenty seconds in* below if it ever comes back.
 
 
 Nothing has to be "pointed at" the bottle, and this trips people up, so here it
@@ -407,6 +405,27 @@ reaches the elevated path at all. Anything already in that hosts file that is
 not tagged `# aurora17` is kept, and the original is saved as
 `hosts.bak-aurora17`.
 
+### 9a. The licence file the game will not start without
+
+The installer does this for you (it is the last thing `./setup.sh --bottle`
+does), and the launcher does it on its own if it finds the file missing. By hand:
+start `_fifa17.exe` from your game folder once in the bottle, wait a few seconds,
+and quit it. That run writes
+
+```
+C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf
+```
+
+**Why:** Aurora's launcher starts `FIFA17.exe` directly. Without that file the
+game takes its Origin activation path instead of its normal one: it relaunches
+itself, the process Aurora is watching exits with `0xFFFFFFFA` about twenty
+seconds in, and the launcher sits on *WORKING...* with no error. With the file
+present the same launch connects. The file is made from your own copy of the
+game, so it is not shipped here; one loader run per bottle makes it, and it is
+the same 1649 bytes every time. `./setup.sh --verify` reports it as
+`licence file present`; if your game lives somewhere other than
+`~/Downloads/FIFA 17`, say where with `AURORA_GAME_DIR='/path/to/FIFA 17'`.
+
 ---
 
 ## Playing
@@ -594,7 +613,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
 | The game cannot reach Aurora17 — a connection error at the redirector, but everything else works | `ws2_32.so` is not reading the bottle's hosts file, so the names still go to EA | `--verify` says `ws2_32.so still asks macOS to resolve names`. Run `./setup.sh` again, or step 3a by hand |
-| **Everything verifies, the shim loads, and the game still quits ~20 s in** — the connector logs `exited with code 0xFFFFFFFA` | open bug, cause unknown. Nothing in the install is wrong and no static check can see it | `./setup.sh --smoke` confirms it in one launch. A **new** Windows 10 64-bit bottle (`AURORA_BOTTLE='newname' ./setup.sh --bottle`) is worth trying but is **not** a cure — it has been reproduced on a bottle's first ever launch. See *The prefix has gone bad* below |
+| **Everything verifies, the shim loads, and the game still quits ~20 s in** — the connector logs `exited with code 0xFFFFFFFA` | the bottle has no EA licence file (`C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf`); Aurora starts `FIFA17.exe` directly and only your `_fifa17.exe` writes it | press PLAY again — the launcher now seeds it — or `AURORA_BOTTLE='yourbottle' ./setup.sh --bottle`. See *The game quits about twenty seconds in* below |
 | **"Aurora17 could not finish: The elevated setup step exited with code 1"** | the launcher is trying to write the six EA names into the bottle's hosts file through an Administrator copy of itself, and Wine has no UAC | `./setup.sh` writes them, and Aurora's receipt, itself — step 9. Then press PLAY again. `--verify` reports both |
 | **The game starts and quits by itself a few seconds later**, and `redirect-shim.log` ends in `origin-auth-code-refused helper-declined` | the launcher never got past its own setup, so no session was ever enrolled — nine times in ten that is the elevated step, above | Fix that first, then start the game from **PLAY FIFA 17**, never by running `FIFA17.exe` |
 | **"Creating a new redirector certificate needs Windows PowerShell's PKI module"** | Aurora is trying to mint its HTTPS certificate and there is no PKI module in a bottle | Step 8a — copy `aurora17/redirector-dev.pfx` into `server/Aurora17Server/`. `./setup.sh` does it |
@@ -610,11 +629,11 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | Microphone or camera stopped working in CrossOver-FIFA | it was signed without CrossOver's own permissions | `./setup.sh --resign`, which preserves and then verifies them |
 | A CrossOver update landed and FIFA broke | the update replaced the app; the copy is untouched but may now be a different version | Run `./setup.sh` again. If CrossOver moved past 26.3, see below. |
 
-### The prefix has gone bad
+### The game quits about twenty seconds in
 
-The symptom is specific. `./setup.sh --verify` says **Everything checks out**,
-`redirect-shim.log` reaches `origin-auth-code-sync-bridge-enabled verified-build`,
-and the game still dies about twenty seconds in:
+The symptom is specific. `./setup.sh --verify` used to say **Everything checks
+out**, `redirect-shim.log` reaches `origin-auth-code-sync-bridge-enabled
+verified-build`, and the game still dies:
 
 ```
 +00:00  Started the direct FIFA17 launch candidate (pid N)
@@ -622,83 +641,50 @@ and the game still dies about twenty seconds in:
 +00:24  exited with code 0xFFFFFFFA
 ```
 
-followed by `FIFA17.exe /dbrv=1`, `/dbrv=2` … at 100% CPU — the game's copy
-protection relaunching itself.
+followed by `origin-auth-code-sync-bridge-failed pipe-capability` lines in
+`redirect-shim.log` every twenty seconds, and the launcher stuck on *WORKING...*.
 
-Nothing in the installation is wrong when this occurs, and no check in `--verify`
-can see it — the two bottles it was first measured on had byte-identical
-`cxbottle.conf` files.
+**The cause is one missing file** (found 2026-09-02, after two weeks of wrong
+theories about certificates and prefix state):
 
-**A new bottle is not the cure, and the cause is still unknown.** This was
-settled by measurement on 2026-09-02. A bottle was created from scratch at
-16:32, the full installer was run against it (exit 0, every step green),
-`--verify` passed every check, and its **first ever** PLAY died at 16:35:54
-with `0xFFFFFFFA`, twenty-four seconds in. Nothing had ever run in that prefix.
-An older bottle on the same machine — same CrossOver, same fixes, same game,
-same Aurora — played normally.
+```
+C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf
+```
 
-So the earlier explanation, that the prefix accumulates something, is wrong.
-It described the first two cases and predicts the opposite of what happened here.
+Aurora starts `FIFA17.exe` directly, and without that licence file the game goes
+into Origin activation: it relaunches itself, the process Aurora is bound to
+exits `0xFFFFFFFA`, the helper discards the session, and the relaunched copy has
+no pipe to talk to — the `pipe-capability` lines are that copy failing, after
+the fact. Your own `_fifa17.exe` writes the file within four seconds of
+starting. Every bottle that ever played had it; every bottle that failed did not.
+The one "fresh bottle that played without the loader" had in fact failed its
+first PLAY, and the orphaned relaunch wrote the file 24 seconds later.
 
-**The sharpest marker is in the client log, not the exit code.** A launch that
-works logs this within about 17 seconds of the shim signalling ready:
+What fixes it, in order of least effort:
+
+1. Press **PLAY** again. The stand-in now checks for the file before it starts
+   the server, runs your loader for a few seconds if the file is missing, stops
+   it, and then launches normally. You will see
+   `Seeding the FIFA 17 licence file (first launch in this bottle)...` in the
+   launcher.
+2. If the launcher reports **code 24**, it could not find `_fifa17.exe` next to
+   your game. Start FIFA 17 once yourself from CrossOver (any way that reaches
+   the menu), quit, and PLAY again.
+3. From Terminal, `AURORA_BOTTLE='yourbottle' ./setup.sh --bottle` seeds the
+   file (step 9a) and `./setup.sh --verify` confirms it with
+   `licence file present`.
+
+A launch that works logs this in the client log within about 17 seconds of the
+shim signalling ready:
 
 ```
 Accepted the LSX connection owned by FIFA17 pid N
 Completed the FIFA17 LSX challenge handshake.
 ```
 
-A launch that fails never logs it. The game waits the same ~17 seconds and then
-exits instead of connecting, and `wire-transcript.log` stays nearly empty — about
-2 KB, holding only the launcher's own config fetch, against ~62 KB for a session
-that worked. The `origin-auth-code-sync-bridge-failed` lines in `redirect-shim.log`
-are written *after* the game has already exited, so they are a consequence, not
-the cause.
-
-Four things that are **not** the answer, all tested:
-
-- **A fresh bottle.** Reproduced on a first launch, above.
-- **Accumulated registry state.** The bottle that plays has the *larger*
-  registry, not the smaller one.
-- Running `_fifa17.exe` first. The bottle that plays has never run it — there is
-  no trace of it in its registry.
-- Quitting CrossOver completely and reopening. Tested on its own; failed
-  identically.
-
-The only functional difference found between a bottle that plays and a fresh one
-that does not is the certificate store — 163 root certificates against none.
-That is recorded as an open question, not an answer: a bottle that *played* was
-also measured with a count of 0, so an empty store cannot be sufficient on its
-own. Everything else that differs is host hardware state — audio devices, a
-game controller, graphics driver keys.
-
-A new bottle is still worth trying, because it is quick and it has sometimes
-helped. Do not expect it to work.
-
-1. In CrossOver, make a new bottle. **Windows 10, 64-bit.** Any name.
-2. Set it up — this does not re-copy CrossOver and takes seconds:
-
-   ```
-   AURORA_BOTTLE='thenewname' ./setup.sh --bottle
-   ```
-
-3. Check it:
-
-   ```
-   AURORA_BOTTLE='thenewname' ./setup.sh --verify
-   ```
-
-4. Open the new bottle in CrossOver-FIFA and press **PLAY FIFA 17**. To get a
-   plain answer instead of guessing from the screen, start
-   `AURORA_BOTTLE='thenewname' ./setup.sh --smoke` first and press PLAY when it
-   asks — it says `PASS` or `FAIL` and quotes the deciding log line.
-
-If the new bottle fails the same way, you have hit the open bug rather than a
-broken install. `./setup.sh --bundle` collects everything needed to chase it.
-
-Nothing outside the bottle is touched, so the game folder, Aurora's shim in it,
-and the Aurora17 folder all carry over. What does not carry over is the Ultimate
-Team club, which lives at
+If you move to a new bottle for any other reason: nothing outside the bottle is
+touched, so the game folder, Aurora's shim in it, and the Aurora17 folder all
+carry over. What does not carry over is the Ultimate Team club, which lives at
 `drive_c\users\crossover\AppData\Local\Aurora17\Server\fut-state.json`
 inside the old bottle. Copy that one file across if you want your progress; leave
 `access-sessions.json` behind, it is regenerated.
@@ -712,7 +698,7 @@ The stand-in that replaces PowerShell reports every refusal as
 | code | meaning | what to do |
 |---|---|---|
 | 10 | another launch is already in progress | wait, or quit the launcher and reopen it |
-| 11 | something that is not Aurora is listening on port 47170 | `./setup.sh --unstick` |
+| 11 | port 47170 is busy and the holder is not visible to this launch — almost always our own Aurora server left over from an earlier launch | quit the launcher completely, `./setup.sh --unstick`, PLAY again |
 | 12 | the packaged server would not start | the server log is in the bundle; check it is not missing from your Aurora17 folder |
 | 13 | the server started but never passed its readiness check | usually the certificate — code 22 |
 | 14 | the control key could not be created or read | `%LOCALAPPDATA%\Aurora17` is not writable |
@@ -724,6 +710,8 @@ The stand-in that replaces PowerShell reports every refusal as
 | 21 | the club reset failed | the server was not running |
 | 22 | no `redirector-dev.pfx`, and no PKI module to make one | step 8a |
 | 23 | Aurora asked PowerShell to do something the stand-in does not implement | send a bundle — the log records the exact command line |
+| 24 | no licence file in the bottle, and no `_fifa17.exe` next to the game to make one | start FIFA 17 once from CrossOver, then PLAY again — step 9a |
+| 25 | FIFA quit within a minute of starting, licence present | if you closed it yourself, ignore it; otherwise the newest `client-*.log` says why |
 
 ### What the installer's exit codes mean
 
