@@ -19,6 +19,8 @@
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
+#              1 is not a designed outcome: it means a stop nobody gave a code
+#              to, and is worth reporting as a bug in this script.
 
 set -eu
 HERE="${0:A:h}"
@@ -46,6 +48,9 @@ esac
 say()  { print -r -- "$@"; }
 ok()   { print -r -- "  ok    $@"; }
 note() { print -r -- "  note  $@"; }
+# Every designed stop goes through die() with one of the four codes above.
+# A bare fail() means a path nobody assigned a code to, so exit 1 is reserved
+# for exactly that -- an unplanned stop -- and never appears in the table.
 fail() { print -r -- ""; print -r -- "STOPPED: $@"; exit "${EXIT_AS:-1}"; }
 die()  { EXIT_AS="$1"; shift; fail "$@"; }
 
@@ -692,9 +697,9 @@ sign_payload() {
     local wine="$1" so
     for so in $MACHO; do
         [ -f "$wine/x86_64-unix/$so" ] \
-            || fail "$so is missing from $wine/x86_64-unix."
+            || die $E_PAYLOAD "$so is missing from $wine/x86_64-unix."
         codesign --force --sign - "$wine/x86_64-unix/$so" 2>/dev/null \
-            || fail "Could not sign $so.
+            || die $E_PERMISSION "Could not sign $so.
          The copy is incomplete. Run ./uninstall.sh and try again."
     done
     ok "the ${#MACHO} Mac files"
@@ -718,7 +723,7 @@ resign_app() {
         note "could not read the permissions on $app -- $(ent_reason "$rc")"
         write_stock_entitlements "$ent" \
             || { rm -f "$ent" "$after"
-                 fail "Could not write the replacement permission list.
+                 die $E_PERMISSION "Could not write the replacement permission list.
          Nothing has been signed." }
         note "using the four CrossOver 26.3 ships with instead"
     fi
@@ -727,19 +732,19 @@ resign_app() {
     before_keys=( ${(f)"$(entitlement_keys "$ent")"} )
     [ "${#before_keys}" -gt 0 ] \
         || { rm -f "$ent" "$after"
-             fail "CrossOver's permission list came back empty. Nothing signed." }
+             die $E_PAYLOAD "CrossOver's permission list came back empty. Nothing signed." }
     ok "kept CrossOver's ${#before_keys} permissions"
 
     /usr/libexec/PlistBuddy -c "Add :$LIBVAL_KEY bool true" "$ent" >/dev/null 2>&1 \
         || /usr/libexec/PlistBuddy -c "Set :$LIBVAL_KEY true" "$ent" >/dev/null 2>&1 \
         || { rm -f "$ent" "$after"
-             fail "Could not add the permission that lets the copy load its own
+             die $E_PERMISSION "Could not add the permission that lets the copy load its own
          frameworks. Without it the app will not open at all. Nothing signed." }
     ok "allowed it to load its own frameworks"
 
     codesign --force --sign - -o runtime --entitlements "$ent" "$app" 2>/dev/null \
         || { rm -f "$ent" "$after"
-             fail "Could not sign $app.
+             die $E_PERMISSION "Could not sign $app.
          It will not launch until it is signed. Try:  ./setup.sh --resign" }
     ok "signed $app"
 
@@ -748,7 +753,7 @@ resign_app() {
     # open, which is a miserable thing to debug from the other end.
     codesign -d --entitlements "$after" --xml "$app" 2>/dev/null && [ -s "$after" ] \
         || { rm -f "$ent" "$after"
-             fail "Signed $app but could not read its permissions back." }
+             die $E_PERMISSION "Signed $app but could not read its permissions back." }
 
     local -a now_keys
     now_keys=( ${(f)"$(entitlement_keys "$after")"} )
@@ -757,17 +762,17 @@ resign_app() {
         [[ " ${now_keys[*]} " == *" $k "* ]] || missing="$missing $k"
     done
     [ -z "$missing" ] || { rm -f "$ent" "$after"
-        fail "Signing lost these permissions:$missing
+        die $E_PERMISSION "Signing lost these permissions:$missing
          Run ./uninstall.sh and install again." }
     [[ " ${now_keys[*]} " == *" $LIBVAL_KEY "* ]] || { rm -f "$ent" "$after"
-        fail "The permission that lets the copy load its own frameworks did not
+        die $E_PERMISSION "The permission that lets the copy load its own frameworks did not
          stick. The app would not open. Run ./setup.sh --resign." }
     ok "all ${#now_keys} permissions verified on the signed app"
     rm -f "$ent" "$after"
 
     # If this is wrong the app dies at launch with a dyld error and no window.
     codesign --verify --deep --strict "$app" 2>/dev/null \
-        || fail "The new signature on $app did not verify.
+        || die $E_PERMISSION "The new signature on $app did not verify.
          The app would not open. Run:  ./setup.sh --resign
          If that does not help, run ./uninstall.sh and install again."
     ok "signature verifies"
@@ -776,6 +781,39 @@ resign_app() {
 # ------------------------------------------------------------- --verify
 # Checks an install without changing anything. Every troubleshooting step in
 # SETUP.md can point here instead of at a re-install.
+# ------------------------------------------------- where the game actually is
+# Aurora's connector records the folder it launches from, and that is the folder
+# whose version.dll matters -- not necessarily the one someone installed into.
+# --report and --verify both need it, and had two copies of this parsing until
+# 2026-09-02; one copy is enough.
+connector_game_dir() {
+    local conn
+    conn="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Connector/connector.json"
+    [ -f "$conn" ] || return 1
+    sed -n 's/.*"gameDirectory": *"\([^"]*\)".*/\1/p' "$conn" | head -1
+}
+
+# Y:\Downloads\FIFA 17 -> the real path, through the bottle's own mapping. The
+# separators arrive doubled, having been through JSON, so a run of backslashes
+# of any length collapses to one slash.
+win_path_to_unix() {
+    local gamedir="$1" drive rest
+    [ -n "$gamedir" ] || return 1
+    drive="${gamedir%%:*}"
+    rest="$(print -r -- "$gamedir" | sed -e 's|^[A-Za-z]:||' -e 's|\\\\*|/|g')"
+    print -r -- "$BOTTLE_DIR/$BOTTLE/dosdevices/${(L)drive}:$rest"
+}
+
+# The Aurora17 folder, by override or by the three places it is normally put.
+aurora_dir_find() {
+    local d
+    for d in "${AURORA_DIR:-}" "$HOME/Downloads/Aurora17" "$HOME/Aurora17" "$HOME/Desktop/Aurora17"; do
+        [ -n "$d" ] || continue
+        if [ -f "$d/Aurora17Connector.exe" ]; then print -r -- "$d"; return 0; fi
+    done
+    return 1
+}
+
 verify_install() {
     local app="$1" problems=0
     say ""
@@ -1011,6 +1049,89 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # ---- three checks that used to be in --report only -------------------
+    # Each of these could be wrong while --verify still said "everything checks
+    # out", which is the worst thing a check can do. --report has always shown
+    # them; showing them only there meant nobody looked until after a failure.
+
+    # The redirect shim in the game folder. Without it the game never reaches
+    # Aurora at all and says "the servers for this title have been shut down"
+    # -- with a clean --verify behind it.
+    local gd gdu
+    gd="$(connector_game_dir 2>/dev/null || true)"
+    if [ -z "$gd" ]; then
+        note "Aurora has not run in this bottle yet, so the game folder is not"
+        say "        recorded — press PLAY once, then check again"
+    else
+        gdu="$(win_path_to_unix "$gd" 2>/dev/null || true)"
+        if [ -z "$gdu" ] || [ ! -d "$gdu" ]; then
+            say "  BAD   the game folder Aurora recorded does not exist:"
+            say "        $gd"
+            say "        Aurora is pointed at a folder that is not there. Set the"
+            say "        game location again in Aurora17 and press PLAY once."
+            problems=$((problems+1))
+        else
+            local gf missing_shim=0
+            for gf in version.dll aurora17-redirect.ini; do
+                [ -f "$gdu/$gf" ] || missing_shim=1
+            done
+            if [ "$missing_shim" -eq 0 ]; then
+                ok "the redirect shim is in the game folder"
+            else
+                say "  BAD   the game folder is missing part of Aurora's redirect shim:"
+                say "        $gdu"
+                for gf in version.dll aurora17-redirect.ini; do
+                    [ -f "$gdu/$gf" ] || say "        missing: $gf"
+                done
+                say "        Without both, the game never reaches Aurora and reports"
+                say "        'the servers for this title have been shut down'."
+                say "        Use Aurora17's REPAIR SETUP to put them back."
+                problems=$((problems+1))
+            fi
+        fi
+    fi
+
+    # The certificate the launcher cannot mint inside a bottle: there is no PKI
+    # module here, so a missing pfx is a dead stop at PLAY, not a slow path.
+    local adir; adir="$(aurora_dir_find 2>/dev/null || true)"
+    if [ -z "$adir" ]; then
+        note "no Aurora17 folder found — if yours is elsewhere:"
+        say "        AURORA_DIR=/path/to/Aurora17 ./setup.sh --verify"
+    elif [ -f "$adir/server/Aurora17Server/redirector-dev.pfx" ]; then
+        ok "the redirector certificate is in place"
+    else
+        say "  BAD   redirector-dev.pfx is missing from"
+        say "        $adir/server/Aurora17Server/"
+        say "        The launcher will try to mint one and stop: minting needs"
+        say "        Windows PowerShell's PKI module, which a bottle does not"
+        say "        have. Re-run ./setup.sh — it copies the shipped one."
+        problems=$((problems+1))
+    fi
+
+    # Which CrossOver is open. Three copies share one bundle identifier, so the
+    # Dock, Spotlight and a stale menu shim can all hand someone the unpatched
+    # one -- and every check above still passes, because they all look at the
+    # app this script was told about, not the app that is running.
+    local -a others; local r
+    others=()
+    for r in ${(f)"$(crossovers_running)"}; do
+        [ -n "$r" ] || continue
+        [ "${r:A}" = "${app:A}" ] || others+=( "$r" )
+    done
+    if [ "${#others}" -eq 0 ]; then
+        : # either nothing is running, or the right one is -- both fine
+    else
+        say "  BAD   a different CrossOver is open than the one checked here."
+        say "        checked:  $app"
+        for r in $others; do say "        running:  $r" ; done
+        say "        All CrossOver copies share one bundle identifier, so the"
+        say "        Dock and Spotlight cannot tell them apart. Everything above"
+        say "        passed for the copy this script was given — the one you are"
+        say "        using is a different app and is not patched."
+        say "        Quit it and open $app directly."
+        problems=$((problems+1))
+    fi
+
     say ""
     if [ "$problems" -eq 0 ]; then
         # Everything here is static -- files, UUIDs, signatures, registry keys.
@@ -1117,18 +1238,11 @@ report_mode() {
         print -r -- "---- the shim in the game folder -----------------------"
         # The connector records where the game is; that is the folder whose
         # version.dll matters, and it is not always the one that was installed.
-        local conn gamedir=""
-        conn="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Connector/connector.json"
-        if [ -f "$conn" ]; then
-            gamedir="$(sed -n 's/.*"gameDirectory": *"\([^"]*\)".*/\1/p' "$conn" | head -1)"
-            print -r -- "connector says: ${gamedir:-(not recorded)}"
-            # Y:\Downloads\FIFA 17 -> a real path, via the bottle's own mapping.
-            # The separators arrive doubled, having been through JSON, so a run
-            # of backslashes of any length collapses to one slash.
-            local drive rest unixdir
-            drive="${gamedir%%:*}"
-            rest="$(print -r -- "$gamedir" | sed -e 's|^[A-Za-z]:||' -e 's|\\\\*|/|g')"
-            unixdir="$BOTTLE_DIR/$BOTTLE/dosdevices/${(L)drive}:$rest"
+        local gamedir="" unixdir=""
+        gamedir="$(connector_game_dir 2>/dev/null || true)"
+        if [ -n "$gamedir" ]; then
+            print -r -- "connector says: $gamedir"
+            unixdir="$(win_path_to_unix "$gamedir" 2>/dev/null || true)"
             if [ -d "$unixdir" ]; then
                 print -r -- "which is:       $unixdir"
                 local f
@@ -1356,7 +1470,7 @@ configure_bottle() {
             if grep -q "^\"$1\" = \"$2\"\$" "$CONF"; then
                 ok "$1 — already set"
             elif grep -q "^\"$1\" = " "$CONF"; then
-                fail "$1 is set to something else in
+                die $E_INCOMPLETE "$1 is set to something else in
                  $CONF
              It must be \"$2\". Edit that line, or delete it and run this again."
             else
@@ -1389,7 +1503,7 @@ configure_bottle() {
                 ok "version = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
                 say "        this is what lets Aurora's redirect shim load at all"
             else
-                fail "Could not set the version DLL override in
+                die $E_PERMISSION "Could not set the version DLL override in
                  $(bottle_user_reg)
              Without it the game will say the servers have been shut down.
              Quit CrossOver completely and run this again."
@@ -1520,6 +1634,16 @@ configure_bottle() {
 #   fail   redirect-shim.log gains   origin-auth-code-refused
 #          or repeated              origin-auth-code-sync-bridge-failed
 #
+# and one marker that decides nothing by itself but tells the two shapes of
+# failure apart:
+#
+#   the client log gains  Accepted the LSX connection owned by FIFA17 pid N
+#
+# A launch that never logs it died without sending a single request -- the
+# 2 KB wire transcript rather than the 62 KB one. A launch that logs it and
+# then fails got as far as talking to Aurora, which is a different fault
+# with a different cause. Every failing verdict below says which it was.
+#
 # Both logs are read from the marks taken before PLAY, so a previous run's
 # success can never be mistaken for this one's.
 smoke_mode() {
@@ -1527,6 +1651,7 @@ smoke_mode() {
     local waited=0 limit="${AURORA_SMOKE_SECONDS:-120}"
     local shim="$logs/redirect-shim.log"
     local shim_mark=0 conn_before="" conn="" line=""
+    local client_before="" client="" lsx=0
     # (N) so no match is empty rather than a zsh error -- "ls ... 2>/dev/null"
     # could not suppress it, because zsh fails the glob before ls ever runs --
     # and (om[1]) for the newest, which is what "ls -t | head -1" was for.
@@ -1546,6 +1671,8 @@ smoke_mode() {
     [ -f "$shim" ] && shim_mark="$(wc -l < "$shim" | tr -d ' ')" || shim_mark=0
     newest=( "$logs"/connector-*.log(Nom[1]) )
     conn_before="${newest[1]:-}"
+    newest=( "$logs"/client-*.log(Nom[1]) )
+    client_before="${newest[1]:-}"
 
     say ""
     say "Watching the $BOTTLE bottle for one launch."
@@ -1563,6 +1690,19 @@ smoke_mode() {
         # different one is how we know PLAY was actually pressed.
         newest=( "$logs"/connector-*.log(Nom[1]) )
         conn="${newest[1]:-}"
+
+        # Aurora's own client log is where the LSX handover is recorded. Only a
+        # log newer than the mark counts, so a previous launch cannot lend this
+        # one its success.
+        newest=( "$logs"/client-*.log(Nom[1]) )
+        client="${newest[1]:-}"
+        if [ "$lsx" -eq 0 ] && [ -n "$client" ] && [ "$client" != "$client_before" ] \
+           && [ -f "$client" ]; then
+            if grep -q 'Accepted the LSX connection' "$client" 2>/dev/null; then
+                lsx=1
+                ok "the LSX connection was accepted -- the game is talking to Aurora"
+            fi
+        fi
 
         if [ -f "$shim" ]; then
             local now="$(wc -l < "$shim" | tr -d ' ')"
@@ -1582,7 +1722,7 @@ smoke_mode() {
 
                 line="$(print -r -- "$fresh" | grep 'origin-auth-code-refused' | tail -1 || true)"
                 if [ -n "$line" ]; then
-                    smoke_failed "the shim was refused an auth code" "$line" "$conn"
+                    smoke_failed "the shim was refused an auth code" "$line" "$conn" "$lsx"
                     return 1
                 fi
 
@@ -1591,7 +1731,7 @@ smoke_mode() {
                 local n_failed="$(print -r -- "$fresh" | grep -c 'origin-auth-code-sync-bridge-failed' || true)"
                 if [ "${n_failed:-0}" -ge 2 ]; then
                     line="$(print -r -- "$fresh" | grep 'origin-auth-code-sync-bridge-failed' | tail -1)"
-                    smoke_failed "the auth-code bridge kept failing (${n_failed} times)" "$line" "$conn"
+                    smoke_failed "the auth-code bridge kept failing (${n_failed} times)" "$line" "$conn" "$lsx"
                     return 1
                 fi
             fi
@@ -1602,7 +1742,7 @@ smoke_mode() {
         if [ -n "$conn" ] && [ "$conn" != "$conn_before" ] && [ -f "$conn" ]; then
             line="$(grep 'exited with code 0x' "$conn" | grep -v '0x00000000' | tail -1 || true)"
             if [ -n "$line" ]; then
-                smoke_failed "FIFA exited on its own" "$line" "$conn"
+                smoke_failed "FIFA exited on its own" "$line" "$conn" "$lsx"
                 return 1
             fi
             # A clean exit is not a pass. The game can load, patch its gate and
@@ -1616,6 +1756,10 @@ smoke_mode() {
             if [ -n "$line" ]; then
                 say ""
                 say "INCONCLUSIVE: FIFA exited cleanly without a session being issued."
+                if [ "$lsx" -eq 0 ]; then
+                    say "        The LSX connection was never accepted, so the game quit"
+                    say "        before reaching Aurora at all."
+                fi
                 say "        $line"
                 say ""
                 say "That is what a launch looks like when the game is closed before"
@@ -1646,6 +1790,13 @@ smoke_mode() {
         return 1
     fi
     note "no verdict in ${limit}s. The game neither issued a session nor exited."
+    if [ "$lsx" -eq 1 ]; then
+        say "        The LSX connection was accepted, so the game did reach Aurora"
+        say "        and is still running. It may simply be slow."
+    else
+        say "        The LSX connection was never accepted in that time, so the"
+        say "        game has not talked to Aurora at all."
+    fi
     say "        Collect everything with:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --bundle"
     return 1
 }
@@ -1653,11 +1804,22 @@ smoke_mode() {
 # The shared ending for every failing verdict: say which one it was, quote the
 # deciding line, and point at the one command that collects the evidence.
 smoke_failed() {
-    local why="$1" line="$2" conn="$3"
+    local why="$1" line="$2" conn="$3" lsx="${4:-0}"
     say ""
     say "FAIL: $why."
     say "        $line"
     [ -n "$conn" ] && say "        connector log: ${conn:t}"
+    say ""
+    # Which side of the handover it died on. This is sharper than the exit code
+    # and it is the first thing to say, because it decides where to look next.
+    if [ "$lsx" -eq 1 ]; then
+        say "The LSX connection WAS accepted, so the game reached Aurora and the"
+        say "fault is after the handover -- in the session, not in the launch."
+    else
+        say "The LSX connection was NEVER accepted: the game exited without"
+        say "sending a single request. Nothing after the handover is implicated,"
+        say "and the connector's own error is downstream of this, not its cause."
+    fi
     say ""
     say "Everything static can still be correct here -- --verify has passed on a"
     say "bottle in exactly this state. Collect the evidence and say which step"
@@ -1847,6 +2009,42 @@ if [ "$MODE" = resign ]; then
             || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}."
         ok "pointed ws2_32.so at the bottle's hosts file"
     fi
+    # Re-signing changes the signature, and nothing else. It cannot turn a
+    # stock or dev-tree file into the fixed one -- it will happily sign the
+    # wrong file and report "Done.", which is how a morning went in September
+    # 2026: the same app "repaired" three times and broken every time. So the
+    # payload has to be the payload before anything is signed. The .dll files
+    # are installed unchanged and compare byte for byte; the .so files are
+    # rpath-edited and signed after installation, so LC_UUID identifies them
+    # and a checksum never can.
+    local rf; local -a wrongfiles
+    wrongfiles=()
+    if ! ( cd "$HERE/fixes" && shasum -a 256 -c SHA256SUMS ) >/dev/null 2>&1; then
+        die $E_PAYLOAD "fixes/ does not match its own checksums.
+         This copy of the package is damaged, so there is nothing safe to
+         compare against. Download it again."
+    fi
+    for rf in $FILES; do
+        if [ ! -f "$RESIGN_WINE/$rf" ]; then
+            wrongfiles+=( "${rf:t} (missing)" ); continue
+        fi
+        case "$rf" in
+        *.dll) cmp -s "$HERE/fixes/$rf" "$RESIGN_WINE/$rf"                    || wrongfiles+=( "${rf:t}" ) ;;
+        *.so)  [ "$(macho_uuid "$RESIGN_WINE/$rf")" = "$(macho_uuid "$HERE/fixes/$rf")" ]                    || wrongfiles+=( "${rf:t}" ) ;;
+        esac
+    done
+    if [ "${#wrongfiles}" -ne 0 ]; then
+        say ""
+        die $E_PAYLOAD "these files in $TARGET are not the fixed versions:
+             ${(j:, :)wrongfiles}
+         --resign only replaces a signature. Signing these would leave the
+         app broken in exactly the same way and tell you it was repaired,
+         so nothing has been signed.
+         Run  ./setup.sh  to install the right files first, then --resign
+         only if the signature is still the problem."
+    fi
+    ok "the installed files are the fixed versions"
+
     sign_payload "$RESIGN_WINE"
     resign_app "$TARGET"
     say ""
@@ -1886,7 +2084,10 @@ is_crossover_bundle "$SRC" \
 VER="$(crossover_version "$SRC")"
 [ "$VER" = "26.3" ] || die $E_PAYLOAD "These fixes are built for CrossOver 26.3 exactly. You have $VER.
          Installing them into a different version will not work.
-         Install CrossOver 26.3."
+         Either install CrossOver 26.3, or rebuild these files against the
+         version you have: patches/README lists the four patches, and
+         ./build.sh /path/to/crossover-sources-<version>.tar.gz applies them.
+         Both ship alongside this script."
 ok "CrossOver $VER at $SRC"
 
 SRCWINE="$SRC/Contents/SharedSupport/CrossOver/lib/wine"

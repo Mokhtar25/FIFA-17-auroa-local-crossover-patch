@@ -486,13 +486,21 @@ static BOOL load_control_key(const wchar_t *localappdata, char *key_out, size_t 
     if (existing)
     {
         char *p = existing;
-        while (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t' || (unsigned char)*p == 0xEF) p++;
+        /* Skip a whole UTF-8 BOM, not just its first byte. Stopping on 0xBB left
+         * clean[] empty, which fell through to minting a NEW key over a file the
+         * running server and the connector were still authenticating against. */
+        if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;
+        while (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t') p++;
         char clean[128];
         int n = 0;
         while (*p && isxdigit((unsigned char)*p) && n < 127) clean[n++] = *p++;
         clean[n] = 0;
         free(existing);
         if (n == 64) { strncpy(key_out, clean, cap - 1); key_out[cap - 1] = 0; return TRUE; }
+        /* Play.ps1 throws here ("The Aurora17 control key is malformed; it will
+         * not be used.") rather than replacing the file. Match it: silently
+         * re-minting the key is what makes an already-running server answer 403. */
+        return FALSE;
     }
 
     unsigned char raw[32];
@@ -517,13 +525,39 @@ static BOOL load_control_key(const wchar_t *localappdata, char *key_out, size_t 
 
 /* ------------------------------------------------------------ server health */
 
+/* What the last probe saw, so a failure can name the condition that did not hold
+ * instead of only reporting that four minutes elapsed. */
+typedef struct {
+    int  status;          /* HTTP status, or 0 for a transport failure */
+    char detail[320];     /* the first condition that did not hold */
+} health_probe;
+
 /* Mirrors Play.ps1's Get-AuthenticatedServerHealth: a 200 is not enough, the
  * identity fields have to match too, so a foreign server is never mistaken for ours. */
-static BOOL server_healthy(const char *key)
+static BOOL server_probe(const char *key, health_probe *p)
 {
+    if (p)
+    {
+        p->status = 0;
+        strcpy(p->detail, "no reply from 127.0.0.1:47170 within 5 s (connect or read failed)");
+    }
+
     char *body = NULL;
     int st = http_request("GET", CONTROL_PORT, "/v1/health", key, NULL, NULL, 5000, &body);
-    if (st != 200 || !body) { free(body); return FALSE; }
+    if (p) p->status = st;
+    if (st != 200 || !body)
+    {
+        if (p && (st == 401 || st == 403))
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "HTTP %d on GET /v1/health, expected 200 - the server on 47170 rejected this "
+                      "control key, i.e. it was started with a different one", st);
+        else if (p && st)
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "HTTP %d on GET /v1/health, expected 200", st);
+        if (p) p->detail[sizeof(p->detail) - 1] = 0;
+        free(body);
+        return FALSE;
+    }
 
     BOOL ok = FALSE;
     char *product = json_string(body, "product");
@@ -543,8 +577,41 @@ static BOOL server_healthy(const char *key)
         schema_ok && ready)
         ok = TRUE;
 
+    if (p && !ok)
+    {
+        /* Name the first condition that did not hold, observed against expected. */
+        if (!product || strcmp(product, "aurora17-server"))
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "product=\"%s\", expected \"aurora17-server\" - a foreign process answers on 47170",
+                      product ? product : "(absent)");
+        else if (!id || strcmp(id, "Aurora17.Server"))
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "package.id=\"%s\", expected \"Aurora17.Server\"", id ? id : "(absent)");
+        else if (!version || !*version)
+            _snprintf(p->detail, sizeof(p->detail) - 1, "package.version was empty or absent");
+        else if (!is_hex32(build))
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "package.buildId=\"%s\", expected 32 hex digits", build ? build : "(absent)");
+        else if (!is_hex32(nonce))
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "process.instanceNonce=\"%s\", expected 32 hex digits", nonce ? nonce : "(absent)");
+        else if (!schema_ok)
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "state.schemaVersion=\"%s\", expected 1", schema ? schema : "(absent)");
+        else
+            _snprintf(p->detail, sizeof(p->detail) - 1,
+                      "readiness.ready was not true - HTTP 200 and every identity field matched, so this "
+                      "is our server and it has not finished starting");
+        p->detail[sizeof(p->detail) - 1] = 0;
+    }
+
     free(product); free(id); free(version); free(build); free(nonce); free(schema); free(body);
     return ok;
+}
+
+static BOOL server_healthy(const char *key)
+{
+    return server_probe(key, NULL);
 }
 
 /* ------------------------------------------------------------- head cache */
@@ -693,6 +760,9 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
     state_write(pid, start_time, lp, ls);
 
     DWORD waited = 0;
+    health_probe probe;
+    probe.status = 0;
+    strcpy(probe.detail, "the readiness poll never ran");
     for (;;)
     {
         Sleep(2000);
@@ -716,7 +786,7 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
                 return fail_code(ERR_SERVER_START_FAIL, L"The redirector listener was rejected during startup. Log: %s", log);
             }
         }
-        if (server_healthy(key)) break;
+        if (server_probe(key, &probe)) break;
         if (waited >= SERVER_READY_TIMEOUT_MS)
         {
             /* Play.ps1's catch stops the server on every failure out of this
@@ -727,7 +797,21 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
              * but was started with a different control key". One bug, twice. */
             kill_pid(pid);
             CloseHandle(h);
-            return fail_code(ERR_SERVER_TIMEOUT, L"The server did not pass its authenticated readiness check. Log: %s", log);
+            /* On a working bottle the very first poll succeeds (~2 s against a
+             * 240 s budget), so arriving here is never "the server was slow" --
+             * it is a condition that was never going to become true. Say which. */
+            wchar_t wdetail[512];
+            MultiByteToWideChar(CP_UTF8, 0, probe.detail, -1, wdetail, 512);
+            return fail_code(ERR_SERVER_TIMEOUT,
+                L"The server did not pass its authenticated readiness check.\n"
+                L"  Waited %lu s, polling GET http://127.0.0.1:%d/v1/health every 2 s.\n"
+                L"  Last probe: %s\n"
+                L"  The server process (pid %lu) has been stopped.\n"
+                L"  Server log:    %s\n"
+                L"  Server stderr: %s.err\n"
+                L"  Control key:   %%LOCALAPPDATA%%\\Aurora17\\control-key.txt",
+                (unsigned long)(waited / 1000), CONTROL_PORT, wdetail,
+                (unsigned long)pid, log, log);
         }
     }
     CloseHandle(h);
