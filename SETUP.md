@@ -35,6 +35,17 @@ None of those three are included here, and none of them can be shared.
 
 ## Setting up the bottle — where the game and Aurora go
 
+> **Give FIFA 17 a bottle of its own, and put nothing else in it.**
+> A Windows 10 64-bit bottle, used for this game and nothing else. A prefix that
+> has had other games, other launchers or debugging tools run in it can reach a
+> state where every check here passes and the game still quits about twenty
+> seconds in and relaunches itself forever. That was measured: two bottles, same
+> CrossOver, same fixes, same game, identical `cxbottle.conf` — one played, one
+> could not, and the difference was 100 KB of accumulated registry and another
+> game's state in the same prefix. If that happens, the cure is a new bottle:
+> see *The prefix has gone bad* below.
+
+
 Nothing has to be "pointed at" the bottle, and this trips people up, so here it
 is plainly.
 
@@ -557,6 +568,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
 | The game cannot reach Aurora17 — a connection error at the redirector, but everything else works | `ws2_32.so` is not reading the bottle's hosts file, so the names still go to EA | `--verify` says `ws2_32.so still asks macOS to resolve names`. Run `./setup.sh` again, or step 3a by hand |
+| **Everything verifies, the shim loads, and the game still quits ~20 s in** — the connector logs `exited with code 0xFFFFFFFA` and `FIFA17.exe /dbrv=1`, `/dbrv=2` appear at 100% CPU | the prefix has gone bad. Nothing in the install is wrong and no check can see it | Make a **new** Windows 10 64-bit bottle, then `AURORA_BOTTLE='newname' ./setup.sh --bottle`. See *The prefix has gone bad* below |
 | **"Aurora17 could not finish: The elevated setup step exited with code 1"** | the launcher is trying to write the six EA names into the bottle's hosts file through an Administrator copy of itself, and Wine has no UAC | `./setup.sh` writes them, and Aurora's receipt, itself — step 9. Then press PLAY again. `--verify` reports both |
 | **The game starts and quits by itself a few seconds later**, and `redirect-shim.log` ends in `origin-auth-code-refused helper-declined` | the launcher never got past its own setup, so no session was ever enrolled — nine times in ten that is the elevated step, above | Fix that first, then start the game from **PLAY FIFA 17**, never by running `FIFA17.exe` |
 | **"Creating a new redirector certificate needs Windows PowerShell's PKI module"** | Aurora is trying to mint its HTTPS certificate and there is no PKI module in a bottle | Step 8a — copy `aurora17/redirector-dev.pfx` into `server/Aurora17Server/`. `./setup.sh` does it |
@@ -570,6 +582,50 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | **CrossOver-FIFA crashes the moment you open it**, no window, a crash report naming `Sparkle.framework` and "different Team IDs" | its signature is missing the permission that lets it load its own frameworks | `./setup.sh --resign` — a few seconds, nothing is re-copied |
 | Microphone or camera stopped working in CrossOver-FIFA | it was signed without CrossOver's own permissions | `./setup.sh --resign`, which preserves and then verifies them |
 | A CrossOver update landed and FIFA broke | the update replaced the app; the copy is untouched but may now be a different version | Run `./setup.sh` again. If CrossOver moved past 26.3, see below. |
+
+### The prefix has gone bad
+
+The symptom is specific. `./setup.sh --verify` says **Everything checks out**,
+`redirect-shim.log` reaches `origin-auth-code-sync-bridge-enabled verified-build`,
+and the game still dies about twenty seconds in:
+
+```
++00:00  Started the direct FIFA17 launch candidate (pid N)
++00:07  signaled verified shim readiness
++00:24  exited with code 0xFFFFFFFA
+```
+
+followed by `FIFA17.exe /dbrv=1`, `/dbrv=2` … at 100% CPU. That is the game's
+copy protection relaunching itself, and on a bottle that works it never happens.
+
+Nothing in the installation is wrong when this occurs, and no check in `--verify`
+can see it — the two bottles it was first measured on had byte-identical
+`cxbottle.conf` files. What differed was everything that had accumulated inside
+one of them.
+
+**The cure is a new bottle, not a re-install.**
+
+1. In CrossOver, make a new bottle. **Windows 10, 64-bit.** Any name.
+2. Set it up — this does not re-copy CrossOver and takes seconds:
+
+   ```
+   AURORA_BOTTLE='thenewname' ./setup.sh --bottle
+   ```
+
+3. Check it:
+
+   ```
+   AURORA_BOTTLE='thenewname' ./setup.sh --verify
+   ```
+
+4. Open the new bottle in CrossOver-FIFA and press **PLAY FIFA 17**.
+
+Nothing outside the bottle is touched, so the game folder, Aurora's shim in it,
+and the Aurora17 folder all carry over. What does not carry over is the Ultimate
+Team club, which lives at
+`drive_c\users\crossover\AppData\Local\Aurora17\Server\fut-state.json`
+inside the old bottle. Copy that one file across if you want your progress; leave
+`access-sessions.json` behind, it is regenerated.
 
 ### What Aurora's error codes mean
 
