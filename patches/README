@@ -2,6 +2,19 @@ Four patches against pristine crossover-sources-26.3.0.tar.gz, published by
 CodeWeavers. They are modifications to Wine and are LGPL-2.1-or-later; the full
 text is in ../fixes/LICENSE.LGPL, and ../NOTICE.md says what belongs to whom.
 
+THESE FOUR ARE THE ONES FIFA 17 NEEDS, AND THE ONLY ONES build.sh APPLIES
+
+This folder holds other patches too. They are not part of the FIFA 17 runtime,
+are not in build.sh's PATCHES list, and nothing in fixes/ was built with them:
+
+    crossover-26.3-uef-debugport.patch          )  FIFA 15 startup work,
+    crossover-26.3-unwind-fault-guard.patch     )  see README-fifa15-wine-fixes.md
+    crossover-26.3-win-segment-selectors.patch  )
+    crossover-26.3-heap-destroy-invalid-handle.patch   undocumented
+
+Ignore them unless you are chasing that. Applying them is not needed and has not
+been tested against the FIFA 17 build.
+
 APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
 
     1. crossover-26.3-fifa17-rosetta.patch

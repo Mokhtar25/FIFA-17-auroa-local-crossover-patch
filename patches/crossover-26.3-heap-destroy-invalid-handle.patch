@@ -1,0 +1,21 @@
+--- a/dlls/ntdll/heap.c
++++ b/dlls/ntdll/heap.c
+@@ -1625,17 +1625,17 @@
+     struct heap *heap;
+     ULONG heap_flags;
+     SIZE_T size;
+     void *addr;
+ 
+     TRACE( "handle %p\n", handle );
+ 
+     if (!(heap = unsafe_heap_from_handle( handle, 0, &heap_flags )) && handle &&
+-        (((struct heap *)handle)->flags & HEAP_VALIDATE_PARAMS) &&
++        (NtCurrentTeb()->Peb->NtGlobalFlag & FLG_HEAP_VALIDATE_PARAMETERS) &&
+         NtCurrentTeb()->Peb->BeingDebugged)
+     {
+         DbgPrint( "Attempt to destroy an invalid heap\n" );
+         DbgBreakPoint();
+     }
+     if (!heap) return handle;
+ 
+     if ((pending = heap->pending_free))

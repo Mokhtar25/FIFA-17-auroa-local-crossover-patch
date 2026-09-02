@@ -14,6 +14,7 @@
 #   ./setup.sh --report                   one pasteable diagnosis, change nothing
 #   ./setup.sh --unstick                  free a bottle that is stuck loading
 #   ./setup.sh --bundle                   zip up everything a bug report needs
+#   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -33,8 +34,9 @@ case "${1:-}" in
     --report) MODE=report; shift ;;
     --unstick) MODE=unstick; shift ;;
     --bundle) MODE=bundle; shift ;;
+    --bottle) MODE=bottle; shift ;;
     --help|-h)
-        sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
     -*) print -r -- "Unknown option: $1"; exit $E_UNSUPPORTED ;;
 esac
@@ -899,20 +901,37 @@ verify_install() {
         problems=$((problems+1))
     fi
 
-    # PLAY only needs one of the two stand-in locations to be right.
+    # PLAY only needs one of the two stand-in locations to be right. "Wrong
+    # build" and "not there at all" are different faults and had been reported
+    # as the same one -- an older stand-in sitting in both places was described
+    # as being in neither, which sends you looking for a missing file that is
+    # not missing.
     local psdir="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
-    local found=0 d
+    local found=0 stale=0 d
+    local -a stale_at
     if cmp -s "$HERE/aurora17/powershell.exe" "$psdir/powershell.exe" 2>/dev/null; then
         ok "PowerShell stand-in in the bottle"; found=1
+    elif [ -f "$psdir/powershell.exe" ]; then
+        stale=1; stale_at+=( "the $BOTTLE bottle" )
     fi
     for d in "${AURORA_DIR:-}" "$HOME/Downloads/Aurora17" "$HOME/Aurora17" "$HOME/Desktop/Aurora17"; do
         [ -n "$d" ] || continue
         if cmp -s "$HERE/aurora17/powershell.exe" "$d/powershell.exe" 2>/dev/null; then
             ok "PowerShell stand-in in $d"; found=1; break
+        elif [ -f "$d/powershell.exe" ]; then
+            stale=1; stale_at+=( "$d" )
         fi
     done
-    [ "$found" = 1 ] || { say "  BAD   the PowerShell stand-in is in neither place — PLAY will do nothing"
-                          problems=$((problems+1)); }
+    if [ "$found" != 1 ] && [ "$stale" = 1 ]; then
+        say "  BAD   a powershell.exe is there but is not the shipped stand-in:"
+        for d in $stale_at; do say "        $d"; done
+        say "        An older stand-in reports every failure as a bare exit 1"
+        say "        instead of a numbered code. Re-run ./setup.sh"
+        problems=$((problems+1))
+    elif [ "$found" != 1 ]; then
+        say "  BAD   the PowerShell stand-in is in neither place — PLAY will do nothing"
+        problems=$((problems+1))
+    fi
 
     # Name resolution. Two halves: the reader has to be installed and wired in,
     # and the file it reads has to say something. The second half is Aurora17's
@@ -1269,6 +1288,189 @@ bundle_mode() {
     return 0
 }
 
+# ------------------------------------------- the bottle, on its own
+# Steps 7 to 9 are everything that lives in the bottle rather than in the
+# CrossOver copy: the settings, the version override, the shortcuts, the
+# PowerShell stand-in and the six network mappings.
+#
+# They are a function because a bottle is not necessarily made before the
+# fixes are installed. A bottle created afterwards -- and after a bad session
+# the cure is a fresh bottle, see SETUP.md -- has none of this, and its
+# Aurora17 shortcut points at whichever CrossOver made it. Re-running the whole
+# installer to fix that would re-copy a gigabyte to change five files, so
+# --bottle does these three steps and nothing else.
+configure_bottle() {
+    local APP="$1"
+
+    # --------------------------------------------------- 7. the bottle settings
+    # These settings are what the game needs. Putting them in the bottle means you
+    # can launch normally from CrossOver instead of needing a Terminal script.
+    # Bottles are shared between CrossOver and the copy, so this is set once.
+    say ""
+    say "7. Adding the settings to your bottle"
+    BOTTLE_OK=0
+    CONF="$BOTTLE_DIR/$BOTTLE/cxbottle.conf"
+    if [ ! -f "$CONF" ]; then
+        note "no bottle called '$BOTTLE' found at"
+        say "        $BOTTLE_DIR"
+        say "        FIFA will not start without these settings. Once the bottle"
+        say "        exists, run:   AURORA_BOTTLE='name' ./setup.sh --resign"
+        say "        or re-run this installer."
+    else
+        add_setting() {
+            # A key that is present with the wrong value is not "already set". Left
+            # alone it silently keeps the wrong graphics backend and the game hangs.
+            if grep -q "^\"$1\" = \"$2\"\$" "$CONF"; then
+                ok "$1 — already set"
+            elif grep -q "^\"$1\" = " "$CONF"; then
+                fail "$1 is set to something else in
+                 $CONF
+             It must be \"$2\". Edit that line, or delete it and run this again."
+            else
+                printf '"%s" = "%s"\n' "$1" "$2" >> "$CONF"
+                ok "$1 = $2"
+            fi
+        }
+        grep -q '^\[EnvironmentVariables\]' "$CONF" || printf '\n[EnvironmentVariables]\n' >> "$CONF"
+        add_setting CX_GRAPHICS_BACKEND d3dmetal
+        add_setting CX_DR_TRAP 2
+        add_setting WINE_SIMULATE_WRITECOPY 1
+
+        # The sound fix. A Microsoft Teams audio driver, if you have one, stops
+        # answering and freezes any program that asks it anything -- including the
+        # game, before it reaches the menu. This is not CrossOver's fault and not
+        # the game's; the same thing happens to ordinary Mac programs. We skip that
+        # one device by name. If you do not have the driver, you do not need this.
+        if [ -d "/Library/Audio/Plug-Ins/HAL/MSTeamsAudioDevice.driver" ]; then
+            add_setting WINE_COREAUDIO_EXCLUDE "Microsoft Teams Audio"
+            say "        (found the Teams audio driver — added the sound fix)"
+        else
+            ok "no Teams audio driver here, sound fix not needed"
+        fi
+        # See the comment on set_version_override. Nothing else puts this there,
+        # and without it every other part of the install is wasted.
+        if [ -f "$(bottle_user_reg)" ]; then
+            if version_override_is_set; then
+                ok "version = native,builtin — already set"
+            elif set_version_override; then
+                ok "version = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
+                say "        this is what lets Aurora's redirect shim load at all"
+            else
+                fail "Could not set the version DLL override in
+                 $(bottle_user_reg)
+             Without it the game will say the servers have been shut down.
+             Quit CrossOver completely and run this again."
+            fi
+        else
+            note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once,"
+            say "        then run ./setup.sh again so the version override can be set"
+        fi
+
+        # See repoint_menu_shims. Done last in this step so it also catches a
+        # shortcut Aurora created earlier under the normal CrossOver.
+        REPOINTED="$(repoint_menu_shims "$APP" 2>/dev/null || print -r -- fail)"
+        case "$REPOINTED" in
+            fail) note "could not repoint the bottle's shortcuts — start the game from"
+                  say "        inside ${APP:t} rather than from its shortcut" ;;
+            0)    ok "the bottle's shortcuts already start ${APP:t}" ;;
+            *)    ok "$REPOINTED shortcut(s) now start ${APP:t}, not your normal CrossOver"
+                  say "        (the originals are kept alongside as .bak-aurora17)" ;;
+        esac
+
+        BOTTLE_OK=1
+    fi
+
+    # ------------------------------------------------ 8. the PowerShell stand-in
+    # Aurora17's PLAY button does its real work by running scripts/Play.ps1 through
+    # powershell.exe. Wine ships a powershell.exe that is a stub: it prints a FIXME
+    # and returns 0 without executing anything. Aurora only checks the exit code, so
+    # the stub's silent success made PLAY do nothing at all, with no error. This
+    # installs a small native stand-in that performs the same work.
+    say ""
+    say "8. Installing the PowerShell stand-in Aurora17 needs"
+    PS_OK=0
+    PS_AURORA_DIR=""
+    PS_BOTTLE_ACTION=""
+
+    # Where is the extracted Aurora17 folder? CreateProcess looks in the calling
+    # program's own directory first, so a copy there always wins.
+    # An explicit AURORA_DIR means that folder and no other.
+    if [ -n "${AURORA_DIR:-}" ]; then
+        AURORA_CANDIDATES=( "${AURORA_DIR:A}" )
+    else
+        AURORA_CANDIDATES=(
+          "$HOME/Downloads/Aurora17"
+          "$HOME/Aurora17"
+          "$HOME/Desktop/Aurora17"
+        )
+    fi
+    AURORA_FOUND=""
+    for d in $AURORA_CANDIDATES; do
+        [ -n "$d" ] || continue
+        if [ -f "$d/Aurora17Connector.exe" ]; then AURORA_FOUND="$d"; break; fi
+    done
+    if [ -n "$AURORA_FOUND" ]; then
+        # Never overwrite somebody's real powershell.exe without keeping it.
+        if [ -f "$AURORA_FOUND/powershell.exe" ] \
+           && ! cmp -s "$HERE/aurora17/powershell.exe" "$AURORA_FOUND/powershell.exe" \
+           && [ ! -f "$AURORA_FOUND/powershell.exe.aurora-orig" ]; then
+            cp -X "$AURORA_FOUND/powershell.exe" "$AURORA_FOUND/powershell.exe.aurora-orig" \
+                || die $E_PERMISSION "Could not back up the powershell.exe already in $AURORA_FOUND."
+            note "kept the powershell.exe already there as powershell.exe.aurora-orig"
+        fi
+        cp -X "$HERE/aurora17/powershell.exe" "$AURORA_FOUND/powershell.exe" \
+            || die $E_PERMISSION "Could not write into $AURORA_FOUND."
+        ok "into $AURORA_FOUND"
+
+        # Aurora17 does not ship redirector-dev.pfx by default and relies on Windows
+        # PowerShell PKI cmdlets to mint it. On macOS Wine, supply our ready-made
+        # redirector-dev.pfx if missing so certificate minting is never attempted.
+        local pfx_dest="$AURORA_FOUND/server/Aurora17Server/redirector-dev.pfx"
+        if [ -d "$AURORA_FOUND/server/Aurora17Server" ] && [ ! -f "$pfx_dest" ] && [ -f "$HERE/aurora17/redirector-dev.pfx" ]; then
+            cp -X "$HERE/aurora17/redirector-dev.pfx" "$pfx_dest" 2>/dev/null || true
+            [ -f "$pfx_dest" ] && ok "supplied redirector-dev.pfx into $AURORA_FOUND/server/Aurora17Server"
+        fi
+
+        PS_AURORA_DIR="$AURORA_FOUND"
+        PS_OK=1
+    else
+        note "no Aurora17 folder found. If yours is elsewhere, run:"
+        say "        AURORA_DIR=/path/to/Aurora17 ./setup.sh"
+    fi
+
+    # Also install it inside the bottle, so it is found no matter where Aurora17
+    # lives. The file being replaced is Wine's own stub; we keep a copy of it.
+    PSDIR="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
+    if [ -d "$BOTTLE_DIR/$BOTTLE" ]; then
+        if [ -d "$PSDIR" ] && [ -f "$PSDIR/powershell.exe" ]; then
+            [ -f "$PSDIR/powershell.exe.wine-stub-orig" ] \
+                || cp -X "$PSDIR/powershell.exe" "$PSDIR/powershell.exe.wine-stub-orig"
+            PS_BOTTLE_ACTION=replaced
+        else
+            mkdir -p "$PSDIR"
+            PS_BOTTLE_ACTION=created
+        fi
+        cp -X "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe" \
+            || die $E_PERMISSION "Could not write the stand-in into the $BOTTLE bottle."
+        ok "into the $BOTTLE bottle ($PS_BOTTLE_ACTION)"
+        PS_OK=1
+    fi
+
+    # ------------------------------------------- 9. the six network mappings
+    # See seed_bottle_hosts. Without this the launcher's first PLAY on a fresh
+    # bottle stops at "The elevated setup step exited with code 1" and the server
+    # is never started -- which reads, from the outside, as "the game runs but
+    # nothing connects".
+    say ""
+    say "9. Putting the six EA name mappings in the bottle"
+    HOSTS_OK=0
+    if seed_bottle_hosts; then
+        HOSTS_OK=1
+    else
+        note "the game will not reach Aurora17 until this file can be written"
+    fi
+}
+
 # ------------------------------------------------------ --unstick, and stop
 # Frees a bottle whose Wine session outlived its wineserver -- see the comment
 # on prefix_holders for what that state is and how it looks from outside. One
@@ -1365,6 +1567,38 @@ if [ "$MODE" = bundle ]; then
     [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET."
     bundle_mode "$TARGET" || exit $E_PERMISSION
     exit 0
+fi
+
+# A bottle made after the fixes were installed has none of the bottle-side
+# work, and its shortcuts start whichever CrossOver created it. That is the
+# normal state after making a fresh bottle, which is the cure for a prefix
+# that has gone bad -- so it needs to be one command, not a re-install.
+if [ "$MODE" = bottle ]; then
+    if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
+       && [ -d "$HOME/Applications/${TARGET:t}" ]; then
+        TARGET="$HOME/Applications/${TARGET:t}"
+    fi
+    [ -d "$TARGET" ] \
+        || die $E_PAYLOAD "No patched CrossOver at $TARGET. Run ./setup.sh first."
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] \
+        || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         Make it in CrossOver first, then run this again. For another
+         name:   AURORA_BOTTLE='name' ./setup.sh --bottle"
+    say ""
+    say "Setting up the $BOTTLE bottle for ${TARGET:t}"
+    configure_bottle "$TARGET"
+    say ""
+    if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
+        say "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
+        say ""
+        say "To check:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
+        say ""
+        exit 0
+    fi
+    say "NOT FINISHED — see the lines above."
+    say ""
+    exit $E_INCOMPLETE
 fi
 
 if [ "$MODE" = verify ]; then
@@ -1714,173 +1948,7 @@ say "6. Signing"
 sign_payload "$WINE"
 resign_app "$APP"
 
-# --------------------------------------------------- 7. the bottle settings
-# These settings are what the game needs. Putting them in the bottle means you
-# can launch normally from CrossOver instead of needing a Terminal script.
-# Bottles are shared between CrossOver and the copy, so this is set once.
-say ""
-say "7. Adding the settings to your bottle"
-BOTTLE_OK=0
-CONF="$BOTTLE_DIR/$BOTTLE/cxbottle.conf"
-if [ ! -f "$CONF" ]; then
-    note "no bottle called '$BOTTLE' found at"
-    say "        $BOTTLE_DIR"
-    say "        FIFA will not start without these settings. Once the bottle"
-    say "        exists, run:   AURORA_BOTTLE='name' ./setup.sh --resign"
-    say "        or re-run this installer."
-else
-    add_setting() {
-        # A key that is present with the wrong value is not "already set". Left
-        # alone it silently keeps the wrong graphics backend and the game hangs.
-        if grep -q "^\"$1\" = \"$2\"\$" "$CONF"; then
-            ok "$1 — already set"
-        elif grep -q "^\"$1\" = " "$CONF"; then
-            fail "$1 is set to something else in
-             $CONF
-         It must be \"$2\". Edit that line, or delete it and run this again."
-        else
-            printf '"%s" = "%s"\n' "$1" "$2" >> "$CONF"
-            ok "$1 = $2"
-        fi
-    }
-    grep -q '^\[EnvironmentVariables\]' "$CONF" || printf '\n[EnvironmentVariables]\n' >> "$CONF"
-    add_setting CX_GRAPHICS_BACKEND d3dmetal
-    add_setting CX_DR_TRAP 2
-    add_setting WINE_SIMULATE_WRITECOPY 1
-
-    # The sound fix. A Microsoft Teams audio driver, if you have one, stops
-    # answering and freezes any program that asks it anything -- including the
-    # game, before it reaches the menu. This is not CrossOver's fault and not
-    # the game's; the same thing happens to ordinary Mac programs. We skip that
-    # one device by name. If you do not have the driver, you do not need this.
-    if [ -d "/Library/Audio/Plug-Ins/HAL/MSTeamsAudioDevice.driver" ]; then
-        add_setting WINE_COREAUDIO_EXCLUDE "Microsoft Teams Audio"
-        say "        (found the Teams audio driver — added the sound fix)"
-    else
-        ok "no Teams audio driver here, sound fix not needed"
-    fi
-    # See the comment on set_version_override. Nothing else puts this there,
-    # and without it every other part of the install is wasted.
-    if [ -f "$(bottle_user_reg)" ]; then
-        if version_override_is_set; then
-            ok "version = native,builtin — already set"
-        elif set_version_override; then
-            ok "version = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
-            say "        this is what lets Aurora's redirect shim load at all"
-        else
-            fail "Could not set the version DLL override in
-             $(bottle_user_reg)
-         Without it the game will say the servers have been shut down.
-         Quit CrossOver completely and run this again."
-        fi
-    else
-        note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once,"
-        say "        then run ./setup.sh again so the version override can be set"
-    fi
-
-    # See repoint_menu_shims. Done last in this step so it also catches a
-    # shortcut Aurora created earlier under the normal CrossOver.
-    REPOINTED="$(repoint_menu_shims "$APP" 2>/dev/null || print -r -- fail)"
-    case "$REPOINTED" in
-        fail) note "could not repoint the bottle's shortcuts — start the game from"
-              say "        inside ${APP:t} rather than from its shortcut" ;;
-        0)    ok "the bottle's shortcuts already start ${APP:t}" ;;
-        *)    ok "$REPOINTED shortcut(s) now start ${APP:t}, not your normal CrossOver"
-              say "        (the originals are kept alongside as .bak-aurora17)" ;;
-    esac
-
-    BOTTLE_OK=1
-fi
-
-# ------------------------------------------------ 8. the PowerShell stand-in
-# Aurora17's PLAY button does its real work by running scripts/Play.ps1 through
-# powershell.exe. Wine ships a powershell.exe that is a stub: it prints a FIXME
-# and returns 0 without executing anything. Aurora only checks the exit code, so
-# the stub's silent success made PLAY do nothing at all, with no error. This
-# installs a small native stand-in that performs the same work.
-say ""
-say "8. Installing the PowerShell stand-in Aurora17 needs"
-PS_OK=0
-PS_AURORA_DIR=""
-PS_BOTTLE_ACTION=""
-
-# Where is the extracted Aurora17 folder? CreateProcess looks in the calling
-# program's own directory first, so a copy there always wins.
-# An explicit AURORA_DIR means that folder and no other.
-if [ -n "${AURORA_DIR:-}" ]; then
-    AURORA_CANDIDATES=( "${AURORA_DIR:A}" )
-else
-    AURORA_CANDIDATES=(
-      "$HOME/Downloads/Aurora17"
-      "$HOME/Aurora17"
-      "$HOME/Desktop/Aurora17"
-    )
-fi
-AURORA_FOUND=""
-for d in $AURORA_CANDIDATES; do
-    [ -n "$d" ] || continue
-    if [ -f "$d/Aurora17Connector.exe" ]; then AURORA_FOUND="$d"; break; fi
-done
-if [ -n "$AURORA_FOUND" ]; then
-    # Never overwrite somebody's real powershell.exe without keeping it.
-    if [ -f "$AURORA_FOUND/powershell.exe" ] \
-       && ! cmp -s "$HERE/aurora17/powershell.exe" "$AURORA_FOUND/powershell.exe" \
-       && [ ! -f "$AURORA_FOUND/powershell.exe.aurora-orig" ]; then
-        cp -X "$AURORA_FOUND/powershell.exe" "$AURORA_FOUND/powershell.exe.aurora-orig" \
-            || die $E_PERMISSION "Could not back up the powershell.exe already in $AURORA_FOUND."
-        note "kept the powershell.exe already there as powershell.exe.aurora-orig"
-    fi
-    cp -X "$HERE/aurora17/powershell.exe" "$AURORA_FOUND/powershell.exe" \
-        || die $E_PERMISSION "Could not write into $AURORA_FOUND."
-    ok "into $AURORA_FOUND"
-
-    # Aurora17 does not ship redirector-dev.pfx by default and relies on Windows
-    # PowerShell PKI cmdlets to mint it. On macOS Wine, supply our ready-made
-    # redirector-dev.pfx if missing so certificate minting is never attempted.
-    local pfx_dest="$AURORA_FOUND/server/Aurora17Server/redirector-dev.pfx"
-    if [ -d "$AURORA_FOUND/server/Aurora17Server" ] && [ ! -f "$pfx_dest" ] && [ -f "$HERE/aurora17/redirector-dev.pfx" ]; then
-        cp -X "$HERE/aurora17/redirector-dev.pfx" "$pfx_dest" 2>/dev/null || true
-        [ -f "$pfx_dest" ] && ok "supplied redirector-dev.pfx into $AURORA_FOUND/server/Aurora17Server"
-    fi
-
-    PS_AURORA_DIR="$AURORA_FOUND"
-    PS_OK=1
-else
-    note "no Aurora17 folder found. If yours is elsewhere, run:"
-    say "        AURORA_DIR=/path/to/Aurora17 ./setup.sh"
-fi
-
-# Also install it inside the bottle, so it is found no matter where Aurora17
-# lives. The file being replaced is Wine's own stub; we keep a copy of it.
-PSDIR="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
-if [ -d "$BOTTLE_DIR/$BOTTLE" ]; then
-    if [ -d "$PSDIR" ] && [ -f "$PSDIR/powershell.exe" ]; then
-        [ -f "$PSDIR/powershell.exe.wine-stub-orig" ] \
-            || cp -X "$PSDIR/powershell.exe" "$PSDIR/powershell.exe.wine-stub-orig"
-        PS_BOTTLE_ACTION=replaced
-    else
-        mkdir -p "$PSDIR"
-        PS_BOTTLE_ACTION=created
-    fi
-    cp -X "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe" \
-        || die $E_PERMISSION "Could not write the stand-in into the $BOTTLE bottle."
-    ok "into the $BOTTLE bottle ($PS_BOTTLE_ACTION)"
-    PS_OK=1
-fi
-
-# ------------------------------------------- 9. the six network mappings
-# See seed_bottle_hosts. Without this the launcher's first PLAY on a fresh
-# bottle stops at "The elevated setup step exited with code 1" and the server
-# is never started -- which reads, from the outside, as "the game runs but
-# nothing connects".
-say ""
-say "9. Putting the six EA name mappings in the bottle"
-HOSTS_OK=0
-if seed_bottle_hosts; then
-    HOSTS_OK=1
-else
-    note "the game will not reach Aurora17 until this file can be written"
-fi
+configure_bottle "$APP"
 
 # ------------------------------------------------------------- the receipt
 # Uninstall reads this instead of guessing at default locations.
