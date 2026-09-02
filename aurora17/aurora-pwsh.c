@@ -711,6 +711,7 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
             free(text);
             if (rejected)
             {
+                kill_pid(pid);
                 CloseHandle(h);
                 return fail_code(ERR_SERVER_START_FAIL, L"The redirector listener was rejected during startup. Log: %s", log);
             }
@@ -718,6 +719,13 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
         if (server_healthy(key)) break;
         if (waited >= SERVER_READY_TIMEOUT_MS)
         {
+            /* Play.ps1's catch stops the server on every failure out of this
+             * loop, and so must this: a server left listening on 47170 makes
+             * the NEXT run take the "already listening but not healthy" branch
+             * instead of starting cleanly. That was seen in the field -- a
+             * Code 13 at 15:19 and, four minutes later, "A server is running
+             * but was started with a different control key". One bug, twice. */
+            kill_pid(pid);
             CloseHandle(h);
             return fail_code(ERR_SERVER_TIMEOUT, L"The server did not pass its authenticated readiness check. Log: %s", log);
         }
@@ -788,7 +796,11 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
             out(L"Server already running - leaving it alone.\n");
         else if (server_pid && process_is(server_pid, L"Aurora17.Server.exe", server_start))
         {
-            out(L"A server is running but was started with a different control key. Restarting it...\n");
+            /* Play.ps1 words this as a control-key mismatch. It is only one of
+             * the reasons server_healthy() says no -- a server that is
+             * listening but never became ready lands here too, with the very
+             * same key -- so do not name a cause that has not been shown. */
+            out(L"A server is running but is not answering its readiness check. Restarting it...\n");
             kill_pid(server_pid);
             Sleep(3000);
             if ((rc = start_server(root, localappdata, key))) goto done;
