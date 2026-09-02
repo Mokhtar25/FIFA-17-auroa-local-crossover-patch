@@ -63,6 +63,11 @@ PATCHES=(
 # so FIFA 17 bottles run the same code either way.
 [ -f "$HERE/patches/crossover-26.3-topdown-alloc-limit.patch" ] \
     && PATCHES+=( crossover-26.3-topdown-alloc-limit.patch )
+# A sixth, also FIFA 15's: Aurora15Connector crashes at exit in Wine's gdiplus
+# (GdipDeletePrivateFontCollection walks a freed collection). Ships with the
+# FIFA 15 profile only; it adds gdiplus.dll to the build and to fixes/.
+[ -f "$HERE/patches/crossover-26.3-gdiplus-delete-font-collection.patch" ] \
+    && PATCHES+=( crossover-26.3-gdiplus-delete-font-collection.patch )
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(
@@ -72,6 +77,8 @@ TARGETS=(
   dlls/secur32/all
   dlls/winecoreaudio.drv/all
 )
+[ -f "$HERE/patches/crossover-26.3-gdiplus-delete-font-collection.patch" ] \
+    && TARGETS+=( dlls/gdiplus/all )
 
 # ---------------------------------------------------------------- the tools
 check_deps() {
@@ -254,6 +261,8 @@ collect dlls/winecoreaudio.drv/winecoreaudio.so x86_64-unix/winecoreaudio.so
 collect dlls/version/version.dll                x86_64-windows/version.dll
 collect dlls/crypt32/crypt32.dll                x86_64-windows/crypt32.dll
 collect dlls/secur32/secur32.dll                x86_64-windows/secur32.dll
+[ -f "$HERE/patches/crossover-26.3-gdiplus-delete-font-collection.patch" ] \
+    && collect dlls/gdiplus/gdiplus.dll             x86_64-windows/gdiplus.dll
 
 # a17hosts.dylib is ours outright, not a patched Wine component, so it needs
 # none of the above -- just clang. -arch x86_64 matches ws2_32.so, which is the
