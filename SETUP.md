@@ -474,6 +474,28 @@ anything is still holding the bottle, name
 resolution and the PowerShell stand-in, and prints `BAD` beside whatever is wrong. Do this before anything in
 the table below — most of the time it names the problem outright.
 
+Every one of those checks is static. A bottle can pass all of them and still
+fail to play, so when `--verify` is clean and the game still does not work:
+
+```
+./setup.sh --smoke
+```
+
+That one watches a real launch. Press **PLAY FIFA 17** when it asks, and it
+waits up to two minutes and then says **PASS** or **FAIL** — reading the same
+two markers a person would look for by hand:
+
+| verdict | what it saw |
+|---|---|
+| `PASS` | `origin-auth-code-issued` — the session was issued, Ultimate Team should load |
+| `FAIL: FIFA exited on its own` | the connector logged a non-zero exit, usually `0xFFFFFFFA` |
+| `FAIL: the shim was refused an auth code` | `origin-auth-code-refused` |
+| `FAIL: the auth-code bridge kept failing` | `origin-auth-code-sync-bridge-failed`, repeating every ~19 s |
+| `nothing launched` | no new connector log — PLAY was never pressed, so nothing was tested |
+
+A `FAIL` here with a clean `--verify` is the one case the install cannot
+diagnose itself. Send the zip from `./setup.sh --bundle`.
+
 If it says everything is fine and the game still misbehaves, or if you are
 asking someone else for help:
 
@@ -568,7 +590,7 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
 | The game cannot reach Aurora17 — a connection error at the redirector, but everything else works | `ws2_32.so` is not reading the bottle's hosts file, so the names still go to EA | `--verify` says `ws2_32.so still asks macOS to resolve names`. Run `./setup.sh` again, or step 3a by hand |
-| **Everything verifies, the shim loads, and the game still quits ~20 s in** — the connector logs `exited with code 0xFFFFFFFA` and `FIFA17.exe /dbrv=1`, `/dbrv=2` appear at 100% CPU | the prefix has gone bad. Nothing in the install is wrong and no check can see it | Make a **new** Windows 10 64-bit bottle, then `AURORA_BOTTLE='newname' ./setup.sh --bottle`. See *The prefix has gone bad* below |
+| **Everything verifies, the shim loads, and the game still quits ~20 s in** — the connector logs `exited with code 0xFFFFFFFA` | open bug, cause unknown. Nothing in the install is wrong and no static check can see it | `./setup.sh --smoke` confirms it in one launch. Then try a **new** Windows 10 64-bit bottle: `AURORA_BOTTLE='newname' ./setup.sh --bottle`. It usually helps but is not guaranteed — see *The prefix has gone bad* below |
 | **"Aurora17 could not finish: The elevated setup step exited with code 1"** | the launcher is trying to write the six EA names into the bottle's hosts file through an Administrator copy of itself, and Wine has no UAC | `./setup.sh` writes them, and Aurora's receipt, itself — step 9. Then press PLAY again. `--verify` reports both |
 | **The game starts and quits by itself a few seconds later**, and `redirect-shim.log` ends in `origin-auth-code-refused helper-declined` | the launcher never got past its own setup, so no session was ever enrolled — nine times in ten that is the elevated step, above | Fix that first, then start the game from **PLAY FIFA 17**, never by running `FIFA17.exe` |
 | **"Creating a new redirector certificate needs Windows PowerShell's PKI module"** | Aurora is trying to mint its HTTPS certificate and there is no PKI module in a bottle | Step 8a — copy `aurora17/redirector-dev.pfx` into `server/Aurora17Server/`. `./setup.sh` does it |
@@ -595,15 +617,28 @@ and the game still dies about twenty seconds in:
 +00:24  exited with code 0xFFFFFFFA
 ```
 
-followed by `FIFA17.exe /dbrv=1`, `/dbrv=2` … at 100% CPU. That is the game's
-copy protection relaunching itself, and on a bottle that works it never happens.
+followed by `FIFA17.exe /dbrv=1`, `/dbrv=2` … at 100% CPU — the game's copy
+protection relaunching itself.
 
 Nothing in the installation is wrong when this occurs, and no check in `--verify`
 can see it — the two bottles it was first measured on had byte-identical
-`cxbottle.conf` files. What differed was everything that had accumulated inside
-one of them.
+`cxbottle.conf` files.
 
-**The cure is a new bottle, not a re-install.**
+**A new bottle usually clears it, but it is not a guaranteed cure, and the cause
+is still unknown.** On 2026-09-02 a bottle created at 15:40 was set up, verified
+clean, and died this way on its first PLAY at 15:42:43 — nothing had accumulated
+in it at all. An older bottle on the same machine, same CrossOver, same fixes,
+played normally minutes later. So "the prefix accumulated something" describes
+the first two cases and does not explain this one.
+
+Two things that are **not** the answer, both tested:
+
+- Running `_fifa17.exe` first. The bottle that plays has never run it — there is
+  no trace of it in its registry.
+- Quitting CrossOver completely and reopening. Tested on its own; failed
+  identically.
+
+Try a new bottle anyway — it is quick and it has worked more often than not.
 
 1. In CrossOver, make a new bottle. **Windows 10, 64-bit.** Any name.
 2. Set it up — this does not re-copy CrossOver and takes seconds:
@@ -618,7 +653,13 @@ one of them.
    AURORA_BOTTLE='thenewname' ./setup.sh --verify
    ```
 
-4. Open the new bottle in CrossOver-FIFA and press **PLAY FIFA 17**.
+4. Open the new bottle in CrossOver-FIFA and press **PLAY FIFA 17**. To get a
+   plain answer instead of guessing from the screen, start
+   `AURORA_BOTTLE='thenewname' ./setup.sh --smoke` first and press PLAY when it
+   asks — it says `PASS` or `FAIL` and quotes the deciding log line.
+
+If the new bottle fails the same way, you have hit the open bug rather than a
+broken install. `./setup.sh --bundle` collects everything needed to chase it.
 
 Nothing outside the bottle is touched, so the game folder, Aurora's shim in it,
 and the Aurora17 folder all carry over. What does not carry over is the Ultimate

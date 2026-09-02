@@ -15,6 +15,7 @@
 #   ./setup.sh --unstick                  free a bottle that is stuck loading
 #   ./setup.sh --bundle                   zip up everything a bug report needs
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
+#   ./setup.sh --smoke                    watch one PLAY and say pass or fail
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -35,6 +36,7 @@ case "${1:-}" in
     --unstick) MODE=unstick; shift ;;
     --bundle) MODE=bundle; shift ;;
     --bottle) MODE=bottle; shift ;;
+    --smoke) MODE=smoke; shift ;;
     --help|-h)
         sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
@@ -992,7 +994,19 @@ verify_install() {
 
     say ""
     if [ "$problems" -eq 0 ]; then
-        say "Everything checks out."
+        # Everything here is static -- files, UUIDs, signatures, registry keys.
+        # A bottle can pass every one of them and still die twenty-four seconds
+        # into the first PLAY (2026-09-02: a bottle made at 15:40 verified clean
+        # and its launch exited 0xFFFFFFFA at 15:42:43). So this is deliberately
+        # not phrased as "it will work", and it names the one thing that can
+        # actually answer that.
+        say "Everything checks out -- every static check passed."
+        say ""
+        say "That is not the same as \"the game will play\": these checks cannot"
+        say "see a launch. To find out, run this and press PLAY when it asks:"
+        say ""
+        say "    AURORA_BOTTLE='$BOTTLE' ./setup.sh --smoke"
+        say ""
         return 0
     fi
     say "$problems problem(s) above. SETUP.md says what each one means."
@@ -1477,6 +1491,128 @@ configure_bottle() {
 # rule makes this safe to do bluntly: with every CrossOver quit, anything still
 # inside the prefix is by definition an orphan, because nothing is left that
 # could legitimately be using it.
+# ------------------------------------------------- the launch that is watched
+# Why this exists: --verify checks files, UUIDs, signatures and registry keys,
+# and every one of them passed on a bottle that could not play. On 2026-09-02 a
+# bottle made at 15:40 was verified clean and its first PLAY died at 15:42:43
+# with 0xFFFFFFFA, twenty-four seconds in. Static checks cannot see that,
+# because nothing static is wrong.
+#
+# So this mode does not check anything. It watches one real launch and reports
+# what happened, using the two markers that separate a working launch from a
+# partial one:
+#
+#   pass   redirect-shim.log gains   origin-auth-code-issued
+#   fail   the connector log gains   exited with code 0x...  (non-zero)
+#   fail   redirect-shim.log gains   origin-auth-code-refused
+#          or repeated              origin-auth-code-sync-bridge-failed
+#
+# Both logs are read from the marks taken before PLAY, so a previous run's
+# success can never be mistaken for this one's.
+smoke_mode() {
+    local logs="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Logs"
+    local waited=0 limit="${AURORA_SMOKE_SECONDS:-120}"
+    local shim="$logs/redirect-shim.log"
+    local shim_mark=0 conn_before="" conn="" line=""
+
+    [ -d "$logs" ] || die $E_UNSUPPORTED "No Aurora17 logs in the $BOTTLE bottle at
+         $logs
+         Run ./setup.sh --bottle first, then open the connector once."
+
+    # The mark. A missing shim log is a legitimate starting state -- it means
+    # the shim has never loaded -- and counts as zero lines rather than an error.
+    [ -f "$shim" ] && shim_mark="$(wc -l < "$shim" | tr -d ' ')" || shim_mark=0
+    conn_before="$(ls -t "$logs"/connector-*.log 2>/dev/null | head -1 || true)"
+
+    say ""
+    say "Watching the $BOTTLE bottle for one launch."
+    say ""
+    say "    Press PLAY FIFA 17 in the Aurora17Connector now."
+    say ""
+    say "Waiting up to ${limit}s. Ctrl-C stops watching; it does not stop the game."
+    say ""
+
+    while [ "$waited" -lt "$limit" ]; do
+        /bin/sleep 2
+        waited=$((waited + 2))
+
+        # The connector writes a new log per launch, so the newest file being a
+        # different one is how we know PLAY was actually pressed.
+        conn="$(ls -t "$logs"/connector-*.log 2>/dev/null | head -1 || true)"
+
+        if [ -f "$shim" ]; then
+            local now="$(wc -l < "$shim" | tr -d ' ')"
+            if [ "$now" -gt "$shim_mark" ]; then
+                local fresh="$(tail -n "$((now - shim_mark))" "$shim")"
+
+                line="$(print -r -- "$fresh" | grep 'origin-auth-code-issued' | tail -1 || true)"
+                if [ -n "$line" ]; then
+                    say ""
+                    ok "origin-auth-code-issued"
+                    say "        $line"
+                    say ""
+                    say "PASS. The session was issued. Ultimate Team should load."
+                    say ""
+                    return 0
+                fi
+
+                line="$(print -r -- "$fresh" | grep 'origin-auth-code-refused' | tail -1 || true)"
+                if [ -n "$line" ]; then
+                    smoke_failed "the shim was refused an auth code" "$line" "$conn"
+                    return 1
+                fi
+
+                # One of these is a launch that is still settling. Several in a
+                # row is the ~19s retry loop, and it never recovers on its own.
+                local n_failed="$(print -r -- "$fresh" | grep -c 'origin-auth-code-sync-bridge-failed' || true)"
+                if [ "${n_failed:-0}" -ge 2 ]; then
+                    line="$(print -r -- "$fresh" | grep 'origin-auth-code-sync-bridge-failed' | tail -1)"
+                    smoke_failed "the auth-code bridge kept failing (${n_failed} times)" "$line" "$conn"
+                    return 1
+                fi
+            fi
+        fi
+
+        # A non-zero exit from the game is decisive on its own: 0xFFFFFFFA is
+        # the protector relaunching, and the connector has already given up.
+        if [ -n "$conn" ] && [ "$conn" != "$conn_before" ] && [ -f "$conn" ]; then
+            line="$(grep 'exited with code 0x' "$conn" | grep -v '0x00000000' | tail -1 || true)"
+            if [ -n "$line" ]; then
+                smoke_failed "FIFA exited on its own" "$line" "$conn"
+                return 1
+            fi
+        fi
+    done
+
+    say ""
+    if [ -z "$conn" ] || [ "$conn" = "$conn_before" ]; then
+        note "nothing launched in ${limit}s -- no new connector log appeared."
+        say "        PLAY was probably never pressed, or the connector did not open."
+        say "        Nothing was tested. Run this again and press PLAY."
+        return 1
+    fi
+    note "no verdict in ${limit}s. The game neither issued a session nor exited."
+    say "        Collect everything with:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --bundle"
+    return 1
+}
+
+# The shared ending for every failing verdict: say which one it was, quote the
+# deciding line, and point at the one command that collects the evidence.
+smoke_failed() {
+    local why="$1" line="$2" conn="$3"
+    say ""
+    say "FAIL: $why."
+    say "        $line"
+    [ -n "$conn" ] && say "        connector log: ${conn:t}"
+    say ""
+    say "Everything static can still be correct here -- --verify has passed on a"
+    say "bottle in exactly this state. Collect the evidence and say which step"
+    say "you were on:"
+    say ""
+    say "    AURORA_BOTTLE='$BOTTLE' ./setup.sh --bundle"
+    say ""
+}
+
 if [ "$MODE" = unstick ]; then
     say ""
     say "Freeing the $BOTTLE bottle"
@@ -1599,6 +1735,15 @@ if [ "$MODE" = bottle ]; then
     say "NOT FINISHED — see the lines above."
     say ""
     exit $E_INCOMPLETE
+fi
+
+if [ "$MODE" = smoke ]; then
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] \
+        || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         For another name:  AURORA_BOTTLE='name' ./setup.sh --smoke"
+    smoke_mode || exit $E_INCOMPLETE
+    exit 0
 fi
 
 if [ "$MODE" = verify ]; then
