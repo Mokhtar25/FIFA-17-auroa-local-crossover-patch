@@ -1581,6 +1581,36 @@ smoke_mode() {
                 smoke_failed "FIFA exited on its own" "$line" "$conn"
                 return 1
             fi
+            # A clean exit is not a pass. The game can load, patch its gate and
+            # resolve a user without ever asking for an auth code -- measured on
+            # 2026-09-02 16:13, where the run reached origin-default-user-result
+            # and quit 0x00000000 with no pipe request in the whole session.
+            # Waiting the full two minutes after the game has already gone is
+            # the one outcome worse than either verdict, so end it and say how
+            # far the launch actually got.
+            line="$(grep 'exited with code 0x00000000' "$conn" | tail -1 || true)"
+            if [ -n "$line" ]; then
+                say ""
+                say "INCONCLUSIVE: FIFA exited cleanly without a session being issued."
+                say "        $line"
+                say ""
+                say "That is what a launch looks like when the game is closed before"
+                say "Ultimate Team loads -- if you quit it yourself, this is expected"
+                say "and not a fault. The last thing the shim reported was:"
+                say ""
+                if [ -f "$shim" ]; then
+                    tail -3 "$shim" | sed 's/^/        /'
+                else
+                    say "        (no redirect-shim.log -- the shim never loaded)"
+                fi
+                say ""
+                say "Run this again and let the game reach Ultimate Team before"
+                say "closing it, or collect everything with:"
+                say ""
+                say "    AURORA_BOTTLE='$BOTTLE' ./setup.sh --bundle"
+                say ""
+                return 1
+            fi
         fi
     done
 
