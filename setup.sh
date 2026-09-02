@@ -405,13 +405,32 @@ prefix_holders() {
         }'
 }
 
-# Every CrossOver bundle with a live process, one path per line. Trimming at
-# /Contents/ leaves a bundle path and turns every other match -- shells,
-# editors, anything with the word on its command line -- into something that no
-# longer ends in .app, which is the filter.
+# Every open CrossOver application, one bundle path per line. Only the
+# application itself counts, and its binary is the one under Contents/MacOS.
+#
+# Trimming at /Contents/ instead -- which is what this did until 2026-09-02 --
+# also matched CrossOver's own wineserver and winewrapper.exe, which live under
+# Contents/SharedSupport of the same bundle. Those are exactly the leftovers
+# --unstick exists to remove, so once the application had quit and only they
+# were left, --unstick answered "CrossOver is still open" and refused to run in
+# the one state it is for. Trimming at /Contents/MacOS/ drops them, and every
+# other match -- shells, editors, anything with the word on its command line --
+# still fails to end in .app, which is the filter it always was.
+#
+# The bundle identifier decides, not the binary's name: a renamed copy such as
+# CrossOver-FIFA.app is still found, and a menu shim in ~/Applications/CrossOver
+# -- an .app whose path contains the word but which is not CrossOver -- is not
+# mistaken for one.
 crossovers_running() {
+    local app
     ps -Ao command= 2>/dev/null | grep -i crossover | grep -v grep \
-        | sed 's|/Contents/.*||' | grep -E '^/.*\.app$' | sort -u || true
+        | sed -n 's|/Contents/MacOS/.*||p' | grep -E '^/.*\.app$' | sort -u \
+    | while IFS= read -r app; do
+        is_crossover_bundle "$app" && print -r -- "$app"
+    done
+    # The loop's status is the last bundle test, which says nothing about
+    # whether this worked. Callers assign it under set -e.
+    return 0
 }
 
 # Wine names these directories after the prefix's device and inode, not after
@@ -1485,12 +1504,6 @@ configure_bottle() {
     fi
 }
 
-# ------------------------------------------------------ --unstick, and stop
-# Frees a bottle whose Wine session outlived its wineserver -- see the comment
-# on prefix_holders for what that state is and how it looks from outside. One
-# rule makes this safe to do bluntly: with every CrossOver quit, anything still
-# inside the prefix is by definition an orphan, because nothing is left that
-# could legitimately be using it.
 # ------------------------------------------------- the launch that is watched
 # Why this exists: --verify checks files, UUIDs, signatures and registry keys,
 # and every one of them passed on a bottle that could not play. On 2026-09-02 a
@@ -1514,15 +1527,25 @@ smoke_mode() {
     local waited=0 limit="${AURORA_SMOKE_SECONDS:-120}"
     local shim="$logs/redirect-shim.log"
     local shim_mark=0 conn_before="" conn="" line=""
+    # (N) so no match is empty rather than a zsh error -- "ls ... 2>/dev/null"
+    # could not suppress it, because zsh fails the glob before ls ever runs --
+    # and (om[1]) for the newest, which is what "ls -t | head -1" was for.
+    local -a newest
 
-    [ -d "$logs" ] || die $E_UNSUPPORTED "No Aurora17 logs in the $BOTTLE bottle at
-         $logs
-         Run ./setup.sh --bottle first, then open the connector once."
+    # A bottle Aurora has never run in has no Logs directory yet, and that is
+    # precisely the launch worth watching -- the first one. Refusing here made
+    # --smoke unusable on exactly the fresh bottle the docs tell people to make.
+    # Aurora creates the directory as it starts, so wait for it instead.
+    if [ ! -d "$logs" ]; then
+        note "the $BOTTLE bottle has no Aurora17 logs yet -- nothing has run in it."
+        say "        That is normal for a new bottle. Aurora makes them as it starts."
+    fi
 
     # The mark. A missing shim log is a legitimate starting state -- it means
     # the shim has never loaded -- and counts as zero lines rather than an error.
     [ -f "$shim" ] && shim_mark="$(wc -l < "$shim" | tr -d ' ')" || shim_mark=0
-    conn_before="$(ls -t "$logs"/connector-*.log 2>/dev/null | head -1 || true)"
+    newest=( "$logs"/connector-*.log(Nom[1]) )
+    conn_before="${newest[1]:-}"
 
     say ""
     say "Watching the $BOTTLE bottle for one launch."
@@ -1538,7 +1561,8 @@ smoke_mode() {
 
         # The connector writes a new log per launch, so the newest file being a
         # different one is how we know PLAY was actually pressed.
-        conn="$(ls -t "$logs"/connector-*.log 2>/dev/null | head -1 || true)"
+        newest=( "$logs"/connector-*.log(Nom[1]) )
+        conn="${newest[1]:-}"
 
         if [ -f "$shim" ]; then
             local now="$(wc -l < "$shim" | tr -d ' ')"
@@ -1643,6 +1667,12 @@ smoke_failed() {
     say ""
 }
 
+# ------------------------------------------------------ --unstick, and stop
+# Frees a bottle whose Wine session outlived its wineserver -- see the comment
+# on prefix_holders for what that state is and how it looks from outside. One
+# rule makes this safe to do bluntly: with every CrossOver quit, anything still
+# inside the prefix is by definition an orphan, because nothing is left that
+# could legitimately be using it.
 if [ "$MODE" = unstick ]; then
     say ""
     say "Freeing the $BOTTLE bottle"
