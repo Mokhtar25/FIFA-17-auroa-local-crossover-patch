@@ -16,10 +16,32 @@ HERE="${0:A:h}"
 # it made rather than the real one.
 RECEIPT="${AURORA_RECEIPT_DIR:-$HOME/Library/Application Support/Aurora17}/install-receipt.conf"
 
+# Colour only when writing to a terminal; NO_COLOR=1 turns it off.
+_paint() {
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+        C_RED=$'\e[1;31m' C_GRN=$'\e[32m' C_YEL=$'\e[33m' C_OFF=$'\e[0m'
+    else
+        C_RED='' C_GRN='' C_YEL='' C_OFF=''
+    fi
+}
 say()  { print -r -- "$@"; }
-ok()   { print -r -- "  ok    $@"; }
-note() { print -r -- "  note  $@"; }
-fail() { print -r -- ""; print -r -- "STOPPED: $@"; exit 1; }
+ok()   { _paint; print -r -- "  ${C_GRN}ok${C_OFF}    $@"; }
+note() { _paint; print -r -- "  ${C_YEL}note${C_OFF}  $@"; }
+bad()  { _paint; print -r -- "  ${C_RED}BAD${C_OFF}   $@"; }
+red()  { _paint; print -r -- "${C_RED}$@${C_OFF}"; }
+green() { _paint; print -r -- "${C_GRN}$@${C_OFF}"; }
+# A stop: first line red says what went wrong, the rest says what to do.
+fail() {
+    local msg="$*" first rest
+    first="${msg%%$'\n'*}"
+    rest="${msg#*$'\n'}"
+    _paint
+    print -r -- ""
+    print -r -- "${C_RED}STOPPED: ${first}${C_OFF}"
+    [ "$rest" = "$msg" ] || print -r -- "$rest"
+    print -r -- ""
+    exit 1
+}
 
 # ------------------------------------------------------------- the receipt
 R_MODE=""; R_TARGET=""; R_BOTTLE_DIR=""; R_BOTTLE=""
@@ -110,17 +132,25 @@ if [ "$MODE" = "in-place" ]; then
     APP="${1:-$TARGET}"
     [ -d "$APP" ] || fail "The recorded CrossOver is not at
              $APP
-         Nothing has been changed."
-    is_crossover_bundle "$APP" || fail "$APP is not a CrossOver bundle. Nothing changed."
+         Nothing has been changed. If it moved, say where:
+             AURORA_TARGET=/path/to/CrossOver.app ./uninstall.sh"
+    is_crossover_bundle "$APP" || fail "$APP is not a CrossOver bundle. Nothing changed.
+         Point this at the CrossOver that was patched:
+             AURORA_TARGET=/path/to/CrossOver.app ./uninstall.sh"
     if app_is_running "$APP"; then
-        fail "$APP is running. Quit it first, then run this again."
+        fail "$APP is running.
+         Quit it completely (Command-Q, not just closing the window), then
+         run this again."
     fi
 
     WINE="$APP/Contents/SharedSupport/CrossOver/lib/wine"
     put_back=0
     for f in $FILES; do
         if [ -f "$WINE/$f.orig" ]; then
-            cp -X "$WINE/$f.orig" "$WINE/$f" || fail "Could not restore $f in $APP."
+            cp -X "$WINE/$f.orig" "$WINE/$f" || fail "Could not restore $f in $APP.
+         Usually macOS refusing the write. Turn on System Settings >
+         Privacy & Security > App Management for Terminal, quit Terminal,
+         reopen it, and run this again."
             rm -f "$WINE/$f.orig"
             ok "restored ${f:t}"
             put_back=$((put_back+1))
@@ -186,9 +216,13 @@ else
     if [ -d "$TARGET" ]; then
         assert_safe_target "$TARGET"
         is_crossover_bundle "$TARGET" \
-            || fail "$TARGET is not a CrossOver bundle. Refusing to remove it."
+            || fail "$TARGET is not a CrossOver bundle. Refusing to remove it.
+         Something else is at that path. Move it away, or drag the real
+         CrossOver-FIFA to the Trash yourself."
         if app_is_running "$TARGET"; then
-            fail "$TARGET is running. Quit it first, then run this again."
+            fail "$TARGET is running.
+         Quit it completely (Command-Q, not just closing the window), then
+         run this again."
         fi
         rm -rf "$TARGET"
         ok "deleted $TARGET"
@@ -275,9 +309,9 @@ fi
 
 say ""
 if [ "$undone" -eq 0 ]; then
-    say "Nothing to undo — no CrossOver-FIFA and no install record found."
+    note "nothing to undo — no CrossOver-FIFA and no install record found"
 else
-    say "Done."
+    green "Done."
 fi
 say ""
 say "Left in place, on purpose:"

@@ -40,19 +40,70 @@ case "${1:-}" in
     --bottle) MODE=bottle; shift ;;
     --smoke) MODE=smoke; shift ;;
     --help|-h)
-        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
-    -*) print -r -- "Unknown option: $1"; exit $E_UNSUPPORTED ;;
+    -*) print -r -- "Unknown option: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
 esac
 
+# Colour, only when the output is a terminal. Piped or saved output -- the
+# report file, the bundle -- stays plain. NO_COLOR=1 turns it off anywhere.
+# Checked on every call, not once: --report runs these inside a pipe to tee.
+_paint() {
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+        C_RED=$'\e[1;31m' C_GRN=$'\e[32m' C_YEL=$'\e[33m' C_OFF=$'\e[0m'
+    else
+        C_RED='' C_GRN='' C_YEL='' C_OFF=''
+    fi
+}
 say()  { print -r -- "$@"; }
-ok()   { print -r -- "  ok    $@"; }
-note() { print -r -- "  note  $@"; }
-# Every designed stop goes through die() with one of the four codes above.
-# A bare fail() means a path nobody assigned a code to, so exit 1 is reserved
-# for exactly that -- an unplanned stop -- and never appears in the table.
-fail() { print -r -- ""; print -r -- "STOPPED: $@"; exit "${EXIT_AS:-1}"; }
+ok()   { _paint; print -r -- "  ${C_GRN}ok${C_OFF}    $@"; }
+note() { _paint; print -r -- "  ${C_YEL}note${C_OFF}  $@"; }
+bad()  { _paint; print -r -- "  ${C_RED}BAD${C_OFF}   $@"; }
+red()  { _paint; print -r -- "${C_RED}$@${C_OFF}"; }
+green() { _paint; print -r -- "${C_GRN}$@${C_OFF}"; }
+# A stop. The first line, in red, says what went wrong; the lines after it say
+# what to do about it. Every designed stop goes through die() with one of the
+# four codes above. A bare fail() means a path nobody assigned a code to, so
+# exit 1 is reserved for exactly that -- an unplanned stop -- and never
+# appears in the table.
+fail() {
+    local msg="$*" first rest
+    first="${msg%%$'\n'*}"
+    rest="${msg#*$'\n'}"
+    _paint
+    print -r -- ""
+    print -r -- "${C_RED}STOPPED: ${first}${C_OFF}"
+    [ "$rest" = "$msg" ] || print -r -- "$rest"
+    print -r -- ""
+    exit "${EXIT_AS:-1}"
+}
 die()  { EXIT_AS="$1"; shift; fail "$@"; }
+
+# Two tools from Apple's command line tools are needed to fit the files in.
+# Without them /usr/bin/otool and install_name_tool are stubs that fail, and
+# the copy would be half made before anything said so.
+require_clt() {
+    if xcode-select -p >/dev/null 2>&1 && xcrun --find install_name_tool >/dev/null 2>&1; then
+        ok "Apple's command line tools are installed"
+        return 0
+    fi
+    die $E_UNSUPPORTED "Apple's command line tools are not installed.
+         Two of them are needed to fit the files into CrossOver.
+         To fix:
+           1. Open Terminal and run:   xcode-select --install
+           2. Press Install in the window that opens (a few minutes).
+           3. Run this again.
+         Nothing has been changed."
+}
+
+# One hint for every write that macOS itself can refuse. Since macOS 14 a
+# signed app is guarded by App Management, a permission that belongs to the
+# program running this script, so the folder looks writable and is not.
+APP_MGMT_HINT='         Usually macOS refusing the write. To fix:
+           1. System Settings > Privacy & Security > App Management
+           2. Switch on Terminal (or whatever you ran this from).
+              If it is not listed, use Full Disk Access instead.
+           3. Quit that app completely, reopen it, and run this again.'
 
 # The six Wine files the fixes replace.
 FILES=(
@@ -191,7 +242,7 @@ seed_bottle_hosts() {
         note "no bottle to seed the hosts file in"
         return 0
     fi
-    mkdir -p "$dir" 2>/dev/null || { say "  BAD   could not create $dir"; return 1 }
+    mkdir -p "$dir" 2>/dev/null || { bad "could not create $dir"; return 1 }
 
     # Two files: what the hosts file will become, and the preimage the receipt
     # has to record. Both are built from the same read, so they cannot disagree.
@@ -199,7 +250,7 @@ seed_bottle_hosts() {
     local pretmp="$dir/.hosts-pre.aurora17.$$"
     local pre line h
     pre="$(hosts_preimage "$f")"
-    : > "$pretmp" || { say "  BAD   could not write in $dir"; return 1 }
+    : > "$pretmp" || { bad "could not write in $dir"; return 1 }
     if [ -n "$pre" ]; then
         print -r -- "$pre" | while IFS= read -r line; do printf '%s\r\n' "$line" >> "$pretmp"; done
     fi
@@ -216,7 +267,7 @@ seed_bottle_hosts() {
         fi
         if ! mv "$tmp" "$f"; then
             rm -f "$tmp" "$pretmp"
-            say "  BAD   could not write $f"
+            bad "could not write $f"
             return 1
         fi
         ok "wrote the ${#AURORA_HOSTS} EA mappings into the bottle's hosts file"
@@ -341,7 +392,9 @@ assert_safe_target() {
     local t="$1"
     case "$t" in
         /*) ;;
-        *) die $E_UNSUPPORTED "Refusing a target that is not an absolute path: $t" ;;
+        *) die $E_UNSUPPORTED "Refusing a target that is not an absolute path: $t
+         AURORA_TARGET must start with /, for example
+         AURORA_TARGET=/Applications/CrossOver-FIFA.app" ;;
     esac
     case "$t" in
         *.app) ;;
@@ -351,9 +404,13 @@ assert_safe_target() {
     esac
     case "${t:A}" in
         / | /Applications | /Users | /System | /Library | "$HOME" | "$HOME/Applications")
-            die $E_UNSUPPORTED "Refusing to use $t as the target." ;;
+            die $E_UNSUPPORTED "Refusing to use $t as the target.
+         AURORA_TARGET must name a new app inside a folder, for example
+         AURORA_TARGET=/Applications/CrossOver-FIFA.app" ;;
     esac
-    [ "${#t}" -gt 5 ] || die $E_UNSUPPORTED "Refusing a suspiciously short target: $t"
+    [ "${#t}" -gt 5 ] || die $E_UNSUPPORTED "Refusing a suspiciously short target: $t
+         AURORA_TARGET must name a new app inside a folder, for example
+         AURORA_TARGET=/Applications/CrossOver-FIFA.app"
 }
 
 # Deleting a directory only because it sits at the expected path is how you
@@ -884,10 +941,12 @@ sign_payload() {
     local wine="$1" so
     for so in $MACHO; do
         [ -f "$wine/x86_64-unix/$so" ] \
-            || die $E_PAYLOAD "$so is missing from $wine/x86_64-unix."
+            || die $E_PAYLOAD "$so is missing from $wine/x86_64-unix.
+         The copy is incomplete. Run ./setup.sh again to make a fresh one."
         codesign --force --sign - "$wine/x86_64-unix/$so" 2>/dev/null \
             || die $E_PERMISSION "Could not sign $so.
-         The copy is incomplete. Run ./uninstall.sh and try again."
+$APP_MGMT_HINT
+         If that was already on, run ./uninstall.sh and install again."
     done
     ok "the ${#MACHO} Mac files"
 }
@@ -902,8 +961,7 @@ resign_app() {
     # none. Treating it as "none" is how the four CrossOver needs get silently
     # dropped, which breaks microphone, camera, and Apple Events afterwards.
     local rc
-    read_entitlements "$app" "$ent"
-    rc=$?
+    read_entitlements "$app" "$ent" && rc=0 || rc=$?
     if [ "$rc" -ne 0 ]; then
         # Signing with an empty list is what takes microphone, camera and Apple
         # Events away for good, so put the known CrossOver 26.3 set in instead.
@@ -911,7 +969,8 @@ resign_app() {
         write_stock_entitlements "$ent" \
             || { rm -f "$ent" "$after"
                  die $E_PERMISSION "Could not write the replacement permission list.
-         Nothing has been signed." }
+         Nothing has been signed. Check there is free disk space, then
+         run:  ./setup.sh --resign" }
         note "using the four CrossOver 26.3 ships with instead"
     fi
 
@@ -919,20 +978,24 @@ resign_app() {
     before_keys=( ${(f)"$(entitlement_keys "$ent")"} )
     [ "${#before_keys}" -gt 0 ] \
         || { rm -f "$ent" "$after"
-             die $E_PAYLOAD "CrossOver's permission list came back empty. Nothing signed." }
+             die $E_PAYLOAD "CrossOver's permission list came back empty. Nothing signed.
+         Reinstall CrossOver 26.3 from codeweavers.com, then run this again." }
     ok "kept CrossOver's ${#before_keys} permissions"
 
     /usr/libexec/PlistBuddy -c "Add :$LIBVAL_KEY bool true" "$ent" >/dev/null 2>&1 \
         || /usr/libexec/PlistBuddy -c "Set :$LIBVAL_KEY true" "$ent" >/dev/null 2>&1 \
         || { rm -f "$ent" "$after"
              die $E_PERMISSION "Could not add the permission that lets the copy load its own
-         frameworks. Without it the app will not open at all. Nothing signed." }
+         frameworks. Without it the app will not open at all. Nothing signed.
+         Check there is free disk space, then run:  ./setup.sh --resign" }
     ok "allowed it to load its own frameworks"
 
     codesign --force --sign - -o runtime --entitlements "$ent" "$app" 2>/dev/null \
         || { rm -f "$ent" "$after"
              die $E_PERMISSION "Could not sign $app.
-         It will not launch until it is signed. Try:  ./setup.sh --resign" }
+         It will not open until it is signed.
+$APP_MGMT_HINT
+         Then run:  ./setup.sh --resign" }
     ok "signed $app"
 
     # Read back what actually landed. codesign can succeed and still not carry
@@ -940,7 +1003,9 @@ resign_app() {
     # open, which is a miserable thing to debug from the other end.
     codesign -d --entitlements "$after" --xml "$app" 2>/dev/null && [ -s "$after" ] \
         || { rm -f "$ent" "$after"
-             die $E_PERMISSION "Signed $app but could not read its permissions back." }
+             die $E_PERMISSION "Signed $app but could not read its permissions back.
+         Run:  ./setup.sh --resign
+         If it happens again, run ./uninstall.sh and install again." }
 
     local -a now_keys
     now_keys=( ${(f)"$(entitlement_keys "$after")"} )
@@ -950,7 +1015,8 @@ resign_app() {
     done
     [ -z "$missing" ] || { rm -f "$ent" "$after"
         die $E_PERMISSION "Signing lost these permissions:$missing
-         Run ./uninstall.sh and install again." }
+         Run ./setup.sh --resign. If it happens again, run ./uninstall.sh
+         and install again." }
     [[ " ${now_keys[*]} " == *" $LIBVAL_KEY "* ]] || { rm -f "$ent" "$after"
         die $E_PERMISSION "The permission that lets the copy load its own frameworks did not
          stick. The app would not open. Run ./setup.sh --resign." }
@@ -1150,26 +1216,26 @@ verify_install() {
     say "Checking $app"
     say ""
 
-    [ -d "$app" ] || { say "  BAD   there is no app at $app"; return 1; }
+    [ -d "$app" ] || { bad "there is no app at $app"; return 1; }
     is_crossover_bundle "$app" \
         && ok "is a CrossOver bundle" \
-        || { say "  BAD   $app is not a CrossOver bundle"; problems=$((problems+1)); }
+        || { bad "$app is not a CrossOver bundle"; problems=$((problems+1)); }
 
     local wine="$app/Contents/SharedSupport/CrossOver/lib/wine" f
     if ! ( cd "$HERE/fixes" && shasum -a 256 -c SHA256SUMS ) >/dev/null 2>&1; then
-        say "  BAD   fixes/ does not match its own checksums; cannot compare"
+        bad "fixes/ does not match its own checksums; cannot compare"
         return 1
     fi
     for f in $FILES; do
         if [ ! -f "$wine/$f" ]; then
-            say "  BAD   ${f:t} is missing"; problems=$((problems+1)); continue
+            bad "${f:t} is missing"; problems=$((problems+1)); continue
         fi
         case "$f" in
         *.dll)
             # Installed unchanged, so a byte comparison is the whole story.
             cmp -s "$HERE/fixes/$f" "$wine/$f" \
                 && ok "${f:t}" \
-                || { say "  BAD   ${f:t} is not the fixed version"; problems=$((problems+1)); }
+                || { bad "${f:t} is not the fixed version"; problems=$((problems+1)); }
             ;;
         *.so)
             # These three are modified after installation -- an rpath is added
@@ -1178,7 +1244,7 @@ verify_install() {
             if [ "$(macho_uuid "$wine/$f")" = "$(macho_uuid "$HERE/fixes/$f")" ]; then
                 ok "${f:t}"
             else
-                say "  BAD   ${f:t} is not the fixed version"; problems=$((problems+1))
+                bad "${f:t} is not the fixed version"; problems=$((problems+1))
             fi
             ;;
         esac
@@ -1188,7 +1254,7 @@ verify_install() {
     for so in ntdll.so crypt32.so; do
         has_lib64_rpath "$wine/x86_64-unix/$so" \
             && ok "$so search path" \
-            || { say "  BAD   $so is missing its library search path"; problems=$((problems+1)); }
+            || { bad "$so is missing its library search path"; problems=$((problems+1)); }
     done
     for so in $MACHO; do
         # A file that is not there is reported as missing by the checks that own
@@ -1196,7 +1262,7 @@ verify_install() {
         # for one fault, and names the wrong repair.
         [ -f "$wine/x86_64-unix/$so" ] || continue
         codesign --verify "$wine/x86_64-unix/$so" 2>/dev/null \
-            || { say "  BAD   $so is not signed — run ./setup.sh --resign"; problems=$((problems+1)); }
+            || { bad "$so is not signed — run ./setup.sh --resign"; problems=$((problems+1)); }
     done
 
     local ent; ent="$(mktemp -t cxent).plist"
@@ -1204,17 +1270,17 @@ verify_install() {
         local -a keys; keys=( ${(f)"$(entitlement_keys "$ent")"} )
         [[ " ${keys[*]} " == *" $LIBVAL_KEY "* ]] \
             && ok "${#keys} permissions, including the framework one" \
-            || { say "  BAD   the framework permission is missing — run ./setup.sh --resign"
+            || { bad "the framework permission is missing — run ./setup.sh --resign"
                  problems=$((problems+1)); }
     else
-        say "  BAD   cannot read the app's permissions — run ./setup.sh --resign"
+        bad "cannot read the app's permissions — run ./setup.sh --resign"
         problems=$((problems+1))
     fi
     rm -f "$ent"
 
     codesign --verify --deep --strict "$app" 2>/dev/null \
         && ok "signature" \
-        || { say "  BAD   signature does not verify — run ./setup.sh --resign"; problems=$((problems+1)); }
+        || { bad "signature does not verify — run ./setup.sh --resign"; problems=$((problems+1)); }
 
     local conf="$BOTTLE_DIR/$BOTTLE/cxbottle.conf" k v kv
     if [ -f "$conf" ]; then
@@ -1222,10 +1288,10 @@ verify_install() {
             k="${kv%%=*}"; v="${kv#*=}"
             grep -q "^\"$k\" = \"$v\"\$" "$conf" \
                 && ok "$k" \
-                || { say "  BAD   $k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1)); }
+                || { bad "$k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1)); }
         done
     else
-        say "  BAD   no bottle called '$BOTTLE' at $BOTTLE_DIR"
+        bad "no bottle called '$BOTTLE' at $BOTTLE_DIR"
         problems=$((problems+1))
     fi
 
@@ -1243,7 +1309,7 @@ verify_install() {
         say "        user.reg out as it goes, which can undo the version override"
         say "        below after this has already said ok."
     else
-        say "  BAD   ${#holding} process(es) are still inside the $BOTTLE bottle with"
+        bad "${#holding} process(es) are still inside the $BOTTLE bottle with"
         say "        no CrossOver running. The bottle will hang on loading until"
         say "        they are gone. Run:  ./setup.sh --unstick"
         problems=$((problems+1))
@@ -1258,7 +1324,7 @@ verify_install() {
     elif [ -n "$(crossovers_running)" ]; then
         note "Aurora service is active on port(s) 47170-47173 (PID: $port_pids)"
     else
-        say "  BAD   orphaned process(es) holding Aurora port(s) (PID: $port_pids) with CrossOver closed."
+        bad "orphaned process(es) holding Aurora port(s) (PID: $port_pids) with CrossOver closed."
         say "        The launcher will fail with 'A server is already listening'. Run:  ./setup.sh --unstick"
         problems=$((problems+1))
     fi
@@ -1268,7 +1334,7 @@ verify_install() {
     if [ -f "$(bottle_user_reg)" ]; then
         version_override_is_set \
             && ok "version = native,builtin in the $BOTTLE bottle" \
-            || { say "  BAD   the $BOTTLE bottle loads Wine's own version.dll, so"
+            || { bad "the $BOTTLE bottle loads Wine's own version.dll, so"
                  say "        Aurora's redirect shim never loads and the game will"
                  say "        say the servers are shut down. Quit CrossOver fully,"
                  say "        then re-run ./setup.sh"
@@ -1281,7 +1347,7 @@ verify_install() {
     if [ -f "$(bottle_user_reg)" ]; then
         proxy_autodetect_is_off \
             && ok "proxy auto-detect off in the $BOTTLE bottle" \
-            || { say "  BAD   proxy auto-detect is on in the $BOTTLE bottle, so Aurora's"
+            || { bad "proxy auto-detect is on in the $BOTTLE bottle, so Aurora's"
                  say "        helper spends five seconds looking for a proxy and misses"
                  say "        the deadline for the Origin auth code. The game will quit"
                  say "        saying the Origin client was terminated. Quit CrossOver"
@@ -1308,7 +1374,7 @@ verify_install() {
     if [ "${#stray}" -eq 0 ]; then
         ok "the bottle's shortcuts start ${app:t}"
     else
-        say "  BAD   ${#stray} shortcut(s) in the $BOTTLE bottle start a different"
+        bad "${#stray} shortcut(s) in the $BOTTLE bottle start a different"
         say "        CrossOver, so the game runs unpatched and will say the"
         say "        servers are shut down. Re-run ./setup.sh"
         for f in $stray; do say "        ${f:t}"; done
@@ -1337,13 +1403,13 @@ verify_install() {
         fi
     done
     if [ "$found" != 1 ] && [ "$stale" = 1 ]; then
-        say "  BAD   a powershell.exe is there but is not the shipped stand-in:"
+        bad "a powershell.exe is there but is not the shipped stand-in:"
         for d in $stale_at; do say "        $d"; done
         say "        An older stand-in reports every failure as a bare exit 1"
         say "        instead of a numbered code. Re-run ./setup.sh"
         problems=$((problems+1))
     elif [ "$found" != 1 ]; then
-        say "  BAD   the PowerShell stand-in is in neither place — PLAY will do nothing"
+        bad "the PowerShell stand-in is in neither place — PLAY will do nothing"
         problems=$((problems+1))
     fi
 
@@ -1352,19 +1418,19 @@ verify_install() {
     # to maintain -- its launcher rewrites that file on every PLAY -- so an
     # empty one on a bottle that has never played is normal, not a fault.
     if [ ! -f "$wine/$RESOLVER" ]; then
-        say "  BAD   ${RESOLVER:t} is missing — the game will not reach Aurora17"
+        bad "${RESOLVER:t} is missing — the game will not reach Aurora17"
         problems=$((problems+1))
     elif [ "$(macho_uuid "$wine/$RESOLVER")" = "$(macho_uuid "$HERE/fixes/$RESOLVER")" ]; then
         ok "${RESOLVER:t}"
     else
-        say "  BAD   ${RESOLVER:t} is not the shipped version"
+        bad "${RESOLVER:t} is not the shipped version"
         problems=$((problems+1))
     fi
 
     if ws2_32_is_patched "$wine"; then
         ok "ws2_32.so reads the bottle's hosts file"
     else
-        say "  BAD   ws2_32.so still asks macOS to resolve names, so the hosts"
+        bad "ws2_32.so still asks macOS to resolve names, so the hosts"
         say "        file inside the bottle is ignored and the game will not"
         say "        connect. Re-run ./setup.sh"
         problems=$((problems+1))
@@ -1381,7 +1447,7 @@ verify_install() {
         say "        every REPAIR SETUP. If it has not been run in this bottle,"
         say "        this is expected — press PLAY once and check again."
     else
-        say "  BAD   the bottle's hosts file names only $((${#AURORA_HOSTS} - ${#miss}))"
+        bad "the bottle's hosts file names only $((${#AURORA_HOSTS} - ${#miss}))"
         say "        of the ${#AURORA_HOSTS} EA hosts, so something rewrote it wrongly:"
         say "        $bh"
         say "        Missing: ${miss[*]}"
@@ -1398,7 +1464,7 @@ verify_install() {
     elif [ -f "$rc" ]; then
         ok "Aurora17 owns those mappings (no elevated step on PLAY)"
     else
-        say "  BAD   Aurora17 has no hosts receipt, so its first PLAY will try to"
+        bad "Aurora17 has no hosts receipt, so its first PLAY will try to"
         say "        elevate and stop with 'The elevated setup step exited with"
         say "        code 1'. Re-run ./setup.sh"
         problems=$((problems+1))
@@ -1420,7 +1486,7 @@ verify_install() {
     else
         gdu="$(win_path_to_unix "$gd" 2>/dev/null || true)"
         if [ -z "$gdu" ] || [ ! -d "$gdu" ]; then
-            say "  BAD   the game folder Aurora recorded does not exist:"
+            bad "the game folder Aurora recorded does not exist:"
             say "        $gd"
             say "        Aurora is pointed at a folder that is not there. Set the"
             say "        game location again in Aurora17 and press PLAY once."
@@ -1433,7 +1499,7 @@ verify_install() {
             if [ "$missing_shim" -eq 0 ]; then
                 ok "the redirect shim is in the game folder"
             else
-                say "  BAD   the game folder is missing part of Aurora's redirect shim:"
+                bad "the game folder is missing part of Aurora's redirect shim:"
                 say "        $gdu"
                 for gf in version.dll aurora17-redirect.ini; do
                     [ -f "$gdu/$gf" ] || say "        missing: $gf"
@@ -1452,7 +1518,7 @@ verify_install() {
     if [ -f "$lic" ]; then
         ok "licence file present ($(stat -f%z "$lic") bytes)"
     else
-        say "  BAD   no licence file (step 9a):"
+        bad "no licence file (step 9a):"
         say "        $lic"
         say "        Without it FIFA 17 takes its Origin activation path, relaunches"
         say "        itself, and the process Aurora watches exits 0xFFFFFFFA about"
@@ -1470,7 +1536,7 @@ verify_install() {
     elif [ -f "$adir/server/Aurora17Server/redirector-dev.pfx" ]; then
         ok "the redirector certificate is in place"
     else
-        say "  BAD   redirector-dev.pfx is missing from"
+        bad "redirector-dev.pfx is missing from"
         say "        $adir/server/Aurora17Server/"
         say "        The launcher will try to mint one and stop: minting needs"
         say "        Windows PowerShell's PKI module, which a bottle does not"
@@ -1491,7 +1557,7 @@ verify_install() {
     if [ "${#others}" -eq 0 ]; then
         : # either nothing is running, or the right one is -- both fine
     else
-        say "  BAD   a different CrossOver is open than the one checked here."
+        bad "a different CrossOver is open than the one checked here."
         say "        checked:  $app"
         for r in $others; do say "        running:  $r" ; done
         say "        All CrossOver copies share one bundle identifier, so the"
@@ -1510,7 +1576,7 @@ verify_install() {
         # and its launch exited 0xFFFFFFFA at 15:42:43). So this is deliberately
         # not phrased as "it will work", and it names the one thing that can
         # actually answer that.
-        say "Everything checks out -- every static check passed."
+        green "Everything checks out -- every static check passed."
         say ""
         say "That is not the same as \"the game will play\": these checks cannot"
         say "see a launch. To find out, run this and press PLAY when it asks:"
@@ -1519,7 +1585,7 @@ verify_install() {
         say ""
         return 0
     fi
-    say "$problems problem(s) above. SETUP.md says what each one means."
+    red "$problems problem(s) above. SETUP.md says what each one means."
     return 1
 }
 
@@ -1869,7 +1935,10 @@ configure_bottle() {
             elif grep -q "^\"$1\" = " "$CONF"; then
                 die $E_INCOMPLETE "$1 is set to something else in
                  $CONF
-             It must be \"$2\". Edit that line, or delete it and run this again."
+             It must be \"$2\". To fix:
+               1. Open that file in TextEdit.
+               2. Find the line starting \"$1\" and delete it.
+               3. Save, then run this again."
             else
                 printf '"%s" = "%s"\n' "$1" "$2" >> "$CONF"
                 ok "$1 = $2"
@@ -1990,11 +2059,15 @@ configure_bottle() {
            && ! cmp -s "$HERE/aurora17/powershell.exe" "$AURORA_FOUND/powershell.exe" \
            && [ ! -f "$AURORA_FOUND/powershell.exe.aurora-orig" ]; then
             cp -X "$AURORA_FOUND/powershell.exe" "$AURORA_FOUND/powershell.exe.aurora-orig" \
-                || die $E_PERMISSION "Could not back up the powershell.exe already in $AURORA_FOUND."
+                || die $E_PERMISSION "Could not back up the powershell.exe already in $AURORA_FOUND.
+         That folder is not writable. In Finder, Get Info on it and check
+         you have Read & Write, then run this again."
             note "kept the powershell.exe already there as powershell.exe.aurora-orig"
         fi
         cp -X "$HERE/aurora17/powershell.exe" "$AURORA_FOUND/powershell.exe" \
-            || die $E_PERMISSION "Could not write into $AURORA_FOUND."
+            || die $E_PERMISSION "Could not write into $AURORA_FOUND.
+         That folder is not writable. In Finder, Get Info on it and check
+         you have Read & Write, then run this again."
         ok "into $AURORA_FOUND"
 
         # Aurora17 does not ship redirector-dev.pfx by default and relies on Windows
@@ -2017,16 +2090,24 @@ configure_bottle() {
     # lives. The file being replaced is Wine's own stub; we keep a copy of it.
     PSDIR="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
     if [ -d "$BOTTLE_DIR/$BOTTLE" ]; then
-        if [ -d "$PSDIR" ] && [ -f "$PSDIR/powershell.exe" ]; then
+        if [ -f "$PSDIR/powershell.exe" ] \
+           && ! cmp -s "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe"; then
+            # Somebody else's file. Keep it once; never overwrite that copy.
             [ -f "$PSDIR/powershell.exe.wine-stub-orig" ] \
                 || cp -X "$PSDIR/powershell.exe" "$PSDIR/powershell.exe.wine-stub-orig"
+            PS_BOTTLE_ACTION=replaced
+        elif [ -f "$PSDIR/powershell.exe.wine-stub-orig" ]; then
+            # Ours is already in and the original is safe beside it. A second
+            # run must not back up our own file as if it were Wine's.
             PS_BOTTLE_ACTION=replaced
         else
             mkdir -p "$PSDIR"
             PS_BOTTLE_ACTION=created
         fi
         cp -X "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe" \
-            || die $E_PERMISSION "Could not write the stand-in into the $BOTTLE bottle."
+            || die $E_PERMISSION "Could not write the stand-in into the $BOTTLE bottle.
+         Quit CrossOver completely and run this again. If it repeats, check
+         there is free disk space."
         ok "into the $BOTTLE bottle ($PS_BOTTLE_ACTION)"
         PS_OK=1
     fi
@@ -2159,7 +2240,7 @@ smoke_mode() {
                     ok "origin-auth-code-issued"
                     say "        $line"
                     say ""
-                    say "PASS. The session was issued. Ultimate Team should load."
+                    green "PASS. The session was issued. Ultimate Team should load."
                     say ""
                     return 0
                 fi
@@ -2204,7 +2285,7 @@ smoke_mode() {
             line="$(grep 'exited with code 0x00000000' "$conn" | tail -1 || true)"
             if [ -n "$line" ]; then
                 say ""
-                say "INCONCLUSIVE: FIFA exited cleanly without a session being issued."
+                red "INCONCLUSIVE: FIFA exited cleanly without a session being issued."
                 if [ "$lsx" -eq 0 ]; then
                     say "        The LSX connection was never accepted, so the game quit"
                     say "        before reaching Aurora at all."
@@ -2255,7 +2336,7 @@ smoke_mode() {
 smoke_failed() {
     local why="$1" line="$2" conn="$3" lsx="${4:-0}"
     say ""
-    say "FAIL: $why."
+    red "FAIL: $why."
     say "        $line"
     [ -n "$conn" ] && say "        connector log: ${conn:t}"
     say ""
@@ -2406,7 +2487,9 @@ if [ "$MODE" = report ]; then
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
     fi
-    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET."
+    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET.
+         Run ./setup.sh first. If the copy is somewhere else:
+             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --report"
     report_mode "$TARGET"
     exit 0
 fi
@@ -2416,7 +2499,9 @@ if [ "$MODE" = bundle ]; then
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
     fi
-    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET."
+    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET.
+         Run ./setup.sh first. If the copy is somewhere else:
+             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --bundle"
     bundle_mode "$TARGET" || exit $E_PERMISSION
     exit 0
 fi
@@ -2431,7 +2516,9 @@ if [ "$MODE" = bottle ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
     fi
     [ -d "$TARGET" ] \
-        || die $E_PAYLOAD "No patched CrossOver at $TARGET. Run ./setup.sh first."
+        || die $E_PAYLOAD "No patched CrossOver at $TARGET.
+         Run ./setup.sh first. If the copy is somewhere else:
+             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --bottle"
     [ -d "$BOTTLE_DIR/$BOTTLE" ] \
         || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
          $BOTTLE_DIR
@@ -2442,13 +2529,13 @@ if [ "$MODE" = bottle ]; then
     configure_bottle "$TARGET"
     say ""
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
-        say "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
+        green "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
         say ""
         say "To check:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
         say ""
         exit 0
     fi
-    say "NOT FINISHED — see the lines above."
+    red "NOT FINISHED — see the lines above."
     say ""
     exit $E_INCOMPLETE
 fi
@@ -2483,10 +2570,13 @@ if [ "$MODE" = resign ]; then
          If yours is somewhere else:
              AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --resign"
     is_crossover_bundle "$TARGET" \
-        || die $E_PAYLOAD "$TARGET is not a CrossOver bundle. Refusing to sign it."
+        || die $E_PAYLOAD "$TARGET is not a CrossOver bundle. Refusing to sign it.
+         If the copy is somewhere else:
+             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --resign"
     say ""
     say "Re-signing $TARGET"
     say ""
+    require_clt
     # An install made by an older copy of this package has no resolver in it,
     # and signing a file that is not there would stop with "the copy is
     # incomplete". Put it in first: it is two small operations, and --resign is
@@ -2494,13 +2584,15 @@ if [ "$MODE" = resign ]; then
     RESIGN_WINE="$TARGET/Contents/SharedSupport/CrossOver/lib/wine"
     if [ ! -f "$RESIGN_WINE/$RESOLVER" ]; then
         cp -X "$HERE/fixes/$RESOLVER" "$RESIGN_WINE/$RESOLVER" \
-            || die $E_PERMISSION "Could not install ${RESOLVER:t} into $TARGET."
+            || die $E_PERMISSION "Could not install ${RESOLVER:t} into $TARGET.
+$APP_MGMT_HINT"
         ok "added ${RESOLVER:t}"
     fi
     if ! ws2_32_is_patched "$RESIGN_WINE"; then
         install_name_tool -change "$LIBSYSTEM" "$RESOLVER_PATH" \
             "$RESIGN_WINE/x86_64-unix/ws2_32.so" 2>/dev/null \
-            || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}."
+            || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}.
+$APP_MGMT_HINT"
         ok "pointed ws2_32.so at the bottle's hosts file"
     fi
     # Re-signing changes the signature, and nothing else. It cannot turn a
@@ -2542,7 +2634,7 @@ if [ "$MODE" = resign ]; then
     sign_payload "$RESIGN_WINE"
     resign_app "$TARGET"
     say ""
-    say "Done. Open ${TARGET:t:r} again."
+    green "Done. Open ${TARGET:t:r} again."
     say ""
     exit 0
 fi
@@ -2557,21 +2649,27 @@ say "1. Checking"
 
 case "$(uname -s)" in
     Darwin) ;;
-    *) die $E_UNSUPPORTED "These fixes are for macOS." ;;
+    *) die $E_UNSUPPORTED "These fixes are for macOS. There is nothing to run here." ;;
 esac
 [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ] \
     || die $E_UNSUPPORTED "These fixes are for Apple silicon Macs (M1 or newer).
-         The six replacement files are built for that and nothing else."
+         The replacement files are built for that and nothing else, so there
+         is nothing to do on this Mac."
 OSVER="$(sw_vers -productVersion)"
 case "$OSVER" in
-    1[0-3].*|[0-9].*) die $E_UNSUPPORTED "These fixes need macOS 14 or newer. You have $OSVER." ;;
+    1[0-3].*|[0-9].*) die $E_UNSUPPORTED "These fixes need macOS 14 or newer. You have $OSVER.
+         Update macOS (System Settings > General > Software Update), then
+         run this again." ;;
 esac
 ok "macOS $OSVER on Apple silicon"
+require_clt
 
 [ -d "$SRC" ] || die $E_PAYLOAD "No CrossOver at $SRC.
-         If yours is somewhere else, run:  ./setup.sh /path/to/CrossOver.app"
+         Install CrossOver 26.3, or if yours is somewhere else, run:
+             ./setup.sh /path/to/CrossOver.app"
 is_crossover_bundle "$SRC" \
-    || die $E_PAYLOAD "$SRC is not a CrossOver application."
+    || die $E_PAYLOAD "$SRC is not a CrossOver application.
+         Point this at the real one:  ./setup.sh /path/to/CrossOver.app"
 
 # 26.3* would also accept 26.30 and 26.3-beta, which are not what these files
 # were built against.
@@ -2587,10 +2685,12 @@ ok "CrossOver $VER at $SRC"
 SRCWINE="$SRC/Contents/SharedSupport/CrossOver/lib/wine"
 for f in $FILES; do
     [ -f "$SRCWINE/$f" ] \
-        || die $E_PAYLOAD "$f is missing from $SRC. That is not a complete CrossOver 26.3."
+        || die $E_PAYLOAD "$f is missing from $SRC. That is not a complete CrossOver 26.3.
+         Reinstall CrossOver 26.3 from codeweavers.com, then run this again."
 done
 [ -f "$SRCWINE/x86_64-unix/ws2_32.so" ] \
-    || die $E_PAYLOAD "ws2_32.so is missing from $SRC. That is not a complete CrossOver 26.3."
+    || die $E_PAYLOAD "ws2_32.so is missing from $SRC. That is not a complete CrossOver 26.3.
+         Reinstall CrossOver 26.3 from codeweavers.com, then run this again."
 ok "all six files present in CrossOver, and the ws2_32.so we edit"
 
 # Keeping CrossOver's own permissions is the one step with nothing to fall back
@@ -2598,15 +2698,15 @@ ok "all six files present in CrossOver, and the ws2_32.so we edit"
 # replaced. Read them from the original now, while nothing has happened yet, so
 # a CrossOver that cannot supply them stops here instead of there.
 PRE_ENT="$(mktemp -t cxpre).plist"
-read_entitlements "$SRC" "$PRE_ENT"
-PRE_RC=$?
+read_entitlements "$SRC" "$PRE_ENT" && PRE_RC=0 || PRE_RC=$?
 if [ "$PRE_RC" -eq 0 ]; then
     ok "CrossOver's own permissions can be read and kept"
 else
     note "cannot read the permissions on $SRC -- $(ent_reason "$PRE_RC")"
     write_stock_entitlements "$PRE_ENT" \
         || die $E_UNSUPPORTED "Cannot read $SRC's permissions and cannot write a
-         replacement list either. Nothing has been changed."
+         replacement list either. Nothing has been changed.
+         Check there is free disk space, then run this again."
     note "the four CrossOver 26.3 ships with will be used instead"
     say "        microphone, camera and Apple Events will still work"
 fi
@@ -2642,12 +2742,16 @@ if [ "$IN_PLACE" != "1" ]; then
         fi
         note "cannot create anything in ${TARGET:h}"
         mkdir -p "$HOME/Applications" \
-            || die $E_PERMISSION "Cannot create $HOME/Applications either."
+            || die $E_PERMISSION "Cannot create $HOME/Applications either.
+         Choose a folder you can write to:
+             AURORA_TARGET=/some/folder/CrossOver-FIFA.app ./setup.sh"
         TARGET="$HOME/Applications/${TARGET:t}"
         assert_safe_target "$TARGET"
         PROBE_DIR="$(mktemp -d "${TARGET:h}/.aurora17-probe.XXXXXX" 2>/dev/null || true)"
         [ -n "$PROBE_DIR" ] \
-            || die $E_PERMISSION "Cannot create anything in ${TARGET:h}."
+            || die $E_PERMISSION "Cannot create anything in ${TARGET:h}.
+         Choose a folder you can write to:
+             AURORA_TARGET=/some/folder/CrossOver-FIFA.app ./setup.sh"
         say "        using $TARGET instead"
     fi
     rmdir "$PROBE_DIR" 2>/dev/null || true
@@ -2674,17 +2778,22 @@ if [ "$IN_PLACE" != "1" ]; then
     # An existing target has to be CrossOver before it can be deleted.
     if [ -e "$TARGET" ]; then
         [ -d "$TARGET" ] \
-            || die $E_UNSUPPORTED "$TARGET exists and is not an application. Refusing to remove it."
+            || die $E_UNSUPPORTED "$TARGET exists and is not an application. Refusing to remove it.
+         Move it out of the way, or set AURORA_TARGET to another path."
         is_crossover_bundle "$TARGET" \
             || die $E_UNSUPPORTED "$TARGET is not a CrossOver bundle. Refusing to remove it.
          Move it out of the way, or set AURORA_TARGET to another path."
         if app_is_running "$TARGET"; then
-            die $E_PERMISSION "$TARGET is running. Quit it first, then run this again."
+            die $E_PERMISSION "$TARGET is running.
+         Quit it completely (Command-Q, not just closing the window), then
+         run this again."
         fi
     fi
 fi
 if [ "$IN_PLACE" = "1" ] && app_is_running "$SRC"; then
-    die $E_PERMISSION "$SRC is running. Quit it first, then run this again."
+    die $E_PERMISSION "$SRC is running.
+         Quit it completely (Command-Q, not just closing the window), then
+         run this again."
 fi
 
 # Step 7 edits the bottle's user.reg and system.reg: the version override and
@@ -2735,7 +2844,8 @@ fi
 
 APP="$TARGET"
 WINE="$APP/Contents/SharedSupport/CrossOver/lib/wine"
-[ -d "$WINE/x86_64-unix" ] || die $E_PAYLOAD "$APP does not look like CrossOver 26.3 inside."
+[ -d "$WINE/x86_64-unix" ] || die $E_PAYLOAD "$APP does not look like CrossOver 26.3 inside.
+         The copy went wrong. Run ./uninstall.sh, then run this again."
 
 # Since macOS 14, a signed app bundle is protected by a permission called "App
 # Management" that belongs to the program running this script, not to you. The
@@ -2744,24 +2854,17 @@ WINE="$APP/Contents/SharedSupport/CrossOver/lib/wine"
 # Probe with a real write, up front, so macOS asks now rather than half way in.
 PROBE="$(mktemp "$WINE/x86_64-unix/.aurora17-probe.XXXXXX" 2>/dev/null || true)"
 if [ -z "$PROBE" ]; then
-    print -r -- ""
-    print -r -- "STOPPED: macOS will not let this change $APP."
-    print -r -- ""
-    print -r -- "         It is a signed app, and since macOS 14 changing one needs a"
-    print -r -- "         permission called App Management. It belongs to the program"
-    print -r -- "         running this installer -- your Terminal -- not to you, which is"
-    print -r -- "         why the folder looks writable but is not."
-    print -r -- ""
-    print -r -- "         Turn it on:"
-    print -r -- "           System Settings -> Privacy & Security -> App Management"
-    print -r -- "           switch on Terminal (or iTerm, or whatever you ran this from)"
-    print -r -- "           QUIT that app completely, reopen it, and run this again"
-    print -r -- ""
-    print -r -- "         If it is not listed there, use Full Disk Access instead,"
-    print -r -- "         in the same Privacy & Security list. That covers it too."
-    print -r -- ""
-    print -r -- "         Nothing has been changed inside CrossOver."
-    exit $E_PERMISSION
+    die $E_PERMISSION "macOS will not let this change $APP.
+         It is a signed app, and since macOS 14 changing one needs a
+         permission called App Management. It belongs to the program
+         running this installer, not to you, so the folder looks
+         writable but is not.
+         To fix:
+           1. System Settings > Privacy & Security > App Management
+           2. Switch on Terminal (or iTerm, or whatever you ran this from).
+              If it is not listed there, use Full Disk Access instead.
+           3. Quit that app completely, reopen it, and run this again.
+         Nothing has been changed inside CrossOver."
 fi
 rm -f "$PROBE"
 
@@ -2777,7 +2880,8 @@ if [ "$IN_PLACE" = "1" ]; then
             ok "${f:t} — backup already exists, keeping it"
         else
             cp "$WINE/$f" "$WINE/$f.orig" \
-                || die $E_PERMISSION "Could not back up $f."
+                || die $E_PERMISSION "Could not back up $f.
+$APP_MGMT_HINT"
             ok "${f:t} → ${f:t}.orig"
         fi
     done
@@ -2794,7 +2898,8 @@ for f in $FILES; do
     # the installed copy. Left on, Gatekeeper can refuse to load it and the
     # failure is obscure.
     cp -X "$HERE/fixes/$f" "$WINE/$f" \
-        || die $E_PERMISSION "Could not install $f into $APP."
+        || die $E_PERMISSION "Could not install $f into $APP.
+$APP_MGMT_HINT"
     ok "${f:t}"
 done
 
@@ -2804,16 +2909,19 @@ done
 # string inside an existing load command -- reversible with the same tool, which
 # is how uninstall.sh puts it back.
 cp -X "$HERE/fixes/$RESOLVER" "$WINE/$RESOLVER" \
-    || die $E_PERMISSION "Could not install ${RESOLVER:t} into $APP."
+    || die $E_PERMISSION "Could not install ${RESOLVER:t} into $APP.
+$APP_MGMT_HINT"
 ok "${RESOLVER:t}"
 if ws2_32_is_patched "$WINE"; then
     ok "ws2_32.so — already reading the bottle's hosts file"
 else
     install_name_tool -change "$LIBSYSTEM" "$RESOLVER_PATH" "$WINE/x86_64-unix/ws2_32.so" 2>/dev/null \
-        || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}."
+        || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}.
+$APP_MGMT_HINT"
     ws2_32_is_patched "$WINE" \
         || die $E_PAYLOAD "ws2_32.so did not take the change. Nothing will
-         resolve to Aurora17 and the game will not connect."
+         resolve to Aurora17 and the game will not connect.
+         Run ./uninstall.sh, then run this again."
     ok "ws2_32.so — now reads the bottle's hosts file"
 fi
 
@@ -2831,14 +2939,16 @@ for so in ntdll.so crypt32.so; do
         # Keep the error: "would duplicate path" means the rpath was there all
         # along and only the check was wrong, which is nothing to stop for. Any
         # other failure is real.
-        RPATH_ERR="$(install_name_tool -add_rpath "$RPATH_LIB64" "$WINE/x86_64-unix/$so" 2>&1)"
-        if [ $? -eq 0 ]; then
+        # "if VAR=$(...)": under set -e a failing substitution in a bare
+        # assignment ends the script before any "if" after it is reached.
+        if RPATH_ERR="$(install_name_tool -add_rpath "$RPATH_LIB64" "$WINE/x86_64-unix/$so" 2>&1)"; then
             ok "$so — added"
         elif print -r -- "$RPATH_ERR" | grep -q 'would duplicate path'; then
             ok "$so — already present"
         else
             print -r -- "$RPATH_ERR"
-            die $E_PERMISSION "Could not repair the search path in $so."
+            die $E_PERMISSION "Could not repair the search path in $so.
+$APP_MGMT_HINT"
         fi
     fi
 done
@@ -2872,7 +2982,7 @@ mkdir -p "$RECEIPT_DIR"
 # stand-in means PLAY does nothing, and saying Done to that wastes an evening.
 say ""
 if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
-    say "Done."
+    green "Done."
     say ""
     if [ "$IN_PLACE" = "1" ]; then
         say "To play:  open CrossOver, then open Aurora17 in the $BOTTLE bottle"
@@ -2894,7 +3004,7 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
     exit 0
 fi
 
-say "NOT FINISHED — CrossOver is patched, but the game will not start yet."
+red "NOT FINISHED — CrossOver is patched, but the game will not start yet."
 say ""
 if [ "$BOTTLE_OK" != 1 ]; then
     say "  * the '$BOTTLE' bottle has none of the settings FIFA needs"
