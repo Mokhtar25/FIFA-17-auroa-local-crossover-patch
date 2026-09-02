@@ -32,6 +32,22 @@
 #define SERVER_READY_TIMEOUT_MS  (4 * 60 * 1000)
 #define FIFA_LAUNCH_TIMEOUT_MS   (5 * 60 * 1000)
 
+/* Distinct error codes */
+#define ERR_MUTEX_LOCKED         10
+#define ERR_PORT_UNOWNED         11
+#define ERR_SERVER_START_FAIL    12
+#define ERR_SERVER_TIMEOUT       13
+#define ERR_KEY_FAIL             14
+#define ERR_HEAD_CACHE           15
+#define ERR_FIFA_RUNNING         16
+#define ERR_ENROLL_FAIL          17
+#define ERR_CONNECTOR_FAIL       18
+#define ERR_CONNECTOR_MISSING    19
+#define ERR_FIFA_TIMEOUT         20
+#define ERR_RESET_CLUB_FAIL      21
+#define ERR_PKI_MISSING          22
+#define ERR_UNSUPPORTED_CMD      23
+
 /* ------------------------------------------------------------------ output */
 
 static void out(const wchar_t *fmt, ...)
@@ -45,6 +61,18 @@ static void out(const wchar_t *fmt, ...)
     char utf8[8192];
     int n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, sizeof(utf8) - 1, NULL, NULL);
     if (n > 0) { fwrite(utf8, 1, n - 1, stdout); fflush(stdout); }
+}
+
+static int fail_code(int code, const wchar_t *fmt, ...)
+{
+    wchar_t buf[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(buf, 4095, fmt, ap);
+    va_end(ap);
+    buf[4095] = 0;
+    out(L"ERROR [Code %d]: %s\n", code, buf);
+    return code;
 }
 
 static int fail(const wchar_t *fmt, ...)
@@ -525,11 +553,11 @@ static int refresh_player_head_cache(const char *generation)
 {
     procid list[8];
     if (find_processes(L"FIFA17.exe", list, 8) > 0)
-        return fail(L"FIFA17 is running. Close it before refreshing the player-head cache.");
+        return fail_code(ERR_FIFA_RUNNING, L"FIFA17 is running. Close it before refreshing the player-head cache.");
 
     wchar_t docs[MAX_PATH];
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, 0, docs)))
-        return fail(L"Windows did not return a Documents directory.");
+        return fail_code(ERR_HEAD_CACHE, L"Windows did not return a Documents directory.");
 
     wchar_t root[MAX_PATH], cache[MAX_PATH], marker[MAX_PATH];
     join(root, MAX_PATH, docs, L"FIFA 17\\filesystemcache");
@@ -568,9 +596,9 @@ static int refresh_player_head_cache(const char *generation)
     _snwprintf(quarantine, MAX_PATH - 1, L"%s\\atlFUTPlayerHeads.aurora17-stale-%04d%02d%02dT%02d%02d%02d%03d",
                root, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
     if (dir_exists(quarantine))
-        return fail(L"Refusing to overwrite an existing cache quarantine.");
+        return fail_code(ERR_HEAD_CACHE, L"Refusing to overwrite an existing cache quarantine.");
     if (!MoveFileW(cache, quarantine))
-        return fail(L"Could not quarantine the stale player-head cache (%lu).", GetLastError());
+        return fail_code(ERR_HEAD_CACHE, L"Could not quarantine the stale player-head cache (%lu).", GetLastError());
     ensure_dir(cache);
     if (generation && *generation) write_all_utf8(marker, generation);
     out(L"Quarantined the stale player-head cache and created an empty one.\n");
@@ -634,7 +662,7 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
     join(server_dir, MAX_PATH, root, L"server\\Aurora17Server");
     join(server_exe, MAX_PATH, server_dir, L"Aurora17.Server.exe");
     if (!file_exists(server_exe))
-        return fail(L"The packaged Aurora17 server is missing: %s", server_exe);
+        return fail_code(ERR_SERVER_START_FAIL, L"The packaged Aurora17 server is missing: %s", server_exe);
 
     wchar_t logdir[MAX_PATH], log[MAX_PATH], errlog[MAX_PATH];
     join(logdir, MAX_PATH, localappdata, L"Aurora17\\Logs");
@@ -657,7 +685,7 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
     out(L"Starting the server...\n");
     DWORD pid = 0;
     HANDLE h = spawn(cmd, server_dir, log, errlog, NULL, &pid);
-    if (!h) return fail(L"Windows did not start the Aurora17 server (%lu).", GetLastError());
+    if (!h) return fail_code(ERR_SERVER_START_FAIL, L"Windows did not start the Aurora17 server (%lu).", GetLastError());
 
     ULONGLONG start_time = process_start(h);
     DWORD sp, lp; ULONGLONG ss, ls;
@@ -674,7 +702,7 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
             DWORD code = 1;
             GetExitCodeProcess(h, &code);
             CloseHandle(h);
-            return fail(L"The server exited during startup with code %lu. Log: %s", code, log);
+            return fail_code(ERR_SERVER_START_FAIL, L"The server exited during startup with code %lu. Log: %s", code, log);
         }
         char *text = read_all_utf8(log, NULL);
         if (text)
@@ -684,14 +712,14 @@ static int start_server(const wchar_t *root, const wchar_t *localappdata, const 
             if (rejected)
             {
                 CloseHandle(h);
-                return fail(L"The redirector listener was rejected during startup. Log: %s", log);
+                return fail_code(ERR_SERVER_START_FAIL, L"The redirector listener was rejected during startup. Log: %s", log);
             }
         }
         if (server_healthy(key)) break;
         if (waited >= SERVER_READY_TIMEOUT_MS)
         {
             CloseHandle(h);
-            return fail(L"The server did not pass its authenticated readiness check. Log: %s", log);
+            return fail_code(ERR_SERVER_TIMEOUT, L"The server did not pass its authenticated readiness check. Log: %s", log);
         }
     }
     CloseHandle(h);
@@ -721,11 +749,11 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
     if (slash) *slash = 0;               /* strip Play.ps1  */
     slash = wcsrchr(root, L'\\');
     if (slash) *slash = 0;               /* strip \scripts  */
-    if (!dir_exists(root)) return fail(L"The Aurora17 installation could not be located: %s", root);
+    if (!dir_exists(root)) return fail_code(ERR_CONNECTOR_MISSING, L"The Aurora17 installation could not be located: %s", root);
 
     wchar_t localappdata[MAX_PATH];
     if (!GetEnvironmentVariableW(L"LOCALAPPDATA", localappdata, MAX_PATH))
-        return fail(L"The current Windows LocalAppData folder could not be resolved.");
+        return fail_code(ERR_KEY_FAIL, L"The current Windows LocalAppData folder could not be resolved.");
 
     wchar_t statedir[MAX_PATH];
     join(statedir, MAX_PATH, localappdata, L"Aurora17");
@@ -739,12 +767,12 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
         DWORD w = WaitForSingleObject(mutex, 5000);
         held = (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED);
     }
-    if (!held) return fail(L"Another Aurora17 launch operation is already in progress.");
+    if (!held) return fail_code(ERR_MUTEX_LOCKED, L"Another Aurora17 launch operation is already in progress.");
 
     int rc = 0;
     char key[128] = {0};
     if (!load_control_key(localappdata, key, sizeof(key)))
-    { rc = fail(L"The Aurora17 control key could not be created or read."); goto done; }
+    { rc = fail_code(ERR_KEY_FAIL, L"The Aurora17 control key could not be created or read."); goto done; }
 
     wchar_t wkey[128];
     MultiByteToWideChar(CP_UTF8, 0, key, -1, wkey, 128);
@@ -767,9 +795,23 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
         }
         else
         {
-            rc = fail(L"A server is already listening on %d that Aurora17 does not own. "
-                      L"Close it and try again.", CONTROL_PORT);
-            goto done;
+            /* Self-healing: check if any unrecorded/orphaned Aurora17.Server.exe is running */
+            procid srvs[8];
+            int srv_count = find_processes(L"Aurora17.Server.exe", srvs, 8);
+            if (srv_count > 0)
+            {
+                out(L"Found %d orphaned Aurora17 server process(es). Restarting fresh...\n", srv_count);
+                for (int i = 0; i < srv_count; i++) kill_pid(srvs[i].pid);
+                Sleep(3000);
+                if ((rc = start_server(root, localappdata, key))) goto done;
+            }
+            else
+            {
+                rc = fail_code(ERR_PORT_UNOWNED,
+                               L"A non-Aurora process is already listening on port %d. "
+                               L"Run './setup.sh --unstick' or close it and try again.", CONTROL_PORT);
+                goto done;
+            }
         }
     }
     else
@@ -778,6 +820,12 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
         {
             out(L"Stopping the recorded server process that is no longer listening...\n");
             kill_pid(server_pid);
+        }
+        else
+        {
+            procid srvs[8];
+            int srv_count = find_processes(L"Aurora17.Server.exe", srvs, 8);
+            for (int i = 0; i < srv_count; i++) kill_pid(srvs[i].pid);
         }
         if ((rc = start_server(root, localappdata, key))) goto done;
     }
@@ -793,7 +841,7 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
 
     char generation[160] = {0};
     if (!read_head_generation(generation, sizeof(generation)))
-    { rc = fail(L"The live routing document does not identify the player-head archive generation."); goto done; }
+    { rc = fail_code(ERR_HEAD_CACHE, L"The live routing document does not identify the player-head archive generation."); goto done; }
     if ((rc = refresh_player_head_cache(generation))) goto done;
 
     /* Only a launch connector this shim started may be stopped, and never the
@@ -816,7 +864,7 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
     else
         join(connector, MAX_PATH, root, L"Aurora17Connector.exe");
     if (!file_exists(connector))
-    { rc = fail(L"The supplied Aurora17 connector does not exist: %s", connector); goto done; }
+    { rc = fail_code(ERR_CONNECTOR_MISSING, L"The supplied Aurora17 connector does not exist: %s", connector); goto done; }
 
     wchar_t connector_dir[MAX_PATH];
     wcsncpy(connector_dir, connector, MAX_PATH - 1);
@@ -832,11 +880,11 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
                           "\"DisplayName\":\"Aurora17\",\"Audience\":\"fifa17\"}",
                           30000, &resp);
     if (st < 200 || st > 299 || !resp)
-    { free(resp); rc = fail(L"The Aurora17 server refused to mint a bootstrap ticket (HTTP %d).", st); goto done; }
+    { free(resp); rc = fail_code(ERR_ENROLL_FAIL, L"The Aurora17 server refused to mint a bootstrap ticket (HTTP %d).", st); goto done; }
     char *ticket = json_string(resp, "bootstrapTicket");
     free(resp);
     if (!ticket || !*ticket)
-    { free(ticket); rc = fail(L"The ticket response contained no bootstrapTicket."); goto done; }
+    { free(ticket); rc = fail_code(ERR_ENROLL_FAIL, L"The ticket response contained no bootstrapTicket."); goto done; }
 
     wchar_t temp_dir[MAX_PATH], ticket_file[MAX_PATH];
     GetTempPathW(MAX_PATH, temp_dir);
@@ -845,7 +893,7 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
     BOOL wrote = write_all_utf8(ticket_file, ticket);
     SecureZeroMemory(ticket, strlen(ticket));
     free(ticket);
-    if (!wrote) { rc = fail(L"The one-time ticket could not be staged."); goto done; }
+    if (!wrote) { rc = fail_code(ERR_ENROLL_FAIL, L"The one-time ticket could not be staged."); goto done; }
 
     wchar_t cmd[MAX_PATH + 32];
     _snwprintf(cmd, MAX_PATH + 31, L"\"%s\" enroll", connector);
@@ -860,14 +908,14 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
     }
     DeleteFileW(ticket_file);
     if (!eh || ecode != 0)
-    { rc = fail(L"The Aurora17 connector could not enroll the account (exit %lu).", ecode); goto done; }
+    { rc = fail_code(ERR_ENROLL_FAIL, L"The Aurora17 connector could not enroll the account (exit %lu).", ecode); goto done; }
 
     out(L"Launching FIFA 17...\n");
     out(L"If FIFA Configuration opens, click Play; Aurora17 keeps the session ready for four minutes.\n");
     _snwprintf(cmd, MAX_PATH + 31, L"\"%s\" launch", connector);
     DWORD lpid = 0;
     HANDLE lh = spawn(cmd, connector_dir, NULL, NULL, NULL, &lpid);
-    if (!lh) { rc = fail(L"Windows did not start the Aurora17 launch connector (%lu).", GetLastError()); goto done; }
+    if (!lh) { rc = fail_code(ERR_CONNECTOR_FAIL, L"Windows did not start the Aurora17 launch connector (%lu).", GetLastError()); goto done; }
 
     ULONGLONG lstart = process_start(lh);
     state_read(&server_pid, &server_start, &launch_pid, &launch_start);
@@ -888,8 +936,9 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
             if (!game_pid)
             {
                 CloseHandle(lh);
-                rc = fail(L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
-                          L"before FIFA 17 started. See the connector log.", code, code);
+                rc = fail_code(ERR_CONNECTOR_FAIL,
+                               L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
+                               L"before FIFA 17 started. See the connector log.", code, code);
                 goto done;
             }
         }
@@ -907,7 +956,7 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
         if (waited >= FIFA_LAUNCH_TIMEOUT_MS)
         {
             CloseHandle(lh);
-            rc = fail(L"FIFA 17 did not start before the five-minute launch deadline.");
+            rc = fail_code(ERR_FIFA_TIMEOUT, L"FIFA 17 did not start before the five-minute launch deadline.");
             goto done;
         }
     }
@@ -926,7 +975,7 @@ static int run_reset_club(int argc, wchar_t **argv)
     (void)argc; (void)argv;
     wchar_t localappdata[MAX_PATH];
     if (!GetEnvironmentVariableW(L"LOCALAPPDATA", localappdata, MAX_PATH))
-        return fail(L"The current Windows LocalAppData folder could not be resolved.");
+        return fail_code(ERR_KEY_FAIL, L"The current Windows LocalAppData folder could not be resolved.");
 
     char key[128] = {0};
     wchar_t keyfile[MAX_PATH];
@@ -937,10 +986,10 @@ static int run_reset_club(int argc, wchar_t **argv)
         if (GetEnvironmentVariableW(L"AURORA17_Control__ControlKey", env, 128))
             WideCharToMultiByte(CP_UTF8, 0, env, -1, key, sizeof(key), NULL, NULL);
         else
-            return fail(L"No control key. Start Aurora17 with PLAY first.");
+            return fail_code(ERR_KEY_FAIL, L"No control key. Start Aurora17 with PLAY first.");
     }
     else if (!load_control_key(localappdata, key, sizeof(key)))
-        return fail(L"The Aurora17 control key could not be read.");
+        return fail_code(ERR_KEY_FAIL, L"The Aurora17 control key could not be read.");
 
     char *resp = NULL;
     int st = http_request("POST", CONTROL_PORT, "/v1/control/reset-fut-club", key,
@@ -948,7 +997,7 @@ static int run_reset_club(int argc, wchar_t **argv)
     if (st < 200 || st > 299)
     {
         free(resp);
-        return fail(L"The FUT club reset failed (HTTP %d). Make sure the Aurora17 server is running.", st);
+        return fail_code(ERR_RESET_CLUB_FAIL, L"The FUT club reset failed (HTTP %d). Make sure the Aurora17 server is running.", st);
     }
     out(L"Reset complete. Leave Ultimate Team and re-enter it to refresh the club.\n");
     free(resp);
@@ -978,8 +1027,9 @@ static int run_new_dev_certificate(const wchar_t *script_path, int argc, wchar_t
         out(L"Already present: %s\n", target);
         return 0;
     }
-    return fail(L"Creating a new redirector certificate needs Windows PowerShell's PKI module, "
-                L"which this bottle does not have. Restore %s from the Aurora17 archive.", target);
+    return fail_code(ERR_PKI_MISSING,
+                     L"Creating a new redirector certificate needs Windows PowerShell's PKI module, "
+                     L"which this bottle does not have. Restore %s from the Aurora17 archive.", target);
 }
 
 /* -------------------------------------------------------------------- main */
@@ -1003,7 +1053,7 @@ int wmain(int argc, wchar_t **argv)
     {
         out(L"aurora-pwsh: this bottle has no PowerShell. Only Aurora17's own scripts are\n"
             L"implemented, and only through -File. Command line was:\n  %s\n", GetCommandLineW());
-        return 1;
+        return ERR_UNSUPPORTED_CMD;
     }
 
     const wchar_t *name = wcsrchr(script, L'\\');
@@ -1029,7 +1079,7 @@ int wmain(int argc, wchar_t **argv)
     else if (!_wcsicmp(name, L"New-DevCertificate.ps1"))
         rc = run_new_dev_certificate(script, argc - rest, argv + rest);
     else
-        rc = fail(L"aurora-pwsh does not implement %s.", name);
+        rc = fail_code(ERR_UNSUPPORTED_CMD, L"aurora-pwsh does not implement %s.", name);
 
     WSACleanup();
     return rc;

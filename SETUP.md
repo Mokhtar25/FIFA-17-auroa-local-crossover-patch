@@ -339,7 +339,63 @@ is a small stand-in that does the work the script would have done.
 
 It is a plain program, about 190 KB, and its complete source is beside it as
 `aurora-pwsh.c` if you want to read or rebuild it. It only ever runs Aurora's own
-three scripts and refuses anything else.
+four scripts and refuses anything else. When it does refuse, it says so and exits
+with a numbered code — the table under *What Aurora's error codes mean* below.
+
+### 8a. The certificate Aurora cannot make here
+
+Copy `aurora17/redirector-dev.pfx` into `server/Aurora17Server/` inside your
+Aurora17 folder, if there is not one there already.
+
+**Why:** Aurora's redirector answers the game over HTTPS, so it needs a
+certificate for `f17.aurora.test`. On Windows it makes its own on first run,
+through PowerShell's PKI module. That module is a Windows component; it is not
+in a CrossOver bottle and cannot be added to one. Without the file, the launcher
+stops on first PLAY with
+
+```
+Creating a new redirector certificate needs Windows PowerShell's PKI module,
+which this bottle does not have.
+```
+
+The one in `aurora17/` is a throwaway self-signed certificate for a name that
+can never resolve publicly, used only by the loopback server on your own Mac.
+
+### 9. The six EA names, inside the bottle
+
+The installer does this for you. By hand: add these six lines to
+`drive_c/windows/system32/drivers/etc/hosts` **inside the bottle**, keeping the
+`# aurora17` tag on each and using Windows line endings.
+
+```
+127.0.0.1 f17.aurora.test # aurora17
+127.0.0.1 gosredirector.ea.com # aurora17
+127.0.0.1 easw.easports.com # aurora17
+127.0.0.1 content.lt.easfc.ea.com # aurora17
+127.0.0.1 pal.gt.easfc.ea.com # aurora17
+127.0.0.1 pg.fifa12.test.easportsworld.ea.com # aurora17
+```
+
+**Why:** Aurora's launcher writes these itself — but on a bottle where they are
+not already there it does it through what it calls *the elevated setup step*, a
+second copy of itself running as Administrator. Wine has no UAC, that second
+copy exits 1, and the launcher stops with
+
+```
+Aurora17 could not finish: The elevated setup step exited with code 1
+```
+
+*before the server is ever started*. The game then launches with no session, its
+shim asks the helper for an Origin auth code, is refused, and FIFA quits on its
+own. From the outside that reads as "the game works but the server does not".
+
+There is nothing to elevate for: the file is inside the bottle and belongs to
+you. The installer writes it, and writes Aurora's own recovery receipt beside it
+at `drive_c/users/crossover/AppData/Local/Aurora17/ShimReceipts/hosts-mapping.json`,
+so the launcher finds the mappings already present and receipt-owned and never
+reaches the elevated path at all. Anything already in that hosts file that is
+not tagged `# aurora17` is kept, and the original is saved as
+`hosts.bak-aurora17`.
 
 ---
 
@@ -383,7 +439,7 @@ it as a launcher, and make two:
 
 | name it | command to run |
 |---|---|
-| Aurora17 Server | `C:\run.bat` |
+| Aurora17 Server | `powershell.exe` with the arguments `-NoProfile -ExecutionPolicy Bypass -File scripts\Play.ps1 -ServerOnly`, started in your Aurora17 folder |
 | FIFA 17 | `Aurora17Connector.exe` with the argument `launch` |
 
 Then double-click the server, wait a few seconds, and double-click the game.
@@ -421,6 +477,18 @@ loaded — and saves it to
 `aurora17-report.txt`. Send that file rather than describing the symptom; it
 contains everything anyone would otherwise have to ask you for, and no keys,
 tokens or paths outside the game and the bottle.
+
+If you are reporting a problem to someone else, send the bundle instead:
+
+```
+./setup.sh --bundle
+```
+
+Also changes nothing. It writes `aurora17-bundle-<date>.zip` to your Desktop
+containing the report above, the Aurora17 connector, server, client and shim
+logs, the bottle's hosts file and its receipt, the bottle's settings, and the
+checksums of everything installed. It is the whole first round of questions,
+answered in advance. It contains no account, password or session token.
 
 ### If the bottle never finishes loading
 
@@ -489,7 +557,11 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | "Servers have been shut down" | `WINE_SIMULATE_WRITECOPY` is missing, or the files did not install | `--verify`, then steps 3 and 6 |
 | "Unable to connect to EA" | `crypt32` or `secur32.dll` did not install | `--verify`, then step 3 |
 | The game cannot reach Aurora17 — a connection error at the redirector, but everything else works | `ws2_32.so` is not reading the bottle's hosts file, so the names still go to EA | `--verify` says `ws2_32.so still asks macOS to resolve names`. Run `./setup.sh` again, or step 3a by hand |
-| `--verify` says the bottle's hosts file names none of the 6 EA hosts | Aurora17's launcher has not run in that bottle yet — it writes them itself | Press **PLAY FIFA 17** (or **REPAIR SETUP**) once, then `--verify` again. It is not a fault on a fresh bottle |
+| **"Aurora17 could not finish: The elevated setup step exited with code 1"** | the launcher is trying to write the six EA names into the bottle's hosts file through an Administrator copy of itself, and Wine has no UAC | `./setup.sh` writes them, and Aurora's receipt, itself — step 9. Then press PLAY again. `--verify` reports both |
+| **The game starts and quits by itself a few seconds later**, and `redirect-shim.log` ends in `origin-auth-code-refused helper-declined` | the launcher never got past its own setup, so no session was ever enrolled — nine times in ten that is the elevated step, above | Fix that first, then start the game from **PLAY FIFA 17**, never by running `FIFA17.exe` |
+| **"Creating a new redirector certificate needs Windows PowerShell's PKI module"** | Aurora is trying to mint its HTTPS certificate and there is no PKI module in a bottle | Step 8a — copy `aurora17/redirector-dev.pfx` into `server/Aurora17Server/`. `./setup.sh` does it |
+| `--verify` says the bottle's hosts file names none of the 6 EA hosts | the installer has not written them yet | Run `./setup.sh` again. Aurora's launcher would otherwise try, and fail, to elevate for it |
+| `--verify` says Aurora17 has no hosts receipt | the mappings are there but Aurora does not know it put them there, so its first PLAY will still try to elevate | Run `./setup.sh` again |
 | You have an `AURORA17` block in `/etc/hosts` from an older setup | it is no longer needed — the fix works inside the bottle now | It does no harm. To remove it: edit `/etc/hosts` (needs a password), delete the block, then `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder` |
 | **PLAY does nothing at all** — no game, no error, and the button becomes clickable again | Aurora17 is not finding the stand-in: it is in neither place, or it is in a different bottle than the one you opened | `--verify` says which. If it is missing, `AURORA_DIR=/path/to/Aurora17 ./setup.sh` |
 | PLAY does nothing, and something is already using port 47170 | a server left running by an earlier attempt is holding the port | `lsof -nP -iTCP:47170 -sTCP:LISTEN`, then quit that process, then press PLAY again |
@@ -499,7 +571,29 @@ both, open **CrossOver-FIFA**, and try again before reading any further.
 | Microphone or camera stopped working in CrossOver-FIFA | it was signed without CrossOver's own permissions | `./setup.sh --resign`, which preserves and then verifies them |
 | A CrossOver update landed and FIFA broke | the update replaced the app; the copy is untouched but may now be a different version | Run `./setup.sh` again. If CrossOver moved past 26.3, see below. |
 
-### What the exit codes mean
+### What Aurora's error codes mean
+
+The stand-in that replaces PowerShell reports every refusal as
+`ERROR [Code n]: ...` in the launcher window and in
+`%LOCALAPPDATA%\Aurora17\Logs\connector-*.log`. Quote the number.
+
+| code | meaning | what to do |
+|---|---|---|
+| 10 | another launch is already in progress | wait, or quit the launcher and reopen it |
+| 11 | something that is not Aurora is listening on port 47170 | `./setup.sh --unstick` |
+| 12 | the packaged server would not start | the server log is in the bundle; check it is not missing from your Aurora17 folder |
+| 13 | the server started but never passed its readiness check | usually the certificate — code 22 |
+| 14 | the control key could not be created or read | `%LOCALAPPDATA%\Aurora17` is not writable |
+| 15 | the player-head cache could not be refreshed | close FIFA, then PLAY again |
+| 16 | FIFA is already running | close it |
+| 17 | the server refused to enroll the account | server log |
+| 18 / 19 | the launcher itself could not be started or found | do not rename or move `Aurora17Connector.exe` |
+| 20 | FIFA did not start in time | try again; if it repeats, send a bundle |
+| 21 | the club reset failed | the server was not running |
+| 22 | no `redirector-dev.pfx`, and no PKI module to make one | step 8a |
+| 23 | Aurora asked PowerShell to do something the stand-in does not implement | send a bundle — the log records the exact command line |
+
+### What the installer's exit codes mean
 
 | code | meaning |
 |---:|---|
@@ -560,7 +654,7 @@ This is the main reason the default is a separate copy.)
 | `START HERE.command` | double-click to install |
 | `Uninstall.command` | double-click to undo |
 | `fixes/` | the seven files that go into the CrossOver copy, their source, and their checksums |
-| `aurora17/` | the PowerShell stand-in, its source, and its checksum |
+| `aurora17/` | the PowerShell stand-in, its source, the redirector certificate Aurora cannot make in a bottle, and their checksums |
 | `patches/` | the source code changes the six Wine files were built from, and how to apply them |
 | `build.sh` | rebuilds every file in `fixes/` from source, so you need not take ours on trust |
 | `LICENSE` | MIT, for the parts that are ours |
