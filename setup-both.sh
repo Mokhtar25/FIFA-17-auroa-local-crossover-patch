@@ -4,6 +4,8 @@
 #   ./setup-both.sh [/path/to/CrossOver.app]   install FIFA 17, then set FIFA 15 up
 #   ./setup-both.sh --verify                   check both, change nothing
 #   ./setup-both.sh --unstick                  free the bottles (same as setup.sh --unstick)
+#   ./setup-both.sh --shutdown                 quit CrossOver cleanly, then free
+#   ./setup-both.sh --agent                    install the background cleanup timer
 #
 # It is setup.sh twice: the FIFA 17 install first (the copy, the seven files,
 # the Aurora17 bottle, the stand-in, the EA names, the licence), then
@@ -19,6 +21,8 @@ cd "$HERE" || exit 1
 case "${1:-}" in
     --help|-h) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --unstick) exec ./setup.sh --unstick ;;
+    --shutdown) exec ./setup.sh --shutdown ;;
+    --agent) exec ./setup.sh --agent ;;
     --verify)
         print -r -- ""
         print -r -- "==== FIFA 17 ===="
@@ -28,7 +32,7 @@ case "${1:-}" in
         ./setup.sh --fifa15 --verify; rc15=$?
         [ "$rc17" -ne 0 ] && exit $rc17
         exit $rc15 ;;
-    -*) print -r -- "setup-both.sh takes a CrossOver path, --verify, --unstick or --help."
+    -*) print -r -- "setup-both.sh takes a CrossOver path, --verify, --unstick, --shutdown, --agent or --help."
         print -r -- "For anything else use ./setup.sh (see ./setup.sh --help)."; exit 2 ;;
 esac
 
