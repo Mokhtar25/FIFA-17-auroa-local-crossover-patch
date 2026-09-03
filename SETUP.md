@@ -19,6 +19,29 @@ do not run the *same* bottle in both at the same time.
 
 ---
 
+## What is in this file
+
+Read the first three in order. The rest is there when you need it.
+
+1. [What you need first](#what-you-need-first) — versions, and the two things to
+   install before anything else
+2. [Setting up the bottle](#setting-up-the-bottle--where-the-game-and-aurora-go)
+   — make the `Aurora17` bottle and save the launcher. **This part is yours to
+   do; the installer cannot, and stops if it is not done.**
+3. [The quick way](#the-quick-way--double-click) — double-click one file
+4. [The manual way](#the-manual-way) — the same nine steps by hand, if you would
+   rather watch it happen
+5. [Playing](#playing) — starting the game, quitting it properly, and
+   [playing without Aurora17](#playing-without-aurora17) (single player only)
+6. [If something goes wrong](#if-something-goes-wrong) — start at
+   [the first thing to check](#the-first-thing-to-check); every error I have
+   seen is below it, with what causes it
+7. [Why the version matters](#why-the-version-matters),
+   [FIFA 15](#fifa-15--experimental), [undoing it](#undoing-it),
+   [what is in here](#what-is-actually-in-here)
+
+---
+
 ## What you need first
 
 | | |
@@ -629,21 +652,32 @@ which sits outside the bottle but holds the same lock. Anything that still has a
 living `wineserver` — a Wine session that is genuinely running — is listed and
 left alone.
 
-Two easier paths exist, and one is automatic. `./setup.sh --shutdown`
-quits CrossOver for you — games and Aurora first, then the wineservers, then
-the GUI — so use it (or double-click `Stop.command`) instead of closing the
-window. And every successful install now turns on a background cleanup: a
+You should rarely need to run it, because every successful install turns on a
 per-user timer that, starting 45 seconds after CrossOver quits, does what
 `--unstick` does by itself every 30 seconds and logs to
 `~/Library/Application Support/FIFA-CrossOver/cleanup.log`. It never touches
 a running CrossOver session or a non-Wine program, and it stays inside its own
 bottles: Wine names a prefix's `/tmp` lock directory after that prefix's device
 and inode, so another Wine runtime's session — Whisky, Wineskin, a plain `wine`
-— is left alone even while no CrossOver is open. One thing to know: quitting
-CrossOver while FIFA is still playing counts as leaving a stray behind, and the
-game is closed 45 seconds later. Quit the game first — or use `Stop.command`,
-which does it in that order. `./setup.sh --agent` reinstalls the timer;
-`./uninstall.sh` removes it.
+— is left alone even while no CrossOver is open. `./setup.sh --agent`
+reinstalls the timer; `./uninstall.sh` removes it.
+
+Two things to know about when it does *not* act, both on purpose:
+
+- **While CrossOver is open it does nothing at all**, and closing a bottle
+  window is not quitting CrossOver — the app stays in the menu bar. So the
+  leftovers from a session you closed with the red dot sit there until you
+  quit CrossOver properly (Command-Q). This is the fail-closed half of the
+  design: with CrossOver open, a process that looks abandoned is
+  indistinguishable from a game that is still loading, or one you are about to
+  start again, and closing someone's live game is far worse than leaving a
+  stray. `./setup.sh --unstick` does it on demand instead of waiting.
+- **Quitting CrossOver while FIFA is still playing** counts as leaving a stray
+  behind, and the game is closed 45 seconds later. Quit the game first.
+
+`./setup.sh --shutdown` (or double-click `Stop.command`) covers both: it closes
+the games and Aurora first, then the wineservers, then the GUI, in that order,
+so nothing is left for the timer to find.
 
 This is also worth running if you have ever opened the Aurora17 bottle in your
 **normal** CrossOver. Each copy leaves its own session behind, and one copy
