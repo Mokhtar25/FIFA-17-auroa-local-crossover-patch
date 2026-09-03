@@ -3640,6 +3640,43 @@ if [ "${#HOLDING}" -gt 0 ]; then
          Nothing has been changed."
 fi
 
+# ------------------------------------------- the bottle has to exist first
+# The bottle is CrossOver's to make, and the launcher inside it is what a
+# player actually presses. Neither can be done from here: New Bottle is a
+# CrossOver step, and the launcher has to be saved from its Run Command
+# dialog, pointed at the Aurora17 folder we cannot guess.
+#
+# Checked before anything is written, because everything after this point goes
+# into a bottle -- step 7's settings, step 8's stand-in, step 9's EA names.
+# Without one the installer used to copy a gigabyte, note the missing bottle in
+# passing at step 7, and finish "done" with nothing that plays.
+if [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ]; then
+    if [ "$NO_AURORA" = 1 ]; then
+        die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
+         Make it first, in CrossOver:
+           1. Open CrossOver and press + (New Bottle).
+           2. Choose Windows 10 64-bit and name it exactly:  $BOTTLE
+           3. Quit CrossOver completely (Command-Q).
+         Then run this again. An offline install needs nothing else in the
+         bottle -- no launcher, no Aurora17.
+         Already using another name?   AURORA_BOTTLE='name' ./setup.sh --offline
+         Nothing has been changed."
+    fi
+    die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
+         Make it first, in CrossOver, along with the Aurora17 launcher:
+           1. Open CrossOver and press + (New Bottle).
+           2. Choose Windows 10 64-bit and name it exactly:  $BOTTLE
+           3. With that bottle selected, choose Run Command and browse to
+              Aurora17Connector.exe in your Aurora17 folder. Tick the box
+              that saves it as a launcher and give it a name.
+           4. Quit CrossOver completely (Command-Q).
+         Then run this again. SETUP.md, \"Setting up the bottle\", walks
+         through it field by field.
+         Already using another name?   AURORA_BOTTLE='name' ./setup.sh
+         No Aurora17, single player only?   ./setup.sh --offline
+         Nothing has been changed."
+fi
+
 # =========================================================================
 # From here on things change on disk.
 # =========================================================================
