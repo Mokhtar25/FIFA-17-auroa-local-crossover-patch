@@ -1,110 +1,92 @@
-# FIFA 17 on a Mac — CrossOver fixes for Apple silicon
+# FIFA 17 on a Mac (Apple silicon)
 
-FIFA 17 and its Aurora17 local server do not run on an Apple silicon Mac under
-stock CrossOver. This package fixes that in a **copy** of CrossOver. Your own
-CrossOver, and every other bottle in it, are left alone.
+FIFA 17 and its Aurora17 server do not run in stock CrossOver on an Apple
+silicon Mac. This package fixes that.
 
-## You need
+It works on a **copy** of CrossOver called **CrossOver-FIFA**. Your own
+CrossOver and all your other bottles are never touched.
+
+## What you need
 
 - A Mac with Apple silicon (M1 or newer), macOS 14 or newer
-- **CrossOver 26.3** exactly. The installer refuses any other version.
+- **CrossOver 26.3** exactly. Other versions are refused.
 - Apple's command line tools. In Terminal: `xcode-select --install`
-- Your own FIFA 17 and Aurora17, set up in a bottle called `Aurora17` (SETUP.md shows how)
+- Your own copy of FIFA 17
+- Your own copy of Aurora17 (not needed for offline play)
+
+## Before you install
+
+1. Put the **FIFA 17** folder and the **Aurora17** folder in your Downloads folder.
+2. In CrossOver, make a new bottle: **+** → **Windows 10 64-bit** → name it exactly `Aurora17`.
+3. Aurora17 only: select the bottle, choose **Run Command**, browse to
+   `Aurora17Connector.exe`, and tick the box to save it as a launcher.
+4. Quit CrossOver with **⌘Q**.
+
+The installer stops if the bottle is not there. SETUP.md explains each step.
 
 ## Install
 
-1. Download this package as a zip and unzip it.
-2. Double-click **START HERE.command**.
-3. Open **CrossOver-FIFA** (the copy, not your normal CrossOver), open the
-   Aurora17 bottle, and press **PLAY FIFA 17**.
+Pick one:
 
-If macOS refuses to open the file ("Apple could not verify..."): open
-System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
-On macOS 14 and older, right-click the file → Open works too.
-Or skip that: open Terminal, type `zsh ` (with a space), drag
-`START HERE.command` into the window, and press Return.
+| I want | Double-click |
+|---|---|
+| Online play, Ultimate Team, career, everything (needs Aurora17) | **START HERE.command** |
+| Single player only, no Aurora17 | **START HERE offline.command** |
 
-The installer prints what it does at every step. If it has to stop, the reason
-is in **red**, followed by the steps to fix it.
+If macOS says "Apple could not verify..." go to **System Settings → Privacy &
+Security**, scroll down, and click **Open Anyway**. You only do this once.
 
-## Without Aurora17 (single player only)
+The installer prints every step. If it stops, the reason is in **red** with the
+fix right under it.
 
-If you only want to play — kick-off, career, tournaments, skill games — you do
-not need Aurora17 at all. Double-click **START HERE offline.command** instead of
-`START HERE.command`. It installs the CrossOver copy, the fixes and the bottle
-settings, and nothing that talks to EA: no PowerShell stand-in, no EA name
-redirects, no certificate.
+## Play
 
-Then play either way:
+- **Normal install:** open **CrossOver-FIFA**, open the Aurora17 bottle, press **PLAY FIFA 17**.
+- **Offline install:** open **CrossOver-FIFA**, open the Aurora17 bottle, click
+  **FIFA 17 (offline)**. Or double-click **PLAY FIFA 17 offline.command** and
+  keep that window open while you play.
 
-- Open **CrossOver-FIFA**, pick the `Aurora17` bottle, and click
-  **FIFA 17 (offline)**. The installer adds that entry; it is the same as the
-  Aurora17 entries beside it, except that it runs the game's own loader,
-  `_fifa17.exe`, instead of Aurora.
-- Or double-click **PLAY FIFA 17 offline.command**, which does the same thing
-  without opening CrossOver at all. Keep that window open while you play — it
-  is what tells the background cleanup the game is running on purpose. (Started
-  from the CrossOver window there is nothing to keep open: the cleanup leaves
-  everything alone while CrossOver is running.)
+Always use **CrossOver-FIFA**, not your normal CrossOver. They look the same,
+but only the copy has the fixes.
 
-Moved the game folder since installing? `./setup.sh --offline-menu` points the
-entry at where it is now.
+## Stop
 
-Online, FUT and anything needing an EA account do not work in an offline
-install; that is what Aurora17 is for. Adding it later is just installing
-Aurora17 and double-clicking `START HERE.command`, which fills in the missing
-pieces in the same copy.
+Quit however you like. A background helper cleans up leftovers 45 seconds after
+CrossOver quits. To clean up right now, double-click **Stop.command**.
 
-## When you finish playing
+Note: closing a bottle window does not quit CrossOver. It stays in the menu
+bar. Press **⌘Q** to quit it properly.
 
-Quit however you like. The installer sets up a background cleanup that clears
-leftovers by itself, 45 seconds after CrossOver quits — the game, Aurora's
-programs, the bottle lock and the ports. You do not have to do anything, and
-there is nothing to remember.
-
-It never touches a running session, a non-Wine program, or another Wine app's
-bottles, and `./uninstall.sh` removes it.
-
-One thing it deliberately will not do: act while CrossOver is still open.
-Closing a bottle window with the red dot does not quit CrossOver on a Mac — it
-stays in the menu bar — so leftovers from that session sit there until you
-actually quit it (Command-Q). While CrossOver is open, a process that looks
-abandoned is indistinguishable from a game that is still loading, and this
-would rather leave a stray behind than close someone's game.
-
-So if a bottle ever spins forever or PLAY says a port is in use: quit CrossOver
-and wait a minute, or run `./setup.sh --unstick` to do it now.
-**Stop.command** does the same thing in one double-click — the game, then
-Aurora, then CrossOver, in that order.
-
-## If something goes wrong
+## Something wrong?
 
 ```sh
-./setup.sh --verify     # checks everything, changes nothing, marks problems BAD
-./setup.sh --bundle     # zips the logs for a bug report (no passwords or keys in it)
+./setup.sh --verify     # checks everything, changes nothing
+./setup.sh --unstick    # bottle stuck loading forever? quit CrossOver, run this
+./setup.sh --bundle     # zips logs for a bug report (no passwords or keys)
 ```
 
-SETUP.md has the full troubleshooting table.
+**SETUP.md** has the full troubleshooting guide.
 
 ## Undo
 
-Double-click **Uninstall.command**. It deletes the CrossOver-FIFA copy and the
-PowerShell stand-in it put in your Aurora17 folder. Your own CrossOver was
-never changed.
+Double-click **Uninstall.command**. It removes the CrossOver-FIFA copy and the
+one file it put in your Aurora17 folder. Your own CrossOver was never changed.
 
-## What is in here
+## Files
 
 | | |
 |---|---|
-| `START HERE.command`, `Uninstall.command` | double-click to install, or to undo |
-| `Stop.command` | double-click to quit CrossOver cleanly when you finish playing |
-| `START HERE offline.command`, `PLAY FIFA 17 offline.command` | install and play without Aurora17 — single player only |
-| `setup.sh`, `uninstall.sh` | what those two run |
-| `fixes/` | the seven files that go into the CrossOver copy, with source and checksums |
-| `aurora17/` | the PowerShell stand-in and the certificate Aurora needs, with source and checksums |
+| `START HERE.command` | install (normal, with Aurora17) |
+| `START HERE offline.command` | install (single player, no Aurora17) |
+| `PLAY FIFA 17 offline.command` | play offline without opening CrossOver |
+| `Stop.command` | quit game, Aurora and CrossOver cleanly |
+| `Uninstall.command` | undo everything |
+| `setup.sh`, `uninstall.sh` | what the .command files run |
+| `fixes/` | the files that go into the CrossOver copy, with source and checksums |
+| `aurora17/` | the PowerShell stand-in and certificate Aurora needs |
 | `patches/` | the Wine source changes the fixes were built from |
-| `build.sh` | rebuilds `fixes/` from source, so you need not take ours on trust |
-| `SETUP.md` | full instructions and troubleshooting |
+| `build.sh` | rebuilds `fixes/` from source |
+| `SETUP.md` | full guide and troubleshooting |
 | `NOTICE.md` | licences: MIT for our parts, LGPL for the Wine parts |
 
-Nothing here belongs to anyone else: no game, no CrossOver, no Aurora17.
+Nothing here belongs to anyone else. No game, no CrossOver, no Aurora17.
