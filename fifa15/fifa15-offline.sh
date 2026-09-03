@@ -38,7 +38,7 @@ state=other
 case "$cmd" in
 check)
     case "$state" in
-        original) print -r -- "original CPY ItsAMe_Origin.dll -- the game will hang at the language screen; run: $0 apply" ;;
+        original) print -r -- "original CPY ItsAMe_Origin.dll -- what Aurora15Connector needs; without the connector the game hangs at the language screen (run: $0 apply)" ;;
         patched)  print -r -- "offline-patched ItsAMe_Origin.dll -- fine without Aurora15Connector" ;;
         other)    print -r -- "unknown ItsAMe_Origin.dll ($cur) -- probably Aurora15Connector's own; leave it"; exit 3 ;;
     esac ;;

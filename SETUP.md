@@ -849,33 +849,63 @@ into the new folder — newer builds ship without `redirector-dev.pfx`.
 The same CrossOver copy also runs FIFA 15 (the 2015 CPY release), with a bottle of its own.
 Nothing about FIFA 17 changes: FIFA 15's top-down Wine patch is inert unless the bottle sets
 `CX_TOPDOWN_LIMIT`, which only the FIFA 15 bottle profile does, and its other fix, a `gdiplus.dll`
-that stops Aurora15Connector crashing when it closes, is installed only when setup runs as
-`AURORA_GAME=fifa15 ./setup.sh`. A copy made by plain `./setup.sh` lacks that one file and still
-runs FIFA 15; the connector then shows a Wine crash dialog on its way out, which is harmless.
+that stops Aurora15Connector crashing when it closes, is a file the FIFA 17 profile never touches.
 
-1. Run `./setup.sh` as above, so the CrossOver copy exists.
-2. In that copy make a new bottle, **Windows 10, 64-bit**, called `Aurora15`.
-3. `AURORA_GAME=fifa15 ./setup.sh --bottle` — adds the three settings the bottle needs
-   (`CX_GRAPHICS_BACKEND`, `WINE_SIMULATE_WRITECOPY`, `CX_TOPDOWN_LIMIT`), sets the `dinput8`
-   DLL override to `native,builtin`, and writes a windowed `~/Documents/FIFA 15/fifasetup.ini` if
-   there is none. The override is what makes Aurora work: Aurora15Connector's EA-MITM hook is a
-   proxy `dinput8.dll` beside `fifa15.exe`, and without it the bottle loads Wine's own, the game
-   reaches the real EA redirector and says the servers are closed while everything else looks
-   fine. Steps 8 to 9a are skipped: they are FIFA 17's.
-4. Without Aurora15Connector: `./fifa15/fifa15-offline.sh apply "/path/to/FIFA 15"`, then run
-   `fifa15.exe` from the game folder in the `Aurora15` bottle. Without this patch the game hangs
-   at the language screen with the flag mid-wave (`fifa15/README.md` says why).
-   With Aurora15Connector: revert that patch first (`fifa15-offline.sh revert`); the connector
-   brings its own version of the same file. The connector runs under CrossOver: start
-   `Aurora15Connector-*.exe` in the `Aurora15` bottle, sign in, press PLAY; it starts the game
-   itself and hosts the Origin stand-in the game talks to. One connector at a time: a second
-   instance fails with "Local port 3216 is in use".
+One command sets it all up (or double-click `FIFA 15.command`):
+
+```
+./setup.sh --fifa15
+```
+
+Starting from nothing and wanting both games? `./setup-both.sh` (or `Both games.command`) runs the
+FIFA 17 install and then this, into the same CrossOver-FIFA; `./setup-both.sh --verify` checks both.
+
+What it does depends on what is already there:
+
+- **No CrossOver-FIFA yet:** the full install from "Installing" above, with the FIFA 15 profile —
+  the seven files instead of six (`gdiplus.dll` is the seventh), and steps 8 to 9a skipped, since
+  they are FIFA 17's (the Aurora17 stand-in, the EA names, the licence).
+- **CrossOver-FIFA already there** (made by `./setup.sh` or by an earlier `--fifa15`): the copy is
+  left as it is, except that `gdiplus.dll` is put in if it is missing. No re-copy.
+- **The `Aurora15` bottle** is made if it does not exist — Windows 10, 64-bit, using the copy's own
+  `cxbottle`, about twenty seconds. CrossOver must be closed for that.
+- **The bottle settings** (step 7): `CX_GRAPHICS_BACKEND`, `WINE_SIMULATE_WRITECOPY`,
+  `CX_TOPDOWN_LIMIT`; the `dinput8` DLL override set to `native,builtin`; proxy auto-detect off;
+  `DisableHidraw`; a windowed `~/Documents/FIFA 15/fifasetup.ini` if there is none. The override is
+  what makes Aurora work: Aurora15Connector's EA-MITM hook is a proxy `dinput8.dll` beside
+  `fifa15.exe`, and without it the bottle loads Wine's own, the game reaches the real EA redirector
+  and says the servers are closed while everything else looks fine.
+- **The game folder** is looked for (`~/Downloads/FIFA 15`, `~/Desktop`, `~/Games`, `~`; or
+  `FIFA15_DIR=/path ./setup.sh --fifa15`) and its `ItsAMe_Origin.dll` is reported: the CPY
+  original (what Aurora15Connector needs), the offline-patched one, or the connector's own. It is
+  only reported, never changed.
+
+Then, one of two ways to play:
+
+- **With Aurora15Connector:** start `Aurora15Connector-*.exe` in the `Aurora15` bottle, sign in,
+  press PLAY; it starts the game itself and hosts the Origin stand-in the game talks to. It wants the
+  CPY original `ItsAMe_Origin.dll` (it checks the hash and installs its own). One connector at a
+  time: a second instance fails with "Local port 3216 is in use". **Never press the connector's
+  "Repair connection" button under CrossOver**: Wine cannot tell it which process owns port 3216,
+  so Repair stops the connector's own Origin stand-in, and the game it then starts hangs at the
+  splash or the flag. If the connector complains about port 3216 at start, close it and run
+  `./setup.sh --unstick` instead (an `Aurora15Client.exe` often outlives the connector window).
+  Play Offline from the queue works, and so does an admitted online session once the queue lets you in.
+- **Without it:** `./fifa15/fifa15-offline.sh apply "/path/to/FIFA 15"`, then run `fifa15.exe` from
+  the game folder in the `Aurora15` bottle. Without this patch the game hangs at the language screen
+  with the flag mid-wave (`fifa15/README.md` says why). Run `fifa15-offline.sh revert` before going
+  back to the connector.
+
+Other forms: `./setup.sh --fifa15 --verify` checks the copy and the bottle (its Aurora17 lines are
+skipped for FIFA 15); `./setup.sh --fifa15 --bottle` does the bottle only, and `AURORA_BOTTLE='name'`
+picks another bottle name. `./setup.sh --unstick` frees FIFA 15's leftovers too: a `fifa15.exe` or
+`Aurora15Client.exe` left behind with CrossOver closed, and port 3216. `--smoke` and `--report` are
+FIFA 17 only and say so.
 
 Verified: language screen, title, intro and the attract-mode match, on Apple silicon; with
-Aurora15Connector, sign-in, content download, game launch and the Origin handshake.
-Not yet: input, sound, saves. `AURORA_GAME=fifa15 ./setup.sh --verify` checks the copy and
-the three bottle settings; its Aurora17 lines (stand-in, EA names, licence, version.dll) do not
-apply to FIFA 15 and can be ignored. `--smoke` and `--report` are FIFA 17 only and say so.
+Aurora15Connector, sign-in, content download, game launch, the Origin handshake, an offline
+session into the menus, and an admitted online session on Aurora's servers (30 minutes, 2026-09-03,
+reported working by the player). Not yet checked in detail: input, sound, saves.
 
 ## Undoing it
 
