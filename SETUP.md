@@ -649,6 +649,45 @@ This is also worth running if you have ever opened the Aurora17 bottle in your
 **normal** CrossOver. Each copy leaves its own session behind, and one copy
 cannot adopt the other's.
 
+### Playing without Aurora17
+
+`./setup.sh --offline` (or **START HERE offline.command**) installs everything
+the game itself needs and nothing Aurora17's: the CrossOver copy, the seven
+fixes, the signature and the bottle settings — steps 1 to 7 — and then stops.
+Steps 8 and 9, the PowerShell stand-in and the six EA name mappings, exist only
+so Aurora17's PLAY button works and its redirect is reached, so they are
+skipped.
+
+Step 9a is kept, and it is worth saying why, because it looks like Aurora's:
+`1027460.dlf` is FIFA 17's own licence file, written by the game's loader on a
+first run. A bottle without it loses its first launch to `0xFFFFFFFA`
+(BUGS.md §18). Aurora17's launcher normally writes it on PLAY — offline there
+is no launcher, so the installer runs the loader once itself.
+
+Play with **PLAY FIFA 17 offline.command**, or `./setup.sh --play-offline`. It
+starts `_fifa17.exe` in the bottle through the patched copy — the same thing
+step 9a does, without the stopping. Kick-off, career, tournaments and skill
+games all work, with a controller. Online, FUT and anything that needs an EA
+account do not: nothing in an offline install talks to EA.
+
+Two things follow from there being no CrossOver window in this mode:
+
+- Leave the terminal window open while you play. It holds
+  `session-hold` in `~/Library/Application Support/FIFA-CrossOver`, and that
+  file is the only thing telling the background cleanup that a Wine session
+  with no CrossOver GUI behind it is deliberate. Without it the cleanup would
+  see the game as a stray and close it 45 seconds in. `--unstick` and
+  `--shutdown` refuse to run while it is held, and say so.
+- Closing that window stops the game.
+
+`./setup.sh --verify` knows which kind of install it is looking at (the receipt
+records it) and does not report Aurora17's missing pieces as faults on an
+offline install. It still checks the licence file, which is the game's own.
+
+Adding Aurora17 later needs no undoing: install Aurora17, then run
+`./setup.sh` with no flag, and steps 8 and 9 fill in what the offline install
+left out.
+
 ### The first thing to check
 
 **Did you open CrossOver-FIFA, or your normal CrossOver?** They look identical

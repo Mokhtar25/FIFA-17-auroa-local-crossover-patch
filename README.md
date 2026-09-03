@@ -27,6 +27,23 @@ Or skip that: open Terminal, type `zsh ` (with a space), drag
 The installer prints what it does at every step. If it has to stop, the reason
 is in **red**, followed by the steps to fix it.
 
+## Without Aurora17 (single player only)
+
+If you only want to play — kick-off, career, tournaments, skill games — you do
+not need Aurora17 at all. Double-click **START HERE offline.command** instead of
+`START HERE.command`. It installs the CrossOver copy, the fixes and the bottle
+settings, and nothing that talks to EA: no PowerShell stand-in, no EA name
+redirects, no certificate.
+
+Then play with **PLAY FIFA 17 offline.command**, which starts the game's own
+loader inside the bottle. Keep that window open while you play — it is what
+tells the background cleanup the game is running on purpose.
+
+Online, FUT and anything needing an EA account do not work in an offline
+install; that is what Aurora17 is for. Adding it later is just installing
+Aurora17 and double-clicking `START HERE.command`, which fills in the missing
+pieces in the same copy.
+
 ## When you finish playing
 
 Double-click **Stop.command** instead of closing CrossOver's window. Closing the
@@ -62,6 +79,7 @@ never changed.
 |---|---|
 | `START HERE.command`, `Uninstall.command` | double-click to install, or to undo |
 | `Stop.command` | double-click to quit CrossOver cleanly when you finish playing |
+| `START HERE offline.command`, `PLAY FIFA 17 offline.command` | install and play without Aurora17 — single player only |
 | `setup.sh`, `uninstall.sh` | what those two run |
 | `fixes/` | the seven files that go into the CrossOver copy, with source and checksums |
 | `aurora17/` | the PowerShell stand-in and the certificate Aurora needs, with source and checksums |

@@ -25,6 +25,12 @@
 #   ./setup.sh --bundle                   zip up everything a bug report needs
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
+#   ./setup.sh --play-offline             start FIFA 17 with no Aurora17 running
+#   ./setup.sh --offline                  install FIFA 17 with no Aurora17 at all:
+#                                         the CrossOver copy, the fixes and the
+#                                         bottle settings only. Kick-off, career
+#                                         and the rest of single player; no online,
+#                                         no FUT, no EA account. See SETUP.md.
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -40,6 +46,8 @@ E_PAYLOAD=4
 E_INCOMPLETE=5
 
 MODE=install
+# --offline: install everything the game itself needs and nothing Aurora17's.
+NO_AURORA=0
 case "${1:-}" in
     --resign) MODE=resign; shift ;;
     --verify) MODE=verify; shift ;;
@@ -50,6 +58,8 @@ case "${1:-}" in
     --bundle) MODE=bundle; shift ;;
     --bottle) MODE=bottle; shift ;;
     --smoke) MODE=smoke; shift ;;
+    --offline) MODE=install; NO_AURORA=1; shift ;;
+    --play-offline) MODE=play-offline; shift ;;
     --help|-h)
         sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
@@ -1359,6 +1369,13 @@ aurora_dir_find() {
 
 verify_install() {
     local app="$1" problems=0
+    # An offline install (./setup.sh --offline) has no Aurora17 by design, so
+    # the checks for Aurora's stand-in, its EA names and its certificate would
+    # all report BAD on a perfectly good install. The receipt says which kind
+    # this was; the flag says so during the install itself.
+    local offline=0
+    [ "${NO_AURORA:-0}" = 1 ] && offline=1
+    [ -f "$RECEIPT" ] && grep -q '^offline=1$' "$RECEIPT" && offline=1
     say ""
     say "Checking $app"
     say ""
@@ -1450,6 +1467,10 @@ verify_install() {
     holding=( ${holding:#} )
     if [ "${#holding}" -eq 0 ]; then
         ok "nothing is holding the $BOTTLE bottle"
+    elif hold_pid_alive; then
+        note "FIFA 17 is playing right now, started by --play-offline (${#holding} processes)."
+        say "        That is a running session, not a stuck bottle. Quit the game and"
+        say "        check again if you want the settings below re-read."
     elif [ -n "$(crossovers_running)" ]; then
         note "the $BOTTLE bottle is open in CrossOver right now (${#holding} processes)."
         say "        Quit CrossOver and check again — Wine writes its own copy of"
@@ -1528,6 +1549,11 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # An offline install has no Aurora17, so its stand-in is not checked. The
+    # checks below are Aurora17's and are skipped for it (not re-indented).
+    if [ "$offline" = 1 ]; then
+        ok "offline install: no Aurora17 stand-in to check"
+    else
     # PLAY only needs one of the two stand-in locations to be right. "Wrong
     # build" and "not there at all" are different faults and had been reported
     # as the same one -- an older stand-in sitting in both places was described
@@ -1559,6 +1585,7 @@ verify_install() {
         bad "the PowerShell stand-in is in neither place — PLAY will do nothing"
         problems=$((problems+1))
     fi
+    fi
 
     # Name resolution. Two halves: the reader has to be installed and wired in,
     # and the file it reads has to say something. The second half is Aurora17's
@@ -1583,6 +1610,23 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # EA names, hosts receipt, redirect shim and certificate are all Aurora17's,
+    # and an offline install has none of them. The licence file is the game's
+    # own, so it is checked either way.
+    if [ "$offline" = 1 ]; then
+        ok "offline install: Aurora17's EA names, redirect and certificate do not apply"
+        # The licence file is the game's own and is checked either way.
+        local olic; olic="$(bottle_licence_file)"
+        if [ -f "$olic" ]; then
+            ok "licence file present ($(stat -f%z "$olic") bytes)"
+        else
+            bad "no licence file, so FIFA 17 will quit a few seconds after it starts:"
+            say "        $olic"
+            say "        Run  ./setup.sh --offline  again, or start the game once from"
+            say "        CrossOver and let it reach the menu."
+            problems=$((problems+1))
+        fi
+    else
     local -a miss; local bh; bh="$(bottle_hosts_file)"
     miss=( ${(f)"$(hosts_missing)"} )
     if [ "${#miss}" -eq 0 ]; then
@@ -1689,6 +1733,7 @@ verify_install() {
         say "        Windows PowerShell's PKI module, which a bottle does not"
         say "        have. Re-run ./setup.sh — it copies the shipped one."
         problems=$((problems+1))
+    fi
     fi
 
     # Which CrossOver is open. Three copies share one bundle identifier, so the
@@ -2171,6 +2216,35 @@ configure_bottle() {
         BOTTLE_OK=1
     fi
 
+    # --offline. Step 8 puts the PowerShell stand-in where Aurora17's PLAY
+    # button looks for it and step 9 points EA's six names at the redirect
+    # Aurora listens on: with no Aurora17 installed both are dead weight.
+    #
+    # 9a stays, and is the one thing here that is not Aurora's. 1027460.dlf is
+    # FIFA 17's own licence file, written by the game's loader on a first run;
+    # a bottle without it loses its first launch to 0xFFFFFFFA (BUGS.md §18).
+    # Aurora's launcher normally seeds it on PLAY, so skipping it as "Aurora
+    # stuff" would leave an offline install that quits a few seconds in with
+    # nothing left to write the file.
+    if [ "$NO_AURORA" = 1 ]; then
+        say ""
+        say "8-9. Skipped — Aurora17's stand-in and its EA name mappings (offline install)"
+        say "        Nothing here talks to EA, so there is nothing to redirect."
+        PS_OK=1; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""; HOSTS_OK=1
+        say ""
+        say "9a. Making sure FIFA 17's licence file is in the bottle"
+        LICENCE_OK=0
+        if seed_bottle_licence "$APP"; then
+            LICENCE_OK=1
+        else
+            note "without it FIFA 17 quits on its own a few seconds after it starts,"
+            say "        and an offline install has no Aurora launcher to write it"
+            say "        for you. Start FIFA 17 once from CrossOver, let it reach the"
+            say "        menu, then run this again to check."
+        fi
+        return 0
+    fi
+
     # ------------------------------------------------ 8. the PowerShell stand-in
     # Aurora17's PLAY button does its real work by running scripts/Play.ps1 through
     # powershell.exe. Wine ships a powershell.exe that is a stub: it prints a FIXME
@@ -2550,6 +2624,13 @@ smoke_failed() {
 CLEANUP_LABEL=com.fifa-crossover-cleanup
 CLEANUP_BASE="$HOME/Library/Application Support/FIFA-CrossOver"
 CLEANUP_HELPER="$CLEANUP_BASE/cleanup"
+# A session started outside CrossOver's window -- ./setup.sh --play-offline --
+# has no GUI to prove it is alive, and every rule here calls a Wine process
+# with no GUI behind it an orphan. So the launcher writes its own pid here for
+# as long as it runs, and both the timer and --unstick leave everything alone
+# while that pid is alive. A crashed launcher leaves a pid that is gone, which
+# reads as no hold at all.
+CLEANUP_HOLD="$CLEANUP_BASE/session-hold"
 CLEANUP_PLIST="$HOME/Library/LaunchAgents/$CLEANUP_LABEL.plist"
 
 write_cleanup_helper() {
@@ -2704,7 +2785,14 @@ stale_wine_sockets() {
             || print -r -- "$d"
     done
 }
-require_quiet() { [ -z "$(crossovers_running)" ]; }
+require_quiet() {
+    local hp
+    if [ -f "$BASE/session-hold" ]; then
+        hp="$(cat "$BASE/session-hold" 2>/dev/null || true)"
+        case "$hp" in ''|*[!0-9]*) ;; *) kill -0 "$hp" 2>/dev/null && return 1 ;; esac
+    fi
+    [ -z "$(crossovers_running)" ]
+}
 kill_pids() {
     local sig="$1"; shift
     local waited=0 P; local -a left
@@ -2720,6 +2808,23 @@ kill_pids() {
     for P in "$@"; do kill -0 "$P" 2>/dev/null && left+=( "$P" ); done
     [ "${#left}" -eq 0 ]
 }
+
+# A game started outside the GUI holds this file for as long as its launcher
+# runs. It is the one thing that makes a GUI-less Wine session legitimate, so
+# it is checked before anything else and treated exactly like a running GUI.
+HOLD="$BASE/session-hold"
+if [ -f "$HOLD" ]; then
+    HP="$(cat "$HOLD" 2>/dev/null || true)"
+    case "$HP" in
+        ''|*[!0-9]*) rm -f "$HOLD" 2>/dev/null || true ;;
+        *) if kill -0 "$HP" 2>/dev/null; then
+               print -r -- "$(date +%s)" >"$STATE" 2>/dev/null || true
+               exit 0
+           else
+               rm -f "$HOLD" 2>/dev/null || true
+           fi ;;
+    esac
+fi
 
 now=$(date +%s)
 if [ -n "$(crossovers_running)" ]; then
@@ -2838,7 +2943,23 @@ fi
 # rule makes this safe to do bluntly: with every CrossOver quit, anything still
 # inside the prefix is by definition an orphan, because nothing is left that
 # could legitimately be using it.
+hold_pid_alive() {
+    local hp
+    [ -f "$CLEANUP_HOLD" ] || return 1
+    hp="$(cat "$CLEANUP_HOLD" 2>/dev/null || true)"
+    case "$hp" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$hp" 2>/dev/null
+}
+
 if [ "$MODE" = unstick ] || [ "$MODE" = shutdown ]; then
+if hold_pid_alive; then
+    say ""
+    note "a game started by ./setup.sh --play-offline is still running"
+    say "        (pid $(cat "$CLEANUP_HOLD" 2>/dev/null)). Quit FIFA first, or close"
+    say "        the terminal window it is running in, then run this again."
+    say "        Nothing has been touched."
+    exit $E_PERMISSION
+fi
 if [ "$MODE" = shutdown ]; then
     say ""
     say "Quitting CrossOver cleanly (games first, then wineservers, then the GUI)"
@@ -3089,6 +3210,80 @@ if [ "$MODE" = bottle ]; then
     red "NOT FINISHED — see the lines above."
     say ""
     exit $E_INCOMPLETE
+fi
+
+# Starts FIFA 17 the way an offline install has to: the game's own loader,
+# _fifa17.exe, run in the bottle through the patched copy. That is exactly what
+# seed_bottle_licence does to write the licence file, and what Aurora's PLAY
+# ends up doing after its own work. Nothing here listens on a port or talks to
+# EA, so single player is all of it.
+if [ "$MODE" = play-offline ]; then
+    say ""
+    say "Starting FIFA 17 (offline)"
+    say ""
+    [ -d "$TARGET" ] || die $E_INCOMPLETE "There is no $TARGET yet.
+         Run  ./setup.sh --offline  first (or double-click START HERE offline)."
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] \
+        || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         For another name:  AURORA_BOTTLE='name' ./setup.sh --play-offline"
+    GDIR="$(game_dir_find 2>/dev/null || true)"
+    [ -n "$GDIR" ] || die $E_INCOMPLETE "No FIFA 17 folder with _fifa17.exe in it was found.
+         For a game kept elsewhere:
+           AURORA_GAME_DIR='/path/to/FIFA 17' ./setup.sh --play-offline"
+    GWIN="$(unix_path_to_win "$GDIR" 2>/dev/null || true)"
+    [ -n "$GWIN" ] || die $E_INCOMPLETE "The $BOTTLE bottle has no drive letter for
+         $GDIR
+         Add one in CrossOver (Bottle > Control Panel > Drives), then try again."
+    PWINE="$TARGET/Contents/SharedSupport/CrossOver/bin/wine"
+    [ -x "$PWINE" ] || die $E_PAYLOAD "$TARGET is incomplete (no wine inside it).
+         Run ./setup.sh --offline again."
+    mkdir -p "$CLEANUP_BASE" 2>/dev/null || true
+    print -r -- "$$" > "$CLEANUP_HOLD" 2>/dev/null || true
+    # Closing the window (or Control-C) stops the game this started, which is
+    # what the launcher's text promises. On a normal end the game has already
+    # gone and stop_bottle_game does nothing. Only pids inside this bottle
+    # running FIFA 17 are ever signalled -- see bottle_game_pids.
+    trap 'rm -f "$CLEANUP_HOLD" 2>/dev/null; stop_bottle_game >/dev/null 2>&1' EXIT INT TERM
+    ok "game folder: $GDIR"
+    ok "bottle:      $BOTTLE"
+    say ""
+    say "The game window takes a moment. This terminal stays open while it runs;"
+    say "quitting FIFA closes it. Online, FUT and anything needing an EA account"
+    say "are not available in an offline install."
+    say ""
+    "$PWINE" --bottle "$BOTTLE" --workdir "$GDIR" --cx-app "$GWIN\\_fifa17.exe" &
+    WPID=$!
+    # CrossOver's wine wrapper returns as soon as it has started the program --
+    # it forwards --wait-children only when asked -- so waiting on that pid is
+    # not waiting for the game. Watch the bottle instead. This matters for more
+    # than a tidy exit code: the hold file below is what tells the background
+    # cleanup that a Wine session with no CrossOver window is deliberate, and
+    # letting this script exit while the game is up would hand the game to the
+    # cleanup as a stray 45 seconds later.
+    WAITED=0
+    while [ "$WAITED" -lt 90 ] && [ -z "$(game_leftovers)" ]; do
+        /bin/sleep 1
+        WAITED=$((WAITED + 1))
+    done
+    if [ -z "$(game_leftovers)" ]; then
+        wait "$WPID" 2>/dev/null || true
+        say ""
+        note "FIFA 17 did not appear within ${WAITED}s."
+        say "        If it started and closed again, the bottle is probably missing"
+        say "        its licence file: run  ./setup.sh --verify , which says so."
+        exit $E_INCOMPLETE
+    fi
+    ok "FIFA 17 is running — leave this window open while you play"
+    while [ -n "$(game_leftovers)" ]; do
+        # Touching the hold keeps it obviously current for anyone reading it.
+        print -r -- "$$" > "$CLEANUP_HOLD" 2>/dev/null || true
+        /bin/sleep 5
+    done
+    wait "$WPID" 2>/dev/null || true
+    say ""
+    ok "FIFA 17 closed"
+    exit 0
 fi
 
 if [ "$MODE" = smoke ]; then
@@ -3363,6 +3558,10 @@ if [ "${#HOLDING}" -gt 0 ]; then
          be overwritten when it does quit, and the game would say the servers
          have been shut down. Nothing has been changed."
     fi
+    if hold_pid_alive; then
+        die $E_PERMISSION "FIFA 17 is playing right now (started by --play-offline).
+         Quit the game first, then run this again. Nothing has been changed."
+    fi
     die $E_PERMISSION "${#HOLDING} leftover process(es) are still inside the $BOTTLE bottle
          with no CrossOver running. They will overwrite whatever is written
          here, and the bottle will hang on loading. Free it first:
@@ -3523,6 +3722,7 @@ mkdir -p "$RECEIPT_DIR"
     print -r -- "bottle_dir=$BOTTLE_DIR"
     print -r -- "bottle=$BOTTLE"
     print -r -- "aurora_dir=$PS_AURORA_DIR"
+    print -r -- "offline=$NO_AURORA"
     print -r -- "bottle_powershell=$PS_BOTTLE_ACTION"
     print -r -- "version=$VER"
     print -r -- "installed=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -3535,7 +3735,16 @@ say ""
 if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
     green "Done."
     say ""
-    if [ "$IN_PLACE" = "1" ]; then
+    if [ "$NO_AURORA" = 1 ]; then
+        say "To play:  double-click  PLAY FIFA 17 offline.command"
+        say "          (or run  ./setup.sh --play-offline )"
+        say ""
+        say "          It starts the game's own loader in the $BOTTLE bottle through"
+        say "          ${TARGET:t}. Kick-off, career, tournaments and skill games"
+        say "          all work. Online, FUT and anything that needs an EA account"
+        say "          do not: nothing here talks to EA. Adding Aurora17 later is"
+        say "          just  ./setup.sh  with no flag."
+    elif [ "$IN_PLACE" = "1" ]; then
         say "To play:  open CrossOver, then open Aurora17 in the $BOTTLE bottle"
         say "          and press PLAY FIFA 17."
     else
