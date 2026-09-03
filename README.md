@@ -35,9 +35,20 @@ not need Aurora17 at all. Double-click **START HERE offline.command** instead of
 settings, and nothing that talks to EA: no PowerShell stand-in, no EA name
 redirects, no certificate.
 
-Then play with **PLAY FIFA 17 offline.command**, which starts the game's own
-loader inside the bottle. Keep that window open while you play — it is what
-tells the background cleanup the game is running on purpose.
+Then play either way:
+
+- Open **CrossOver-FIFA**, pick the `Aurora17` bottle, and click
+  **FIFA 17 (offline)**. The installer adds that entry; it is the same as the
+  Aurora17 entries beside it, except that it runs the game's own loader,
+  `_fifa17.exe`, instead of Aurora.
+- Or double-click **PLAY FIFA 17 offline.command**, which does the same thing
+  without opening CrossOver at all. Keep that window open while you play — it
+  is what tells the background cleanup the game is running on purpose. (Started
+  from the CrossOver window there is nothing to keep open: the cleanup leaves
+  everything alone while CrossOver is running.)
+
+Moved the game folder since installing? `./setup.sh --offline-menu` points the
+entry at where it is now.
 
 Online, FUT and anything needing an EA account do not work in an offline
 install; that is what Aurora17 is for. Adding it later is just installing

@@ -302,6 +302,23 @@ if [ -f "$BHOSTS.bak-aurora17" ]; then
     undone=$((undone+1))
 fi
 
+# ------------------------------------------- the FIFA 17 (offline) menu entry
+# setup.sh --offline adds one entry to the bottle so the game can be started
+# from CrossOver's window. It is ours, it names a copy that is about to be
+# deleted, and left behind it would sit in the bottle doing nothing.
+say ""
+for cxm in "$TARGET/Contents/SharedSupport/CrossOver/bin/cxmenu" \
+           /Applications/CrossOver-FIFA.app/Contents/SharedSupport/CrossOver/bin/cxmenu \
+           /Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cxmenu; do
+    [ -x "$cxm" ] || continue
+    if "$cxm" --bottle "$BOTTLE" --uninstall --uninstall-filter "StartMenu/FIFA 17 (offline)" \
+              --delete --delete-filter "StartMenu/FIFA 17 (offline)" >/dev/null 2>&1; then
+        ok "removed the FIFA 17 (offline) entry from the $BOTTLE bottle"
+        undone=$((undone+1))
+    fi
+    break
+done
+
 # --------------------------------------- background cleanup (LaunchAgent)
 # setup.sh --agent (and every successful full install) puts a timer here that
 # clears strays by itself. Unload it first so no run fires mid-removal, then
