@@ -664,13 +664,24 @@ first run. A bottle without it loses its first launch to `0xFFFFFFFA`
 (BUGS.md §18). Aurora17's launcher normally writes it on PLAY — offline there
 is no launcher, so the installer runs the loader once itself.
 
-Play with **PLAY FIFA 17 offline.command**, or `./setup.sh --play-offline`. It
-starts `_fifa17.exe` in the bottle through the patched copy — the same thing
-step 9a does, without the stopping. Kick-off, career, tournaments and skill
-games all work, with a controller. Online, FUT and anything that needs an EA
-account do not: nothing in an offline install talks to EA.
+Step 10 adds a **FIFA 17 (offline)** entry to the bottle, so the game starts
+the way everything else in CrossOver does: open **CrossOver-FIFA**, pick the
+bottle, click the entry. It is a "raw" menu entry rather than a Windows
+shortcut, because the game folder lives outside the bottle and `_fifa17.exe`
+has no shortcut of its own to point at. `./setup.sh --offline-menu` re-adds it,
+which is what to run if the game folder moves; `./uninstall.sh` removes it.
 
-Two things follow from there being no CrossOver window in this mode:
+**PLAY FIFA 17 offline.command** (`./setup.sh --play-offline`) is the same
+launch without opening CrossOver at all. Both run `_fifa17.exe` in the bottle
+through the patched copy — the same thing step 9a does, without the stopping.
+Kick-off, career, tournaments and skill games all work, with a controller.
+Online, FUT and anything that needs an EA account do not: nothing in an offline
+install talks to EA.
+
+Started from the CrossOver window, none of the next two paragraphs applies:
+there is a CrossOver GUI running, so the background cleanup stands down by
+itself, and quitting CrossOver afterwards clears the session as usual. They
+matter only for the terminal launcher, which runs with no GUI at all:
 
 - Leave the terminal window open while you play. It holds
   `session-hold` in `~/Library/Application Support/FIFA-CrossOver`, and that
