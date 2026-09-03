@@ -27,6 +27,20 @@ Or skip that: open Terminal, type `zsh ` (with a space), drag
 The installer prints what it does at every step. If it has to stop, the reason
 is in **red**, followed by the steps to fix it.
 
+## When you finish playing
+
+Double-click **Stop.command** instead of closing CrossOver's window. Closing the
+window (the red dot) leaves FIFA 17 and its Aurora17 programs running with
+nothing on screen: they keep the bottle locked and sit on the ports Aurora
+needs, so the next **PLAY FIFA 17** says a port is already in use, or hangs on
+the loading screen forever. `Stop.command` closes the game, then Aurora, then
+CrossOver, in that order.
+
+Forgetting is not fatal. The installer also sets up a background cleanup that
+clears leftovers by itself 45 seconds after CrossOver quits. It never touches a
+running session, a non-Wine program, or another Wine app's bottles, and
+`./uninstall.sh` removes it.
+
 ## If something goes wrong
 
 ```sh
@@ -47,6 +61,7 @@ never changed.
 | | |
 |---|---|
 | `START HERE.command`, `Uninstall.command` | double-click to install, or to undo |
+| `Stop.command` | double-click to quit CrossOver cleanly when you finish playing |
 | `setup.sh`, `uninstall.sh` | what those two run |
 | `fixes/` | the seven files that go into the CrossOver copy, with source and checksums |
 | `aurora17/` | the PowerShell stand-in and the certificate Aurora needs, with source and checksums |

@@ -629,6 +629,22 @@ which sits outside the bottle but holds the same lock. Anything that still has a
 living `wineserver` — a Wine session that is genuinely running — is listed and
 left alone.
 
+Two easier paths exist, and one is automatic. `./setup.sh --shutdown`
+quits CrossOver for you — games and Aurora first, then the wineservers, then
+the GUI — so use it (or double-click `Stop.command`) instead of closing the
+window. And every successful install now turns on a background cleanup: a
+per-user timer that, starting 45 seconds after CrossOver quits, does what
+`--unstick` does by itself every 30 seconds and logs to
+`~/Library/Application Support/FIFA-CrossOver/cleanup.log`. It never touches
+a running CrossOver session or a non-Wine program, and it stays inside its own
+bottles: Wine names a prefix's `/tmp` lock directory after that prefix's device
+and inode, so another Wine runtime's session — Whisky, Wineskin, a plain `wine`
+— is left alone even while no CrossOver is open. One thing to know: quitting
+CrossOver while FIFA is still playing counts as leaving a stray behind, and the
+game is closed 45 seconds later. Quit the game first — or use `Stop.command`,
+which does it in that order. `./setup.sh --agent` reinstalls the timer;
+`./uninstall.sh` removes it.
+
 This is also worth running if you have ever opened the Aurora17 bottle in your
 **normal** CrossOver. Each copy leaves its own session behind, and one copy
 cannot adopt the other's.
@@ -887,7 +903,11 @@ This is the main reason the default is a separate copy.)
 | `build.sh` | rebuilds every file in `fixes/` from source, so you need not take ours on trust |
 | `LICENSE` | MIT, for the parts that are ours |
 | `NOTICE.md` | which files are MIT and which are LGPL, and how to rebuild the LGPL ones |
-| `setup.sh` `uninstall.sh` | what the two `.command` files run |
+| `dev/` | the Terminal scripts, and tools we used |
+| `BUGS.md` | all sixteen problems, what causes each, who owns the code |
+| `HANDOFF.md` | the full engineering record |
+| `HANDOFF-AURORA-GUI.md` | how Aurora's own launcher was made to work |
+| `PORTABLE.md` | how this package is put together |
 
 The six CrossOver files are built from freely published CrossOver source code,
 and the changes are in `patches/` as their licence requires — `./build.sh` puts

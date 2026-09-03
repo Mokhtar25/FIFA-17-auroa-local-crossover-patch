@@ -34,6 +34,13 @@ case $rc in
     0)
         print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA (not your normal CrossOver),"
         print -r -- "  open the Aurora17 bottle, and press PLAY FIFA 17."
+        print -r -- ""
+        print -r -- "  When you have finished playing, double-click ${GRN}Stop.command${OFF}"
+        print -r -- "  instead of closing CrossOver's window. Closing the window leaves"
+        print -r -- "  FIFA and Aurora running with nothing on screen, and the next PLAY"
+        print -r -- "  then says a port is in use or hangs on the loading screen."
+        print -r -- "  A background cleanup clears them by itself as well, 45 seconds"
+        print -r -- "  after CrossOver quits."
         ;;
     3)
         # setup.sh has already printed which permission is missing and how to
