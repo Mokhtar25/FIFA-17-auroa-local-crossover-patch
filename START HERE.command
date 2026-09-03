@@ -35,12 +35,11 @@ case $rc in
         print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA (not your normal CrossOver),"
         print -r -- "  open the Aurora17 bottle, and press PLAY FIFA 17."
         print -r -- ""
-        print -r -- "  When you have finished playing, double-click ${GRN}Stop.command${OFF}"
-        print -r -- "  instead of closing CrossOver's window. Closing the window leaves"
-        print -r -- "  FIFA and Aurora running with nothing on screen, and the next PLAY"
-        print -r -- "  then says a port is in use or hangs on the loading screen."
-        print -r -- "  A background cleanup clears them by itself as well, 45 seconds"
-        print -r -- "  after CrossOver quits."
+        print -r -- "  Quit however you like when you are done. A background cleanup"
+        print -r -- "  clears the leftovers by itself 45 seconds after CrossOver quits."
+        print -r -- "  It waits for CrossOver to actually quit, though, and closing a"
+        print -r -- "  window is not quitting on a Mac -- so if PLAY ever says a port is"
+        print -r -- "  in use, Command-Q CrossOver, or double-click ${GRN}Stop.command${OFF}."
         ;;
     3)
         # setup.sh has already printed which permission is missing and how to
