@@ -57,17 +57,25 @@ pieces in the same copy.
 
 ## When you finish playing
 
-Double-click **Stop.command** instead of closing CrossOver's window. Closing the
-window (the red dot) leaves FIFA 17 and its Aurora17 programs running with
-nothing on screen: they keep the bottle locked and sit on the ports Aurora
-needs, so the next **PLAY FIFA 17** says a port is already in use, or hangs on
-the loading screen forever. `Stop.command` closes the game, then Aurora, then
-CrossOver, in that order.
+Quit however you like. The installer sets up a background cleanup that clears
+leftovers by itself, 45 seconds after CrossOver quits — the game, Aurora's
+programs, the bottle lock and the ports. You do not have to do anything, and
+there is nothing to remember.
 
-Forgetting is not fatal. The installer also sets up a background cleanup that
-clears leftovers by itself 45 seconds after CrossOver quits. It never touches a
-running session, a non-Wine program, or another Wine app's bottles, and
-`./uninstall.sh` removes it.
+It never touches a running session, a non-Wine program, or another Wine app's
+bottles, and `./uninstall.sh` removes it.
+
+One thing it deliberately will not do: act while CrossOver is still open.
+Closing a bottle window with the red dot does not quit CrossOver on a Mac — it
+stays in the menu bar — so leftovers from that session sit there until you
+actually quit it (Command-Q). While CrossOver is open, a process that looks
+abandoned is indistinguishable from a game that is still loading, and this
+would rather leave a stray behind than close someone's game.
+
+So if a bottle ever spins forever or PLAY says a port is in use: quit CrossOver
+and wait a minute, or run `./setup.sh --unstick` to do it now.
+**Stop.command** does the same thing in one double-click — the game, then
+Aurora, then CrossOver, in that order.
 
 ## If something goes wrong
 
