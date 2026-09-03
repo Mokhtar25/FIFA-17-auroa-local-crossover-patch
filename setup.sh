@@ -12,7 +12,16 @@
 #   ./setup.sh --resign                   repair the signature, no re-copy
 #   ./setup.sh --verify                   check an install, change nothing
 #   ./setup.sh --report                   one pasteable diagnosis, change nothing
-#   ./setup.sh --unstick                  free bottles that are stuck loading
+#   ./setup.sh --unstick                  free bottles stuck loading (kills orphaned
+#                                         Wine + wineservers, frees 47170-47173/3216)
+#   ./setup.sh --shutdown                 quit CrossOver cleanly first, then --unstick:
+#                                         use this instead of closing the window -
+#                                         it stops Aurora/FIFA, shuts wineservers
+#                                         down, then quits the GUI so no strays
+#                                         or held ports are left behind
+#   ./setup.sh --agent                    install the background cleanup (LaunchAgent):
+#                                         clears strays + held ports by itself every
+#                                         30 s, so no script ever needs running
 #   ./setup.sh --bundle                   zip up everything a bug report needs
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
@@ -41,18 +50,21 @@ case "${1:-}" in
     --verify) MODE=verify; shift ;;
     --report) MODE=report; shift ;;
     --unstick) MODE=unstick; shift ;;
+    --shutdown) MODE=shutdown; shift ;;
+    --agent) MODE=agent; shift ;;
     --bundle) MODE=bundle; shift ;;
     --bottle) MODE=bottle; shift ;;
     --smoke) MODE=smoke; shift ;;
     --fifa15)
         # One command for FIFA 15. The same as AURORA_GAME=fifa15 with the
         # mode picked below from what is already there; a mode after it
-        # (--verify, --bottle, --unstick) is taken as given.
+        # (--verify, --bottle, --unstick, --shutdown) is taken as given.
         AURORA_GAME=fifa15; MODE=fifa15; shift
         case "${1:-}" in
             --verify) MODE=verify; shift ;;
             --bottle) MODE=bottle; shift ;;
             --unstick) MODE=unstick; shift ;;
+            --shutdown) MODE=shutdown; shift ;;
             --resign) MODE=resign; shift ;;
             -*) print -r -- "Unknown option after --fifa15: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
         esac ;;
@@ -574,6 +586,7 @@ crossovers_running() {
 stale_wine_sockets() {
     local d
     for d in /tmp/.wine-*/server-*(N/); do
+        is_our_server_dir "$d" || continue
         [ -n "$(/usr/sbin/lsof +D "$d" -F p 2>/dev/null | grep '^p')" ] \
             || print -r -- "$d"
     done
@@ -595,14 +608,58 @@ stale_wine_sockets() {
 # Only Wine's own processes count: a Windows binary (its command line starts
 # with a drive letter), wineserver, winewrapper.exe or a preloader. A Terminal
 # tab that happens to be cd'ed into a bottle is not a holder and is never
-# signalled. And anything attached to a server-* directory that a wineserver
-# still holds is a live session -- another CrossOver copy, a wine command run
-# from a shell -- and is left alone; it is reported, not killed.
+# signalled. While a CrossOver GUI is running, anything attached to a
+# server-* directory that a wineserver still holds is a live session and is
+# left alone. Once every GUI has quit there is no live session left: an
+# orphaned wineserver keeps its clients looking "live" forever, holding
+# ports 47170-47173/3216 and the bottle lock, so --unstick shuts the
+# wineservers down first and then treats the rest as orphans. A native Mac
+# program on one of the ports is still never signalled.
 is_wine_command() {
     case "$1" in
         [A-Za-z]:\\*) return 0 ;;
         *wineserver*|*winewrapper.exe*|*wine-preloader*|*wine64-preloader*) return 0 ;;
     esac
+    return 1
+}
+
+# Wine names a prefix's server directory after the prefix's device and inode
+# in hex -- /tmp/.wine-<uid>/server-<dev>-<inode> -- so the bottles under
+# BOTTLE_DIR can be turned into the exact set of directory names that belong
+# to them. Everything else under /tmp/.wine-* is another Wine runtime's
+# (Whisky, Wineskin, a plain wine), and "no CrossOver is open" says nothing
+# about whether one of those is in the middle of a session. Those are never
+# signalled and their directories are never removed.
+our_server_dirs() {
+    local b st
+    for b in "$BOTTLE_DIR"/*(N/); do
+        st="$(stat -f '%d %i' "$b" 2>/dev/null)" || continue
+        [ -n "$st" ] || continue
+        printf 'server-%x-%x\n' ${=st}
+    done
+    return 0
+}
+is_our_server_dir() {
+    [ -n "${OUR_SERVER_DIRS:-}" ] || OUR_SERVER_DIRS="$(our_server_dirs)"
+    print -r -- "$OUR_SERVER_DIRS" | grep -qx -- "${1:t}"
+}
+
+# A name match alone is not proof of ownership: a native Mac program with
+# fifa17 or Aurora17Server on its command line -- a video open in QuickTime,
+# an editor on a log -- must never be signalled, and the background cleanup
+# signals these with nobody watching. A pid counts only if it is a Wine
+# process, works inside a bottle, or holds one of our server directories.
+wine_owned_pid() {
+    local cmd cwd h
+    cmd="$(ps -o command= -p "$1" 2>/dev/null)" || return 1
+    [ -n "$cmd" ] || return 1
+    is_wine_command "$cmd" && return 0
+    cwd="$(/usr/sbin/lsof -a -d cwd -p "$1" -F n 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    [ "$cwd" = "$BOTTLE_DIR" ] || [ "${cwd#"$BOTTLE_DIR"/}" != "$cwd" ] && return 0
+    for h in ${(f)"$(/usr/sbin/lsof -p "$1" -F n 2>/dev/null \
+            | sed -n 's|^n.*/\.wine-[^/]*/\(server-[^/]*\)/.*|\1|p' | sort -u)"}; do
+        [ -n "$h" ] && is_our_server_dir "$h" && return 0
+    done
     return 1
 }
 
@@ -618,7 +675,7 @@ live_server_dirs() {
 # Prints "pid<TAB>state<TAB>command" for every Wine process found anywhere, with
 # state being "orphan" or "live".
 wine_leftovers() {
-    local live pid ppid cmd cwd held h state
+    local live pid ppid cmd cwd held h state; local -a ours
     live="$(live_server_dirs)"
     ps -Ao pid=,ppid=,command= 2>/dev/null | while read -r pid ppid cmd; do
         is_wine_command "$cmd" || continue
@@ -627,6 +684,11 @@ wine_leftovers() {
         # server-* directory name is what gets compared, never the full path.
         held="$(/usr/sbin/lsof -p "$pid" -F n 2>/dev/null \
                 | sed -n 's|^n.*/\.wine-[^/]*/\(server-[^/]*\)/.*|\1|p' | sort -u)"
+        ours=()
+        for h in ${(f)held}; do
+            [ -n "$h" ] && is_our_server_dir "$h" && ours+=( "$h" )
+        done
+        held="${(F)ours}"
         # Inside a bottle, or holding a server directory -- otherwise not ours.
         if [ "$cwd" != "$BOTTLE_DIR" ] && [ "${cwd#"$BOTTLE_DIR"/}" = "$cwd" ] && [ -z "$held" ]; then
             continue
@@ -640,13 +702,90 @@ wine_leftovers() {
     return 0
 }
 
-# The two games and the Aurora programs that go with them, by name: fifa17.exe
-# and fifa15.exe, Aurora17Connector/Server, Aurora15Connector/Client. A Wine
-# process shows its Windows command line to ps, so the name is on it.
+# The games and Aurora programs, by name: fifa17/15.exe,
+# Aurora17/15 Connector/Client/Server/Launcher. A Wine process shows its
+# Windows command line to ps, so the name is on it -- including the
+# winewrapper.exe lines that start a connector from a .lnk (those contain no
+# .exe, only "Aurora15Connector-2.lnk", so matching .exe alone misses the
+# wrapper and leaves a PPID-1 stray behind).
 game_leftovers() {
+    local p
+    for p in ${(f)"$(ps -Ao pid=,command= 2>/dev/null \
+        | grep -Ei '(fifa1[57]|Aurora1[57](Connector|Client|Server|Launcher))' \
+        | grep -v grep | grep -v 'setup\.sh' | awk '{print $1}')"}; do
+        [ -n "$p" ] || continue
+        wine_owned_pid "$p" && print -r -- "$p"
+    done
+    return 0
+}
+
+# Every wineserver process, by path. The binary lives at
+# <app>/Contents/SharedSupport/CrossOver/bin/wineserver under every copy name
+# (CrossOver, CrossOver-FIFA, CrossOver-FIFA15...), so match the path, not
+# the copy name.
+wineserver_pids() {
     ps -Ao pid=,command= 2>/dev/null \
-        | grep -Ei '(fifa1[57]\.exe|Aurora1[57](Connector|Client|Server|Launcher)[^/ ]*\.exe)' \
+        | grep -F 'SharedSupport/CrossOver' | grep -w 'wineserver' \
         | grep -v grep | awk '{print $1}'
+    return 0
+}
+
+# Ask every GUI to quit via Apple Events, then wait for it to go. Returns 0
+# when none is left, 1 when something is still alive (hung, needs Force Quit).
+quit_crossovers_gui() {
+    local waited=0 left
+    [ -z "$(crossovers_running)" ] && return 0
+    osascript -e 'tell application "System Events" to set cl to name of every process whose background only is false' 2>/dev/null | tr ',' '\n' \
+        | grep -i '^ *crossover' | while IFS= read -r app; do
+            app="$(print -r -- "$app" | sed 's/^ *//;s/ *$//')"
+            [ -n "$app" ] && osascript -e "tell application \"$app\" to quit" >/dev/null 2>&1 &
+        done || true
+    while [ "$waited" -lt 15 ]; do
+        left="$(crossovers_running)"
+        [ -z "$left" ] && return 0
+        /bin/sleep 1
+        waited=$((waited + 1))
+    done
+    [ -z "$(crossovers_running)" ]
+}
+
+# Clean per-bottle shutdown: ask each bottle's wineserver to exit (it ends its
+# clients, flushes user.reg, releases its server-* dir and its ports), then
+# fall back to signals for stragglers. Tries the TARGET copy's wineserver,
+# the source copy's, and the binary of whatever wineserver is actually
+# running, so it works whichever copy owns the session. Never touches a
+# native Mac process.
+shutdown_wineservers() {
+    local app ws tried="" b waited; local -a left
+    # -k against an idle bottle starts a wineserver just to kill it, leaving
+    # a fresh stale server-* dir behind -- so do nothing when none runs.
+    [ -n "$(wineserver_pids)" ] || [ -n "$(live_server_dirs)" ] || return 0
+    for app in "$TARGET" "$SRC" /Applications/CrossOver-FIFA.app /Applications/CrossOver.app "$HOME/Applications/CrossOver-FIFA.app"; do
+        [ -n "$app" ] || continue
+        ws="$app/Contents/SharedSupport/CrossOver/bin/wineserver"
+        case "$tried" in *"|$ws|"*) continue ;; esac
+        tried="$tried|$ws|"
+        [ -x "$ws" ] || continue
+        for b in "$BOTTLE_DIR"/*/; do
+            [ -d "$b" ] || continue
+            WINEPREFIX="${b%/}" "$ws" -k 2>/dev/null || true
+        done
+    done
+    waited=0
+    # zsh does not split a scalar on whitespace, so the pid list has to be an
+    # array: kill would otherwise be handed "111\n222" as one argument and
+    # signal nothing at all, and the escalation below would never happen.
+    while [ "$waited" -lt 10 ]; do
+        left=( ${(f)"$(wineserver_pids)"} ); left=( ${left:#} )
+        [ "${#left}" -eq 0 ] && return 0
+        [ "$waited" -eq 3 ] && kill -TERM ${left} 2>/dev/null || true
+        /bin/sleep 1
+        waited=$((waited + 1))
+    done
+    left=( ${(f)"$(wineserver_pids)"} ); left=( ${left:#} )
+    [ "${#left}" -eq 0 ] && return 0
+    kill -KILL ${left} 2>/dev/null || true
+    /bin/sleep 1
     return 0
 }
 
@@ -2727,12 +2866,340 @@ smoke_failed() {
 }
 
 # ------------------------------------------------------ --unstick, and stop
+# --------------------------------------- background cleanup (LaunchAgent)
+# A 30-second safety net so the user never runs a script: while any CrossOver
+# GUI runs it only records the time and exits; 45 s after the last GUI quits
+# it TERM/KILLs leftover Wine + Aurora processes, frees 47170-47173/3216 and
+# removes unopened server dirs. Native Mac processes are never signalled.
+# Installed under ~/Library (a stable path, not this checkout) by --agent and
+# by every successful full install; removed by ./uninstall.sh.
+CLEANUP_LABEL=com.fifa-crossover-cleanup
+CLEANUP_BASE="$HOME/Library/Application Support/FIFA-CrossOver"
+CLEANUP_HELPER="$CLEANUP_BASE/cleanup"
+CLEANUP_PLIST="$HOME/Library/LaunchAgents/$CLEANUP_LABEL.plist"
+
+write_cleanup_helper() {
+    cat > "$CLEANUP_HELPER" <<'CLEANUP_EOF'
+#!/bin/zsh
+# FIFA CrossOver auto-cleanup, run by launchd every 30 s. Fail-closed: exits
+# without touching anything while any CrossOver GUI runs, during the grace
+# period after it quits, or when anything looks ambiguous.
+set -u
+BASE="$HOME/Library/Application Support/FIFA-CrossOver"
+STATE="$BASE/last-gui-seen"
+REPORT="$BASE/last-report"
+LOG="$BASE/cleanup.log"
+LOCKD="$BASE/cleanup.lock"
+GRACE=45
+BOTTLE_DIR="${CX_BOTTLE_PATH:-$HOME/Library/Application Support/CrossOver/Bottles}"
+ALL_PORTS=47170,47171,47172,47173,3216
+
+mkdir -p "$BASE" 2>/dev/null || exit 0
+if ! mkdir "$LOCKD" 2>/dev/null; then
+    age=$(($(date +%s) - $(stat -f %m "$LOCKD" 2>/dev/null || echo 0)))
+    [ "$age" -gt 120 ] || exit 0
+    rmdir "$LOCKD" 2>/dev/null || exit 0
+    mkdir "$LOCKD" 2>/dev/null || exit 0
+fi
+trap 'rmdir "$LOCKD" 2>/dev/null' EXIT INT TERM
+
+log() {
+    print -r -- "$(date '+%F %T') $*" >>"$LOG" 2>/dev/null
+    tail -n 300 "$LOG" >"$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null || true
+}
+report_throttled() {
+    local now last=0
+    now=$(date +%s)
+    [ -f "$REPORT" ] && last="$(cat "$REPORT" 2>/dev/null || echo 0)"
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $((now - last)) -gt 3600 ] || return 1
+    print -r -- "$now" >"$REPORT" 2>/dev/null || true
+    log "$@"
+}
+
+is_crossover_bundle() {
+    local id
+    id=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null) || return 1
+    [ "$id" = "com.codeweavers.CrossOver" ]
+}
+crossovers_running() {
+    local app
+    ps -Ao command= 2>/dev/null | grep -i crossover | grep -v grep \
+        | sed -n 's|/Contents/MacOS/.*||p' | grep -E '^/.*\.app$' | sort -u \
+    | while IFS= read -r app; do
+        is_crossover_bundle "$app" && print -r -- "$app"
+    done
+    return 0
+}
+is_wine_command() {
+    case "$1" in
+        [A-Za-z]:\\*) return 0 ;;
+        *wineserver*|*winewrapper.exe*|*wine-preloader*|*wine64-preloader*) return 0 ;;
+    esac
+    return 1
+}
+
+# Wine names a prefix's server directory after the prefix's device and inode
+# in hex -- /tmp/.wine-<uid>/server-<dev>-<inode> -- so the bottles under
+# BOTTLE_DIR can be turned into the exact set of directory names that belong
+# to them. Everything else under /tmp/.wine-* is another Wine runtime's
+# (Whisky, Wineskin, a plain wine), and "no CrossOver is open" says nothing
+# about whether one of those is in the middle of a session. Those are never
+# signalled and their directories are never removed.
+our_server_dirs() {
+    local b st
+    for b in "$BOTTLE_DIR"/*(N/); do
+        st="$(stat -f '%d %i' "$b" 2>/dev/null)" || continue
+        [ -n "$st" ] || continue
+        printf 'server-%x-%x\n' ${=st}
+    done
+    return 0
+}
+is_our_server_dir() {
+    [ -n "${OUR_SERVER_DIRS:-}" ] || OUR_SERVER_DIRS="$(our_server_dirs)"
+    print -r -- "$OUR_SERVER_DIRS" | grep -qx -- "${1:t}"
+}
+
+# A name match alone is not proof of ownership: a native Mac program with
+# fifa17 or Aurora17Server on its command line -- a video open in QuickTime,
+# an editor on a log -- must never be signalled, and the background cleanup
+# signals these with nobody watching. A pid counts only if it is a Wine
+# process, works inside a bottle, or holds one of our server directories.
+wine_owned_pid() {
+    local cmd cwd h
+    cmd="$(ps -o command= -p "$1" 2>/dev/null)" || return 1
+    [ -n "$cmd" ] || return 1
+    is_wine_command "$cmd" && return 0
+    cwd="$(/usr/sbin/lsof -a -d cwd -p "$1" -F n 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    [ "$cwd" = "$BOTTLE_DIR" ] || [ "${cwd#"$BOTTLE_DIR"/}" != "$cwd" ] && return 0
+    for h in ${(f)"$(/usr/sbin/lsof -p "$1" -F n 2>/dev/null \
+            | sed -n 's|^n.*/\.wine-[^/]*/\(server-[^/]*\)/.*|\1|p' | sort -u)"}; do
+        [ -n "$h" ] && is_our_server_dir "$h" && return 0
+    done
+    return 1
+}
+live_server_dirs() {
+    local d
+    for d in /tmp/.wine-*/server-*(N/); do
+        /usr/sbin/lsof +D "$d" -F c 2>/dev/null | grep -q '^cwineserver' \
+            && print -r -- "${d%/}"
+    done
+    return 0
+}
+wine_pids() {
+    local live pid ppid cmd cwd held h; local -a ours
+    live="$(live_server_dirs)"
+    ps -Ao pid=,ppid=,command= 2>/dev/null | while read -r pid ppid cmd; do
+        is_wine_command "$cmd" || continue
+        cwd="$(/usr/sbin/lsof -a -d cwd -p "$pid" -F n 2>/dev/null | sed -n 's/^n//p' | head -1)"
+        held="$(/usr/sbin/lsof -p "$pid" -F n 2>/dev/null \
+                | sed -n 's|^n.*/\.wine-[^/]*/\(server-[^/]*\)/.*|\1|p' | sort -u)"
+        ours=()
+        for h in ${(f)held}; do
+            [ -n "$h" ] && is_our_server_dir "$h" && ours+=( "$h" )
+        done
+        held="${(F)ours}"
+        if [ "$cwd" != "$BOTTLE_DIR" ] && [ "${cwd#"$BOTTLE_DIR"/}" = "$cwd" ] && [ -z "$held" ]; then
+            case "$cmd" in *wineserver*) ;; (*) continue ;; esac
+        fi
+        print -r -- "$pid"
+    done
+    return 0
+}
+game_pids() {
+    local p
+    for p in ${(f)"$(ps -Ao pid=,command= 2>/dev/null \
+        | grep -Ei '(fifa1[57]|Aurora1[57](Connector|Client|Server|Launcher))' \
+        | grep -v grep | grep -v 'setup\.sh' | awk '{print $1}')"}; do
+        [ -n "$p" ] || continue
+        wine_owned_pid "$p" && print -r -- "$p"
+    done
+    return 0
+}
+wineserver_pids() {
+    ps -Ao pid=,command= 2>/dev/null \
+        | grep -F 'SharedSupport/CrossOver' | grep -w 'wineserver' \
+        | grep -v grep | awk '{print $1}'
+    return 0
+}
+stale_wine_sockets() {
+    local d
+    for d in /tmp/.wine-*/server-*(N/); do
+        is_our_server_dir "$d" || continue
+        [ -n "$(/usr/sbin/lsof +D "$d" -F p 2>/dev/null | grep '^p')" ] \
+            || print -r -- "$d"
+    done
+}
+require_quiet() { [ -z "$(crossovers_running)" ]; }
+kill_pids() {
+    local sig="$1"; shift
+    local waited=0 P; local -a left
+    kill "-$sig" "$@" 2>/dev/null || true
+    while [ "$waited" -lt 10 ]; do
+        left=()
+        for P in "$@"; do kill -0 "$P" 2>/dev/null && left+=( "$P" ); done
+        [ "${#left}" -eq 0 ] && return 0
+        /bin/sleep 1
+        waited=$((waited + 1))
+    done
+    left=()
+    for P in "$@"; do kill -0 "$P" 2>/dev/null && left+=( "$P" ); done
+    [ "${#left}" -eq 0 ]
+}
+
+now=$(date +%s)
+if [ -n "$(crossovers_running)" ]; then
+    print -r -- "$now" >"$STATE" 2>/dev/null || true
+    exit 0
+fi
+last=0
+[ -f "$STATE" ] && last="$(cat "$STATE" 2>/dev/null || echo 0)"
+case "$last" in ''|*[!0-9]*) last=0 ;; esac
+[ $((now - last)) -ge "$GRACE" ] || exit 0
+
+ALL=( ${(f)"$(wine_pids)"} ${(f)"$(game_pids)"} )
+ALL=( ${(u)ALL:#} )
+WS=( ${(f)"$(wineserver_pids)"} )
+WS=( ${WS:#} )
+CLIENTS=()
+for P in ${ALL}; do
+    [ -n "$P" ] || continue
+    [ "${WS[(I)$P]}" -gt 0 ] || CLIENTS+=( "$P" )
+done
+STALE=( ${(f)"$(stale_wine_sockets)"} )
+STALE=( ${STALE:#} )
+PORTS="$(/usr/sbin/lsof -nP -iTCP:$ALL_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+PORTS="${PORTS% }"
+[ "${#CLIENTS}" -gt 0 ] || [ "${#WS}" -gt 0 ] || [ "${#STALE}" -gt 0 ] || [ -n "$PORTS" ] || exit 0
+
+log "cleanup: ${#CLIENTS} client(s), ${#WS} wineserver(s), ${#STALE} stale dir(s), port holder pid(s): ${PORTS:-none}"
+if [ "${#CLIENTS}" -gt 0 ]; then
+    require_quiet || exit 0
+    kill_pids TERM ${CLIENTS} || { require_quiet || exit 0; kill_pids KILL ${CLIENTS} || log "client(s) would not close: ${CLIENTS}"; }
+fi
+if [ "${#WS}" -gt 0 ]; then
+    require_quiet || exit 0
+    kill_pids TERM ${WS} || { require_quiet || exit 0; kill_pids KILL ${WS} || log "wineserver(s) would not close: ${WS}"; }
+fi
+require_quiet || exit 0
+STALE=( ${(f)"$(stale_wine_sockets)"} )
+STALE=( ${STALE:#} )
+for D in ${STALE}; do rm -rf "$D" 2>/dev/null || true; done
+[ "${#STALE}" -gt 0 ] && log "removed ${#STALE} stale wineserver director$([ ${#STALE} -eq 1 ] && print -n y || print -n ies)"
+LEFTPORTS="$(/usr/sbin/lsof -nP -iTCP:$ALL_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+LEFTPORTS="${LEFTPORTS% }"
+if [ -n "$LEFTPORTS" ]; then
+    for P in ${(f)"$(print -r -- "$LEFTPORTS" | tr ' ' '\n')"}; do
+        [ -n "$P" ] || continue
+        require_quiet || exit 0
+        C="$(ps -o command= -p "$P" 2>/dev/null)"
+        if is_wine_command "$C"; then
+            kill -9 "$P" 2>/dev/null || true
+            log "freed port holder $P (${C[1,80]})"
+        else
+            report_throttled "native holder on Aurora ports left alone: $P ${C[1,80]}" || true
+        fi
+    done
+fi
+DONE_PORTS="$(/usr/sbin/lsof -nP -iTCP:$ALL_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+[ -z "${DONE_PORTS% }" ] && log "ports free: $ALL_PORTS"
+exit 0
+CLEANUP_EOF
+    chmod +x "$CLEANUP_HELPER" 2>/dev/null || return 1
+    zsh -n "$CLEANUP_HELPER" 2>/dev/null || return 1
+}
+
+write_cleanup_plist() {
+    {
+        print -r -- '<?xml version="1.0" encoding="UTF-8"?>'
+        print -r -- '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+        print -r -- '<plist version="1.0"><dict>'
+        print -r -- "<key>Label</key><string>$CLEANUP_LABEL</string>"
+        print -r -- '<key>ProgramArguments</key><array>'
+        print -r -- '<string>/bin/zsh</string>'
+        print -r -- "<string>$CLEANUP_HELPER</string>"
+        print -r -- '</array>'
+        print -r -- '<key>StartInterval</key><integer>30</integer>'
+        print -r -- '<key>ProcessType</key><string>Background</string>'
+        print -r -- '<key>LimitLoadToSessionType</key><string>Aqua</string>'
+        print -r -- '</dict></plist>'
+    } > "$CLEANUP_PLIST" || return 1
+    plutil -lint "$CLEANUP_PLIST" >/dev/null 2>&1 || return 1
+}
+
+install_cleanup_agent() {
+    mkdir -p "$CLEANUP_BASE" "$CLEANUP_PLIST:h" 2>/dev/null || {
+        note "could not create the background-cleanup folders; skipping it"
+        return 1
+    }
+    write_cleanup_helper || {
+        note "could not write the background-cleanup helper; skipping it"
+        return 1
+    }
+    write_cleanup_plist || {
+        note "could not write the background-cleanup timer; skipping it"
+        return 1
+    }
+    launchctl bootout "gui/$UID/$CLEANUP_LABEL" 2>/dev/null || true
+    if launchctl bootstrap "gui/$UID" "$CLEANUP_PLIST" 2>/dev/null; then
+        ok "background cleanup on: strays + held ports clear by themselves"
+        say "        log at ${CLEANUP_BASE:t}/cleanup.log; remove with ./uninstall.sh"
+    else
+        note "could not start the background cleanup; run ./setup.sh --agent again"
+        return 1
+    fi
+}
+
+if [ "$MODE" = agent ]; then
+    say ""
+    say "Installing the background cleanup"
+    say ""
+    install_cleanup_agent || exit $E_PERMISSION
+    say ""
+    exit 0
+fi
+
 # Frees a bottle whose Wine session outlived its wineserver -- see the comment
 # on prefix_holders for what that state is and how it looks from outside. One
 # rule makes this safe to do bluntly: with every CrossOver quit, anything still
 # inside the prefix is by definition an orphan, because nothing is left that
 # could legitimately be using it.
-if [ "$MODE" = unstick ]; then
+if [ "$MODE" = unstick ] || [ "$MODE" = shutdown ]; then
+if [ "$MODE" = shutdown ]; then
+    say ""
+    say "Quitting CrossOver cleanly (games first, then wineservers, then the GUI)"
+    say ""
+    GAMESHUT=( ${(f)"$(game_leftovers)"} )
+    GAMESHUT=( ${GAMESHUT:#} )
+    if [ "${#GAMESHUT}" -gt 0 ]; then
+        say "  stopping ${#GAMESHUT} game/Aurora process(es) first:"
+        ps -o pid=,etime=,command= -p "${(j:,:)GAMESHUT}" 2>/dev/null | sed 's/^/        /' || true
+        kill -TERM ${GAMESHUT} 2>/dev/null || true
+        WAITED=0
+        while [ "$WAITED" -lt 10 ]; do
+            LEFT=()
+            for P in ${GAMESHUT}; do kill -0 "$P" 2>/dev/null && LEFT+=( "$P" ); done
+            [ "${#LEFT}" -eq 0 ] && break
+            /bin/sleep 1
+            WAITED=$((WAITED + 1))
+        done
+    fi
+    say "  asking each bottle's wineserver to exit (flushes the registry):"
+    shutdown_wineservers
+    if ! quit_crossovers_gui; then
+        RUNNING="$(crossovers_running)"
+        say "  CrossOver is still open:"
+        print -r -- "$RUNNING" | sed 's/^/        /'
+        die $E_PERMISSION "CrossOver would not quit. Force Quit it: Apple menu >
+         Force Quit, or hold Option and right-click its Dock icon -- then run
+         ./setup.sh --unstick. Nothing has been killed yet."
+    fi
+    ok "CrossOver has quit"
+    say ""
+    say "Freeing every CrossOver bottle"
+    say ""
+    ok "no CrossOver is running"
+else
     say ""
     say "Freeing every CrossOver bottle"
     say ""
@@ -2743,10 +3210,17 @@ if [ "$MODE" = unstick ]; then
         die $E_PERMISSION "Quit CrossOver completely -- Command-Q, not just closing the
          window -- and run this again. If it is not responding (a bottle that
          spins and a window that will not close), Force Quit it: Apple menu >
-         Force Quit, or hold Option and right-click its Dock icon.
+         Force Quit, or hold Option and right-click its Dock icon. Or run
+         ./setup.sh --shutdown and this quits it for you.
          Nothing has been touched."
     fi
     ok "no CrossOver is running"
+    # No GUI owns any session now, but an orphaned wineserver still holds its
+    # server-* dir, which keeps every client looking "live" (and holding
+    # 47170-47173/3216) forever. Shut the wineservers down first so the scan
+    # below sees the truth. Registry is flushed by the -k request itself.
+    shutdown_wineservers
+fi
 
     FOUND=( ${(f)"$(wine_leftovers)"} )
     FOUND=( ${FOUND:#} )
@@ -2769,7 +3243,7 @@ if [ "$MODE" = unstick ]; then
         [ "${HOLDING[(I)$P]}" -gt 0 ] || HOLDING+=( "$P" )
     done
     if [ "${#LIVE}" -gt 0 ]; then
-        say "  ${#LIVE} process(es) belong to a Wine session that is still running -- left alone:"
+        say "  ${#LIVE} process(es) were attached to a wineserver -- shutting those down below:"
         for L in ${LIVE}; do
             print -r -- "        ${${(s:	:)L}[1]}  ${${(s:	:)L}[3]}"
         done
@@ -2844,6 +3318,72 @@ if [ "$MODE" = unstick ]; then
         ok "freed the Aurora ports 47170-47173 and 3216 (terminated PID: ${PORT_KILL})"
     else
         ok "no lingering processes on the Aurora ports (47170-47173, 3216)"
+    fi
+
+    # Second pass: whatever the graceful shutdown left -- a wineserver that
+    # ignored -k, clients that outlived it, a game that lost its server dir
+    # (FIFA frozen at the flag) still sitting on 3216. No GUI is running, so
+    # by the rule above every remaining Wine process is an orphan, live or
+    # not. Native Mac processes on the ports are still never touched.
+    REMAIN=( ${(f)"$(wine_leftovers)"} )
+    REMAIN=( ${REMAIN:#} )
+    for P in ${(f)"$(game_leftovers)"}; do
+        [ -n "$P" ] || continue
+        print -r -- "${(F)REMAIN}" | grep -q "^${P}[[:space:]]" && continue
+        REMAIN+=( "${P}"$'\t'"orphan"$'\t'"$(ps -o command= -p "$P" 2>/dev/null)" )
+    done
+    for P in ${(f)"$(wineserver_pids)"}; do
+        [ -n "$P" ] || continue
+        print -r -- "${(F)REMAIN}" | grep -q "^${P}[[:space:]]" && continue
+        REMAIN+=( "${P}"$'\t'"orphan"$'\t'"$(ps -o command= -p "$P" 2>/dev/null)" )
+    done
+    if [ "${#REMAIN}" -gt 0 ]; then
+        RMPIDS=()
+        for L in ${REMAIN}; do RMPIDS+=( "${${(s:	:)L}[1]}" ); done
+        say "  ${#RMPIDS} leftover process(es) after the clean shutdown:"
+        ps -o pid=,etime=,command= -p "${(j:,:)RMPIDS}" 2>/dev/null | sed 's/^/        /' || true
+        kill -TERM ${RMPIDS} 2>/dev/null || true
+        WAITED=0
+        while [ "$WAITED" -lt 10 ]; do
+            LEFT=()
+            for P in ${RMPIDS}; do kill -0 "$P" 2>/dev/null && LEFT+=( "$P" ); done
+            [ "${#LEFT}" -eq 0 ] && break
+            /bin/sleep 1
+            WAITED=$((WAITED + 1))
+        done
+        [ "${#LEFT}" -eq 0 ] || kill -KILL ${LEFT} 2>/dev/null || true
+        /bin/sleep 1
+        LEFT=()
+        for P in ${RMPIDS}; do kill -0 "$P" 2>/dev/null && LEFT+=( "$P" ); done
+        [ "${#LEFT}" -eq 0 ] \
+            && ok "cleared ${#RMPIDS} process(es)" \
+            || die $E_PERMISSION "${#LEFT} process(es) would not close. Restart the Mac and
+         run this again -- nothing else here can free the bottle."
+        STALE2=( ${(f)"$(stale_wine_sockets)"} )
+        STALE2=( ${STALE2:#} )
+        for D in ${STALE2}; do rm -rf "$D" 2>/dev/null || true; done
+        [ "${#STALE2}" -gt 0 ] && ok "removed ${#STALE2} abandoned wineserver director$([ ${#STALE2} -eq 1 ] && print -n y || print -n ies) freed by the second pass"
+    fi
+    FINALPORTS="$(/usr/sbin/lsof -nP -iTCP:$ALL_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+    FINALPORTS="${FINALPORTS% }"
+    if [ -n "$FINALPORTS" ]; then
+        STILLWINE=(); STILLOTHER=()
+        for P in ${(f)"$(print -r -- "$FINALPORTS" | tr ' ' '\n')"}; do
+            [ -n "$P" ] || continue
+            C="$(ps -o command= -p "$P" 2>/dev/null)"
+            if is_wine_command "$C"; then STILLWINE+=( "$P" ); else STILLOTHER+=( "$P  ${C[1,70]}" ); fi
+        done
+        [ "${#STILLWINE}" -gt 0 ] && kill -9 ${STILLWINE} 2>/dev/null || true
+        LEFT2="$(/usr/sbin/lsof -nP -iTCP:$ALL_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+        if [ -z "${LEFT2% }" ]; then
+            ok "all Aurora ports ($ALL_PORTS) are free"
+        else
+            say "  still held after everything Wine was killed: $LEFT2"
+            for C in ${STILLOTHER}; do print -r -- "        $C"; done
+            say "        A native Mac program holds it -- quit that program itself."
+        fi
+    else
+        ok "all Aurora ports ($ALL_PORTS) are free"
     fi
 
     say ""
@@ -3396,6 +3936,12 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
         say "          run the same bottle in both at once."
     fi
     say ""
+    install_cleanup_agent || note "continuing without the background cleanup (./setup.sh --agent retries it)"
+    say ""
+    say "To quit when you stop playing:    double-click Stop.command"
+    say "                                  (or ./setup.sh --shutdown -- closing"
+    say "                                  CrossOver's window leaves FIFA and Aurora"
+    say "                                  running and the ports held)"
     say "To check an install at any time:  ./setup.sh --verify"
     say "If anything goes wrong:           ./setup.sh --bundle   (then send the zip)"
     say "To undo everything:               ./uninstall.sh"
