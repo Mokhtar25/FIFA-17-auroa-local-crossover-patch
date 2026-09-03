@@ -12,7 +12,17 @@ CrossOver and all your other bottles are never touched.
 - **CrossOver 26.3** exactly. Other versions are refused.
 - Apple's command line tools. In Terminal: `xcode-select --install`
 - Your own copy of FIFA 17
-- Your own copy of Aurora17, in a bottle called `Aurora17` (not needed for offline play)
+- Your own copy of Aurora17 (not needed for offline play)
+
+## Before you install
+
+1. Put the **FIFA 17** folder and the **Aurora17** folder in your Downloads folder.
+2. In CrossOver, make a new bottle: **+** → **Windows 10 64-bit** → name it exactly `Aurora17`.
+3. Aurora17 only: select the bottle, choose **Run Command**, browse to
+   `Aurora17Connector.exe`, and tick the box to save it as a launcher.
+4. Quit CrossOver with **⌘Q**.
+
+The installer stops if the bottle is not there. SETUP.md explains each step.
 
 ## Install
 
