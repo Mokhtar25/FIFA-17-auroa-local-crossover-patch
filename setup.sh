@@ -26,6 +26,8 @@
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
 #   ./setup.sh --play-offline             start FIFA 17 with no Aurora17 running
+#   ./setup.sh --offline-menu             (re)add the FIFA 17 (offline) entry to the
+#                                         bottle, e.g. after moving the game folder
 #   ./setup.sh --offline                  install FIFA 17 with no Aurora17 at all:
 #                                         the CrossOver copy, the fixes and the
 #                                         bottle settings only. Kick-off, career
@@ -60,6 +62,7 @@ case "${1:-}" in
     --smoke) MODE=smoke; shift ;;
     --offline) MODE=install; NO_AURORA=1; shift ;;
     --play-offline) MODE=play-offline; shift ;;
+    --offline-menu) MODE=offline-menu; shift ;;
     --help|-h)
         sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
@@ -1357,6 +1360,63 @@ seed_bottle_licence() {
     return 1
 }
 
+# The bottle menu entry an offline install adds, so the game can be started the
+# way everything else in CrossOver is: open the copy, click the entry. The GUI
+# is what an offline session otherwise lacks -- started this way there is a
+# CrossOver window running, so the background cleanup stands down on its own
+# and no session-hold file is involved.
+#
+# It is a "raw" menu, not a Windows .lnk: the game folder is outside the bottle
+# and _fifa17.exe has no shortcut of its own, so there is nothing to point a
+# .lnk at. The command is the same one --play-offline runs, plus
+# --wait-children so CrossOver sees the session end when the game closes.
+MENU_OFFLINE="StartMenu/FIFA 17 (offline)"
+
+install_offline_menu() {
+    local app="$1" cxm="$1/Contents/SharedSupport/CrossOver/bin/cxmenu" gdir gwin cmd
+    say ""
+    say "10. Adding a FIFA 17 (offline) entry to the $BOTTLE bottle"
+    if [ ! -x "$cxm" ]; then
+        note "$app has no cxmenu tool, so the entry cannot be added."
+        say "        Play with  PLAY FIFA 17 offline.command  instead."
+        return 1
+    fi
+    gdir="$(game_dir_find 2>/dev/null || true)"
+    # game_dir_find can answer through the bottle's own dosdevices link
+    # (.../Bottles/Aurora17/dosdevices/y:/Downloads/FIFA 17). Wine resolves
+    # that, but mapping it back to a drive letter gives a path that walks
+    # through the bottle to get outside it. Resolve the links first.
+    [ -n "$gdir" ] && gdir="${gdir:A}"
+    if [ -z "$gdir" ]; then
+        note "no FIFA 17 folder with _fifa17.exe in it was found, so there is"
+        say "        nothing to point the entry at. For a game kept elsewhere:"
+        say "        AURORA_GAME_DIR='/path/to/FIFA 17' ./setup.sh --offline"
+        return 1
+    fi
+    gwin="$(unix_path_to_win "$gdir" 2>/dev/null || true)"
+    if [ -z "$gwin" ]; then
+        note "the $BOTTLE bottle has no drive letter for $gdir,"
+        say "        so the entry cannot be made. Play with"
+        say "        PLAY FIFA 17 offline.command  instead."
+        return 1
+    fi
+    cmd="\"$app/Contents/SharedSupport/CrossOver/bin/wine\" --bottle \"$BOTTLE\" --wait-children --workdir \"$gdir\" --cx-app \"$gwin\\_fifa17.exe\""
+    # Replace any entry from a previous run: the game folder may have moved,
+    # and an entry pointing at where it used to be fails with nothing on screen.
+    "$cxm" --bottle "$BOTTLE" --uninstall --uninstall-filter "$MENU_OFFLINE" \
+           --delete --delete-filter "$MENU_OFFLINE" >/dev/null 2>&1 || true
+    if "$cxm" --bottle "$BOTTLE" --create "$MENU_OFFLINE" --type raw \
+              --description "FIFA 17 single player, no Aurora17" \
+              --command "$cmd" --install >/dev/null 2>&1; then
+        ok "FIFA 17 (offline) — open ${app:t:r}, pick the $BOTTLE bottle, click it"
+        say "        it runs _fifa17.exe in $gdir"
+        return 0
+    fi
+    note "cxmenu would not add the entry. Play with"
+    say "        PLAY FIFA 17 offline.command  instead."
+    return 1
+}
+
 # The Aurora17 folder, by override or by the three places it is normally put.
 aurora_dir_find() {
     local d
@@ -2242,6 +2302,7 @@ configure_bottle() {
             say "        for you. Start FIFA 17 once from CrossOver, let it reach the"
             say "        menu, then run this again to check."
         fi
+        install_offline_menu "$APP" || true
         return 0
     fi
 
@@ -3217,6 +3278,14 @@ fi
 # seed_bottle_licence does to write the licence file, and what Aurora's PLAY
 # ends up doing after its own work. Nothing here listens on a port or talks to
 # EA, so single player is all of it.
+if [ "$MODE" = offline-menu ]; then
+    [ -d "$TARGET" ] || die $E_INCOMPLETE "There is no $TARGET yet.
+         Run  ./setup.sh --offline  first."
+    install_offline_menu "$TARGET" || exit $E_INCOMPLETE
+    say ""
+    exit 0
+fi
+
 if [ "$MODE" = play-offline ]; then
     say ""
     say "Starting FIFA 17 (offline)"
@@ -3228,6 +3297,8 @@ if [ "$MODE" = play-offline ]; then
          $BOTTLE_DIR
          For another name:  AURORA_BOTTLE='name' ./setup.sh --play-offline"
     GDIR="$(game_dir_find 2>/dev/null || true)"
+    # See install_offline_menu: resolve the bottle's dosdevices links first.
+    [ -n "$GDIR" ] && GDIR="${GDIR:A}"
     [ -n "$GDIR" ] || die $E_INCOMPLETE "No FIFA 17 folder with _fifa17.exe in it was found.
          For a game kept elsewhere:
            AURORA_GAME_DIR='/path/to/FIFA 17' ./setup.sh --play-offline"
@@ -3736,14 +3807,17 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
     green "Done."
     say ""
     if [ "$NO_AURORA" = 1 ]; then
-        say "To play:  double-click  PLAY FIFA 17 offline.command"
-        say "          (or run  ./setup.sh --play-offline )"
+        say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
+        say "          $BOTTLE bottle and click  FIFA 17 (offline)."
         say ""
-        say "          It starts the game's own loader in the $BOTTLE bottle through"
-        say "          ${TARGET:t}. Kick-off, career, tournaments and skill games"
-        say "          all work. Online, FUT and anything that needs an EA account"
-        say "          do not: nothing here talks to EA. Adding Aurora17 later is"
-        say "          just  ./setup.sh  with no flag."
+        say "          Or, without opening CrossOver at all, double-click"
+        say "          PLAY FIFA 17 offline.command  (./setup.sh --play-offline)."
+        say ""
+        say "          Both run the game's own loader, _fifa17.exe. Kick-off,"
+        say "          career, tournaments and skill games all work. Online, FUT"
+        say "          and anything that needs an EA account do not: nothing here"
+        say "          talks to EA. Adding Aurora17 later is just  ./setup.sh"
+        say "          with no flag."
     elif [ "$IN_PLACE" = "1" ]; then
         say "To play:  open CrossOver, then open Aurora17 in the $BOTTLE bottle"
         say "          and press PLAY FIFA 17."
