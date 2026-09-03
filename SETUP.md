@@ -37,8 +37,7 @@ Read the first three in order. The rest is there when you need it.
    [the first thing to check](#the-first-thing-to-check); every error I have
    seen is below it, with what causes it
 7. [Why the version matters](#why-the-version-matters),
-   [FIFA 15](#fifa-15--experimental), [undoing it](#undoing-it),
-   [what is in here](#what-is-actually-in-here)
+   [undoing it](#undoing-it), [what is in here](#what-is-actually-in-here)
 
 ---
 
