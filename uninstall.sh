@@ -301,6 +301,24 @@ if [ -f "$BHOSTS.bak-aurora17" ]; then
     undone=$((undone+1))
 fi
 
+# --------------------------------------- background cleanup (LaunchAgent)
+# setup.sh --agent (and every successful full install) puts a timer here that
+# clears strays by itself. Unload it first so no run fires mid-removal, then
+# remove the timer, the helper and its state. The log goes too: uninstall
+# means everything we installed is gone.
+say ""
+if [ -f "$HOME/Library/LaunchAgents/com.fifa-crossover-cleanup.plist" ]; then
+    launchctl bootout "gui/$UID/com.fifa-crossover-cleanup" 2>/dev/null || true
+    rm -f "$HOME/Library/LaunchAgents/com.fifa-crossover-cleanup.plist"
+    ok "unloaded the background cleanup timer"
+    undone=$((undone+1))
+fi
+if [ -d "$HOME/Library/Application Support/FIFA-CrossOver" ]; then
+    rm -rf "$HOME/Library/Application Support/FIFA-CrossOver"
+    ok "removed the background cleanup helper and its log"
+    undone=$((undone+1))
+fi
+
 # ------------------------------------------------------------- the receipt
 if [ -f "$RECEIPT" ]; then
     rm -f "$RECEIPT"
