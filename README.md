@@ -92,7 +92,7 @@ one file it put in your Aurora17 folder. Your own CrossOver was never changed.
 | `Stop.command` | quit game, Aurora and CrossOver cleanly |
 | `Diagnostics.command` | collect the logs for a bug report |
 | `Uninstall.command` | undo everything |
-| `diagnostics/` | one `.command` per check and repair, and where their zips and reports are written |
+| `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh` | what the .command files run |
 | `fixes/` | the files that go into the CrossOver copy, with source and checksums |
 | `aurora17/` | the PowerShell stand-in and certificate Aurora needs |

@@ -128,6 +128,7 @@ FILES=(
   x86_64-windows/version.dll
   x86_64-windows/crypt32.dll
   x86_64-windows/secur32.dll
+  x86_64-windows/gdiplus.dll     # FIFA 15 profile only; restored when a backup exists
 )
 
 say ""

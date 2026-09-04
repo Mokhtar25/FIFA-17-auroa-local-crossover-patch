@@ -32,7 +32,8 @@ Everything is written here, beside these commands:
 The three newest zips are kept and older ones are deleted, so running a command
 after every failed attempt does not fill this folder up.
 
-The zip holds the checks, the newest connector/server/client logs, the bottle's
+The zip holds the checks, every connector log (one per PLAY, with that launch's
+error code) and the newest server and client logs, the bottle's
 hosts file and settings, and the hashes of what is installed. The logs are the
 `logs` folder inside it — double-click the zip to open it if you want to read
 them yourself. It holds no
