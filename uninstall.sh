@@ -9,6 +9,22 @@
 # Bottle settings are left alone -- they are harmless without the fixes, and
 # removing them by script risks damaging the file.
 
+# Run under zsh whatever it was started with. Every line below is zsh, and the
+# very next one -- HERE="${0:A:h}" -- is the trap: bash and sh read ${0:A:h} as
+# their own ${var:offset:length}, evaluate the offset "A" as arithmetic, and
+# with set -u stop at "A: unbound variable". That names a variable this script
+# does not have, on a line that looks innocent, so "bash setup.sh" or
+# "sh setup.sh" failed with a message nobody could act on. Re-exec instead.
+# This block is plain POSIX so bash and sh get here before parsing any zsh.
+if [ -z "${ZSH_VERSION:-}" ]; then
+    if [ -x /bin/zsh ]; then
+        exec /bin/zsh "$0" "$@"
+    fi
+    printf '%s\n' "This needs zsh, which every Mac has at /bin/zsh, and it is missing." >&2
+    printf '%s\n' "Nothing has been changed." >&2
+    exit 2
+fi
+
 set -eu
 HERE="${0:A:h}"
 

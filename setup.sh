@@ -22,7 +22,8 @@
 #   ./setup.sh --agent                    install the background cleanup (LaunchAgent):
 #                                         clears strays + held ports by itself every
 #                                         30 s, so no script ever needs running
-#   ./setup.sh --bundle                   zip up everything a bug report needs
+#   ./setup.sh --bundle                   zip up everything a bug report needs,
+#                                         into the diagnostics folder beside this
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
 #   ./setup.sh --play-offline             start FIFA 17 with no Aurora17 running
@@ -44,8 +45,29 @@
 #              1 is not a designed outcome: it means a stop nobody gave a code
 #              to, and is worth reporting as a bug in this script.
 
+# Run under zsh whatever it was started with. Every line below is zsh, and the
+# very next one -- HERE="${0:A:h}" -- is the trap: bash and sh read ${0:A:h} as
+# their own ${var:offset:length}, evaluate the offset "A" as arithmetic, and
+# with set -u stop at "A: unbound variable". That names a variable this script
+# does not have, on a line that looks innocent, so "bash setup.sh" or
+# "sh setup.sh" failed with a message nobody could act on. Re-exec instead.
+# This block is plain POSIX so bash and sh get here before parsing any zsh.
+if [ -z "${ZSH_VERSION:-}" ]; then
+    if [ -x /bin/zsh ]; then
+        exec /bin/zsh "$0" "$@"
+    fi
+    printf '%s\n' "This needs zsh, which every Mac has at /bin/zsh, and it is missing." >&2
+    printf '%s\n' "Nothing has been changed." >&2
+    exit 2
+fi
+
 set -eu
 HERE="${0:A:h}"
+# This script's own path, taken here and not where it is used: inside a zsh
+# function $0 is the function's name, so ${0:A} read from one names the
+# function rather than the file. guard_menu_shims writes this into the
+# bottle's shortcuts, where getting it wrong is silent.
+SELF="${0:A}"
 
 E_UNSUPPORTED=2
 E_PERMISSION=3
@@ -68,6 +90,7 @@ case "${1:-}" in
     --offline) MODE=install; NO_AURORA=1; shift ;;
     --play-offline) MODE=play-offline; shift ;;
     --offline-menu) MODE=offline-menu; shift ;;
+    --ensure-licence|--ensure-license) MODE=ensure-licence; shift ;;
     --fifa15)
         # One command for FIFA 15. The same as AURORA_GAME=fifa15 with the
         # mode picked below from what is already there; a mode after it
@@ -435,6 +458,15 @@ case "$GAME" in
     fifa17|fifa15) ;;
     *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17 or fifa15)"; exit $E_UNSUPPORTED ;;
 esac
+# The scripts are the same on both branches of the repository; the FIFA 15
+# files (fifa15/, the gdiplus fix and its patch) ship on the fifa15 branch
+# only. Say so rather than run the FIFA 15 profile with half of it missing.
+if [ "$GAME" = fifa15 ] && [ ! -d "$HERE/fifa15" ]; then
+    print -r -- "This is the FIFA 17 package: the FIFA 15 files (fifa15/, fixes/x86_64-windows/gdiplus.dll)"
+    print -r -- "are not in it. FIFA 15 ships on the fifa15 branch of the same repository:"
+    print -r -- "    git clone -b fifa15 https://github.com/Mokhtar25/FIFA-17-auroa-local-crossover-patch"
+    exit $E_UNSUPPORTED
+fi
 if [ "$GAME" = fifa15 ]; then
     BOTTLE="${AURORA_BOTTLE:-Aurora15}"
     # Aurora15Connector (.NET) dies at exit in Wine's GdipDeletePrivateFontCollection:
@@ -1344,6 +1376,70 @@ repoint_menu_shims() {
     print -r -- "$n"
 }
 
+# ------------------------------------------- the licence guard on the shims
+# The two shortcuts CrossOver shows for the game itself -- _fifa17.lnk and
+# FIFA17.lnk -- start the loader directly, without Aurora and without this
+# script. That is a perfectly good way to play single player, and it is the
+# obvious thing to click in CrossOver's bottle window, so people do. It is
+# also the one launch path with no §18 guard on it: Aurora's PLAY seeds the
+# licence itself (ensure_licence in aurora17/aurora-pwsh.c) and --play-offline
+# now does too, but a click here went straight to the loader. Remake the
+# bottle in CrossOver after installing and that click is a launch into the
+# 0xFFFFFFFA failure with nothing on screen to say why.
+#
+# A cxmenu shim is a two-line /bin/sh script, so the guard is a line in front
+# of its exec. It is deliberately toothless: output discarded, always true, so
+# a moved or deleted release folder costs the shim nothing and the game starts
+# exactly as it does today. --ensure-licence returns in milliseconds when the
+# file is already there, which is every click after the first.
+GUARD_MARK='# aurora17-licence-guard'
+
+guard_menu_shims() {
+    local self="$1" app="$2" f n=0 tmp line
+    # The bottle and the app are named outright rather than left to the
+    # defaults: this shim belongs to one bottle, and someone running with
+    # AURORA_BOTTLE set has a shim per bottle, each of which must top up its
+    # own. A shim that seeded the default bottle instead would report success
+    # having done nothing for the game about to start.
+    line="AURORA_BOTTLE=\"$BOTTLE\" AURORA_TARGET=\"$app\" \"$self\" --ensure-licence >/dev/null 2>&1 || true"
+    for f in ${(f)"$(menu_shims)"}; do
+        [ -n "$f" ] || continue
+        # Only the game's own shortcuts. Aurora17Connector.lnk is left alone:
+        # it seeds the licence on PLAY by itself, and it is not the loader.
+        grep -qi '[/\\]_\{0,1\}fifa17\.lnk' "$f" || continue
+        # Already guarded, by this same release folder: nothing to do.
+        if grep -q "$GUARD_MARK" "$f" && grep -qF -- "$line" "$f"; then
+            continue
+        fi
+        [ -f "$f.bak-aurora17" ] || cp -X "$f" "$f.bak-aurora17" 2>/dev/null || cp "$f" "$f.bak-aurora17" || return 1
+        tmp="$(mktemp -t a17shim)" || return 1
+        # Strip any guard from an older run (the marker and the line under it),
+        # then put the current one back in front of the exec. Writing through
+        # cat keeps the shim's own mode bits -- it has to stay executable.
+        awk -v m="$GUARD_MARK" -v g="$line" '
+            skip            { skip = 0; next }
+            $0 == m         { skip = 1; next }
+            !ins && /^exec / { print m; print g; ins = 1 }
+                            { print }
+        ' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+        grep -q "$GUARD_MARK" "$tmp" || { rm -f "$tmp"; return 1; }
+        cat "$tmp" > "$f" || { rm -f "$tmp"; return 1; }
+        rm -f "$tmp"
+        n=$((n+1))
+    done
+    print -r -- "$n"
+}
+
+# Shims that start the game with no guard on them -- what --verify reports.
+unguarded_menu_shims() {
+    local f
+    for f in ${(f)"$(menu_shims)"}; do
+        [ -n "$f" ] || continue
+        grep -qi '[/\\]_\{0,1\}fifa17\.lnk' "$f" || continue
+        grep -q "$GUARD_MARK" "$f" || print -r -- "$f"
+    done
+}
+
 # ------------------------------------------- the bottle's certificate store
 # Reported by --report only, as an observation. A fresh bottle has an empty
 # root store and a working one had 163 certificates, so the count is worth
@@ -1694,15 +1790,42 @@ aurora_dir_find() {
     return 1
 }
 
+# Whether Aurora17 has actually been used in this bottle, whatever the receipt
+# says. Either signal is written by Aurora itself and by nothing else: the
+# hosts receipt it leaves once it owns the EA mappings, and the game folder its
+# connector records on the first PLAY.
+aurora_in_use() {
+    local rc gd
+    rc="$(hosts_receipt_file 2>/dev/null || true)"
+    [ -n "$rc" ] && [ -f "$rc" ] && return 0
+    gd="$(connector_game_dir 2>/dev/null || true)"
+    [ -n "$gd" ] && return 0
+    return 1
+}
+
 verify_install() {
     local app="$1" problems=0
     # An offline install (./setup.sh --offline) has no Aurora17 by design, so
     # the checks for Aurora's stand-in, its EA names and its certificate would
     # all report BAD on a perfectly good install. The receipt says which kind
     # this was; the flag says so during the install itself.
-    local offline=0
+    local offline=0 offline_from_receipt=0
     [ "${NO_AURORA:-0}" = 1 ] && offline=1
-    [ -f "$RECEIPT" ] && grep -q '^offline=1$' "$RECEIPT" && offline=1
+    if [ "$offline" = 0 ] && [ -f "$RECEIPT" ] && grep -q '^offline=1$' "$RECEIPT"; then
+        offline=1; offline_from_receipt=1
+    fi
+    # The receipt records the last thing setup.sh was asked to do, not what the
+    # bottle is being used for. Running --offline over a bottle that already
+    # had Aurora17 in it rewrites the receipt and leaves every online piece in
+    # place and working -- and this then skipped all of them and finished with
+    # "Everything checks out", which is the worst answer a check can give.
+    # Believe the bottle over the receipt.
+    if [ "$offline_from_receipt" = 1 ] && aurora_in_use; then
+        offline=0
+        note "the receipt says this was an offline install, but Aurora17 has run"
+        say "        in the $BOTTLE bottle since, so its parts are checked below."
+        say "        To correct the receipt, re-run  ./setup.sh  without --offline."
+    fi
     say ""
     say "Checking $app"
     say ""
@@ -1781,6 +1904,26 @@ verify_install() {
                 && ok "$k" \
                 || { bad "$k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1)); }
         done
+        # Settings this script never writes. They arrive from other guides
+        # (DXVK_CONFIG_FILE, WINEMSYNC) and have turned up on every bottle
+        # that failed in a way nobody could explain. Not a BAD: none is proven
+        # to break anything. Named, so a bug report shows them.
+        local -a foreign; local fk
+        foreign=()
+        for fk in ${(f)"$(sed -n '/^\[EnvironmentVariables\]/,/^\[/p' "$conf" 2>/dev/null \
+                          | sed -n 's/^"\([A-Za-z_][A-Za-z0-9_]*\)" = .*/\1/p')"}; do
+            [ -n "$fk" ] || continue
+            case "$fk" in
+                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|WINE_COREAUDIO_EXCLUDE|PROMPT) ;;
+                *) foreign+=( "$fk" ) ;;
+            esac
+        done
+        if [ "${#foreign}" -gt 0 ]; then
+            note "the $BOTTLE bottle has settings this script never wrote: ${(j:, :)foreign}"
+            say "        They came from somewhere else. If the game fails for no reason"
+            say "        anyone can name, quit CrossOver (Command-Q) and remove them from"
+            say "        [EnvironmentVariables] in $conf"
+        fi
     else
         bad "no bottle called '$BOTTLE' at $BOTTLE_DIR"
         problems=$((problems+1))
@@ -1803,6 +1946,14 @@ verify_install() {
         say "        Quit CrossOver and check again — Wine writes its own copy of"
         say "        user.reg out as it goes, which can undo the version override"
         say "        below after this has already said ok."
+        # One rpcss.exe per Wine boot: two of them is two sessions on one
+        # prefix, the leftover of a boot that never ended (see --report).
+        local boots
+        boots="$(ps -o command= -p "${(j:,:)holding}" 2>/dev/null | grep -c 'rpcss\.exe' || true)"
+        if [ "${boots:-0}" -gt 1 ]; then
+            note "$boots Wine sessions are up on this bottle at once. One is a leftover:"
+            say "        quit CrossOver, run Stop.command, then open it again."
+        fi
     else
         bad "${#holding} process(es) are still inside the $BOTTLE bottle with"
         say "        no CrossOver running. The bottle will hang on loading until"
@@ -1886,6 +2037,24 @@ verify_install() {
         say "        servers are shut down. Re-run ./setup.sh"
         for f in $stray; do say "        ${f:t}"; done
         problems=$((problems+1))
+    fi
+
+    # See guard_menu_shims. Not a BAD: an unguarded shortcut plays perfectly
+    # well in a bottle that has its licence file, and the check just above
+    # this one is the one that decides whether the shortcut works at all.
+    # It only matters once the bottle is remade, which is exactly when nobody
+    # is reading this. A note keeps it visible without crying wolf.
+    local -a unguarded
+    unguarded=( ${(f)"$(unguarded_menu_shims)"} )
+    unguarded=( ${unguarded:#} )
+    if [ "${#unguarded}" -eq 0 ]; then
+        ok "licence guard on the bottle's game shortcuts"
+    else
+        note "${#unguarded} game shortcut(s) have no licence guard, so clicking"
+        say "        FIFA 17 in CrossOver after remaking the bottle would hit §18"
+        say "        (starts, then quits ~20s in with nothing on screen). Fix:"
+        say "        AURORA_BOTTLE='$BOTTLE' ./setup.sh --bottle"
+        for f in $unguarded; do say "        ${f:t}"; done
     fi
 
     # FIFA 15 has no PowerShell stand-in: Aurora15Connector is one program. The
@@ -2132,9 +2301,23 @@ say "====================="
 # else's Mac is one paste instead of a dozen rounds of "now run this". The rule
 # for what belongs here: anything that has ever been the answer. It changes
 # nothing, and it prints no key, token or path outside the game and the bottle.
+# Where everything a bug report needs is written: a "diagnostics" folder beside
+# this script, so the zip, the report and the copied logs sit next to the
+# commands that made them and nobody has to be told a path. The Desktop and the
+# temp folder are only fallbacks, for a package opened from a read-only volume.
+diagnostics_dir() {
+    local d
+    for d in "$HERE/diagnostics" "$HOME/Desktop/aurora17-diagnostics" \
+             "${TMPDIR:-/tmp}/aurora17-diagnostics"; do
+        mkdir -p "$d" 2>/dev/null || continue
+        if [ -w "$d" ]; then print -r -- "$d"; return 0; fi
+    done
+    print -r -- "${TMPDIR:-/tmp}"
+}
+
 report_mode() {
     local app="$1"
-    local out="${TMPDIR:-/tmp}/aurora17-report.txt"
+    local out; out="$(diagnostics_dir)/report.txt"
 
     {
         print -r -- "==== aurora17 report ===================================="
@@ -2159,6 +2342,17 @@ report_mode() {
             print -r -- "(nothing)"
         else
             ps -o pid=,etime=,command= -p "${(j:,:)hold}" 2>/dev/null || true
+            # One rpcss.exe per Wine boot. Two means two sessions on one prefix
+            # -- setup.sh's own boot never ended and CrossOver started another
+            # -- which only the etime column ever showed before.
+            local boots
+            boots="$(ps -o command= -p "${(j:,:)hold}" 2>/dev/null | grep -c 'rpcss\.exe' || true)"
+            if [ "${boots:-0}" -gt 1 ]; then
+                print -r -- ""
+                print -r -- "NOTE: $boots Wine sessions are up on this bottle at once (one rpcss.exe"
+                print -r -- "      each). One of them is a leftover. Quit CrossOver, run Stop.command,"
+                print -r -- "      then open it again."
+            fi
         fi
         print -r -- ""
 
@@ -2365,8 +2559,10 @@ bundle_mode() {
     setopt localoptions nullglob
     local app="$1"
     local stamp; stamp="$(date '+%Y%m%d-%H%M%S')"
-    local dest="$HOME/Desktop"
-    [ -d "$dest" ] || dest="${TMPDIR:-/tmp}"
+    local dest; dest="$(diagnostics_dir)"
+    # Collected in the temp folder and deleted once it is zipped: the zip is
+    # the thing that gets sent, and a second unzipped copy of it beside the
+    # commands is only something else to mistake for the one to attach.
     local work="${TMPDIR:-/tmp}/aurora17-bundle-$stamp"
     local zipf="$dest/aurora17-bundle-$stamp.zip"
 
@@ -2377,11 +2573,18 @@ bundle_mode() {
     report_mode "$app" > "$work/report.txt" 2>&1 || true
 
     local logs="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Logs"
-    local f kind
-    # The newest of each kind, not all of them: a bottle that has been played in
-    # for a week holds hundreds, and the old ones answer nothing.
+    local f kind keep
+    # Every connector log, and the newest few of the other two kinds. Aurora
+    # writes one connector log per PLAY and that is where the launcher's error
+    # codes land (ERROR [Code 25]: ...), so keeping only the newest three lost
+    # the code for most of the launches in a bundle: one bundle held 21 whole
+    # sessions in redirect-shim.log and 3 connector logs. They are 1-7 KB each.
+    # Server and client logs are the big ones and the newest answer the
+    # question; the server's stderr (server-*.log.err) is where a crash lands,
+    # and the old glob (server-*.log) never matched it.
     for kind in connector server client; do
-        for f in ${(f)"$(/bin/ls -t -- "$logs"/$kind-*.log(N) 2>/dev/null | head -3)"}; do
+        keep=8; [ "$kind" = connector ] && keep=200
+        for f in ${(f)"$(/bin/ls -t -- "$logs"/$kind-*.log "$logs"/$kind-*.log.err(N) 2>/dev/null | head -"$keep")"}; do
             [ -n "$f" ] && cp "$f" "$work/logs/" 2>/dev/null || true
         done
     done
@@ -2421,7 +2624,15 @@ bundle_mode() {
     rm -f "$zipf"
     ( cd "${work:h}" && zip -qr "$zipf" "${work:t}" ) \
         || { say "Could not write $zipf"; rm -rf "$work"; return 1 }
+
     rm -rf "$work"
+
+    # Keep the three newest zips and drop the rest, so running this after every
+    # failed attempt does not fill the folder up.
+    local old
+    for old in ${(f)"$(/bin/ls -t -- "$dest"/aurora17-bundle-*.zip(N) 2>/dev/null | tail -n +4)"}; do
+        [ -n "$old" ] && rm -f "$old"
+    done
 
     say ""
     say "Wrote $zipf"
@@ -2574,6 +2785,19 @@ configure_bottle() {
             0)    ok "the bottle's shortcuts already start ${APP:t}" ;;
             *)    ok "$REPOINTED shortcut(s) now start ${APP:t}, not your normal CrossOver"
                   say "        (the originals are kept alongside as .bak-aurora17)" ;;
+        esac
+
+        # See guard_menu_shims. After the repointing, so the guard goes into
+        # the shim that is actually going to be used.
+        GUARDED="$(guard_menu_shims "$SELF" "$APP" 2>/dev/null || print -r -- fail)"
+        case "$GUARDED" in
+            fail) note "could not add the licence guard to the bottle's shortcuts."
+                  say "        Clicking FIFA 17 in CrossOver still works, but if the bottle"
+                  say "        is ever remade, run this again before using it." ;;
+            0)    ok "the licence guard is on the bottle's game shortcuts" ;;
+            *)    ok "licence guard added to $GUARDED game shortcut(s)"
+                  say "        they now top up the licence file themselves, so remaking"
+                  say "        the bottle in CrossOver cannot bring §18 back" ;;
         esac
 
         BOTTLE_OK=1
@@ -3616,6 +3840,16 @@ if [ "$MODE" = bottle ]; then
     say "Setting up the $BOTTLE bottle for ${TARGET:t}"
     configure_bottle "$TARGET"
     [ "$GAME" = fifa15 ] && f15_check_game
+    # The bottle steps boot the prefix themselves (wineboot, the registry
+    # writes) and used to leave that wineserver running; the user then opened
+    # CrossOver, which booted a second session on the same prefix. Two sessions
+    # on one bottle is exactly what "install, then play straight away" gave
+    # every first-time user. With no CrossOver open, every wineserver alive is
+    # this script's own or an orphan, so end them and let CrossOver start clean.
+    if [ -z "$(crossovers_running)" ] && [ -n "$(wineserver_pids)" ]; then
+        shutdown_wineservers
+        ok "ended the Wine session this script started, so CrossOver opens the bottle fresh"
+    fi
     say ""
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
         if [ "$GAME" = fifa15 ]; then
@@ -3654,6 +3888,25 @@ if [ "$MODE" = offline-menu ]; then
     exit 0
 fi
 
+# ------------------------------------------------------- --ensure-licence
+# What the Start Menu shims call on every click (see guard_menu_shims). Quiet
+# and always successful by design: it runs in front of someone's launch, with
+# no terminal to print to, and a guard that could refuse to start the game
+# would be worse than the bug it exists to prevent. Everything it needs may
+# legitimately be absent -- no bottle yet, no patched CrossOver -- and in that
+# case there is nothing to seed and nothing to say.
+if [ "$MODE" = ensure-licence ]; then
+    if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
+       && [ -d "$HOME/Applications/${TARGET:t}" ]; then
+        TARGET="$HOME/Applications/${TARGET:t}"
+    fi
+    if [ -d "$BOTTLE_DIR/$BOTTLE" ] \
+       && [ -x "$TARGET/Contents/SharedSupport/CrossOver/bin/wine" ]; then
+        seed_bottle_licence "$TARGET" >/dev/null 2>&1 || true
+    fi
+    exit 0
+fi
+
 if [ "$MODE" = play-offline ]; then
     say ""
     say "Starting FIFA 17 (offline)"
@@ -3677,6 +3930,16 @@ if [ "$MODE" = play-offline ]; then
     PWINE="$TARGET/Contents/SharedSupport/CrossOver/bin/wine"
     [ -x "$PWINE" ] || die $E_PAYLOAD "$TARGET is incomplete (no wine inside it).
          Run ./setup.sh --offline again."
+    # The licence file, every time (BUGS.md §18). Step 9a puts it in the bottle
+    # at install time, but the bottle outlives the install: remaking it in
+    # CrossOver, or pointing AURORA_BOTTLE at a different one, leaves a bottle
+    # that was never seeded and the game dies 0xFFFFFFFA about twenty seconds
+    # in with nothing on screen. Aurora's PLAY has had its own guard for this
+    # since §18 was closed (ensure_licence in aurora17/aurora-pwsh.c); this is
+    # the same guard for the path that does not go through Aurora. It costs
+    # nothing when the file is there -- seed_bottle_licence returns at once --
+    # and about three seconds when it is not.
+    seed_bottle_licence "$TARGET" || true
     mkdir -p "$CLEANUP_BASE" 2>/dev/null || true
     print -r -- "$$" > "$CLEANUP_HOLD" 2>/dev/null || true
     # Closing the window (or Control-C) stops the game this started, which is
@@ -4256,7 +4519,11 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
     say "                                  CrossOver's window leaves FIFA and Aurora"
     say "                                  running and the ports held)"
     say "To check an install at any time:  ./setup.sh --verify"
-    say "If anything goes wrong:           ./setup.sh --bundle   (then send the zip)"
+    say "If anything goes wrong:           double-click Diagnostics.command, or run"
+    say "                                  ./setup.sh --bundle, then send the zip it"
+    say "                                  writes into the diagnostics folder. Every"
+    say "                                  other check and repair is a double-click in"
+    say "                                  that folder: see diagnostics/README.md."
     say "To undo everything:               ./uninstall.sh"
     say ""
     exit 0
