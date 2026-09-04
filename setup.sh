@@ -571,6 +571,15 @@ stale_wine_sockets() {
 # ports 47170-47173/3216 and the bottle lock, so --unstick shuts the
 # wineservers down first and then treats the rest as orphans. A native Mac
 # program on one of the ports is still never signalled.
+#
+# Every port an Aurora holds: 47170-47173 are FIFA 17's, 3216 is FIFA 15's.
+# --unstick and --shutdown free both, since they free every bottle. This lives
+# out here and not only inside the cleanup helper written further down: that
+# copy is inside a quoted heredoc, so it never defines anything for this
+# script, and the last checks of --unstick read $ALL_PORTS and stopped with
+# "ALL_PORTS: parameter not set" after having already done all the work.
+ALL_PORTS=47170,47171,47172,47173,3216
+
 is_wine_command() {
     case "$1" in
         [A-Za-z]:\\*) return 0 ;;
