@@ -1,2 +1,4 @@
 .DS_Store
 *.orig
+diagnostics/aurora17-bundle-*.zip
+diagnostics/report.txt

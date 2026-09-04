@@ -234,16 +234,22 @@ to two minutes it prints one of:
 | `INCONCLUSIVE` | the game exited cleanly before a session was issued. Normal if you closed it yourself |
 | `nothing launched` | PLAY was never pressed |
 
-**4. Asking someone for help?** Send the bundle, not a description:
+**4. Asking someone for help?** Send the bundle, not a description. Either
+double-click **Diagnostics.command**, or:
 
 ```sh
 ./setup.sh --bundle
 ```
 
-It writes `aurora17-bundle-<date>.zip` to your Desktop with the report, the
-Aurora logs, the bottle's hosts file and settings, and the checksums. It
-contains no account, password or session token. `./setup.sh --report` prints
-the same diagnosis without the logs.
+It writes `aurora17-bundle-<date>.zip` into the **diagnostics** folder beside
+`setup.sh`, with the report, the Aurora logs, the bottle's hosts file and
+settings, and the checksums. It contains no account, password or session
+token. `./setup.sh --report` prints the same diagnosis without the logs and
+saves it as `diagnostics/report.txt`.
+
+Every other check and repair is a double-click in that folder too — one
+`.command` file each, listed in `diagnostics/README.md`. Nothing there needs
+Terminal.
 
 ### CrossOver GUI never finishes loading the bottle
 

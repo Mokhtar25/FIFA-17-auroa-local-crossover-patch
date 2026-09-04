@@ -22,7 +22,8 @@
 #   ./setup.sh --agent                    install the background cleanup (LaunchAgent):
 #                                         clears strays + held ports by itself every
 #                                         30 s, so no script ever needs running
-#   ./setup.sh --bundle                   zip up everything a bug report needs
+#   ./setup.sh --bundle                   zip up everything a bug report needs,
+#                                         into the diagnostics folder beside this
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
 #   ./setup.sh --play-offline             start FIFA 17 with no Aurora17 running
@@ -38,6 +39,22 @@
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
 #              1 is not a designed outcome: it means a stop nobody gave a code
 #              to, and is worth reporting as a bug in this script.
+
+# Run under zsh whatever it was started with. Every line below is zsh, and the
+# very next one -- HERE="${0:A:h}" -- is the trap: bash and sh read ${0:A:h} as
+# their own ${var:offset:length}, evaluate the offset "A" as arithmetic, and
+# with set -u stop at "A: unbound variable". That names a variable this script
+# does not have, on a line that looks innocent, so "bash setup.sh" or
+# "sh setup.sh" failed with a message nobody could act on. Re-exec instead.
+# This block is plain POSIX so bash and sh get here before parsing any zsh.
+if [ -z "${ZSH_VERSION:-}" ]; then
+    if [ -x /bin/zsh ]; then
+        exec /bin/zsh "$0" "$@"
+    fi
+    printf '%s\n' "This needs zsh, which every Mac has at /bin/zsh, and it is missing." >&2
+    printf '%s\n' "Nothing has been changed." >&2
+    exit 2
+fi
 
 set -eu
 HERE="${0:A:h}"
@@ -1876,9 +1893,23 @@ say "====================="
 # else's Mac is one paste instead of a dozen rounds of "now run this". The rule
 # for what belongs here: anything that has ever been the answer. It changes
 # nothing, and it prints no key, token or path outside the game and the bottle.
+# Where everything a bug report needs is written: a "diagnostics" folder beside
+# this script, so the zip and the report sit next to the commands that made
+# them and nobody has to be told a path. The Desktop and the temp folder are
+# only fallbacks, for a package opened from a read-only volume.
+diagnostics_dir() {
+    local d
+    for d in "$HERE/diagnostics" "$HOME/Desktop/aurora17-diagnostics" \
+             "${TMPDIR:-/tmp}/aurora17-diagnostics"; do
+        mkdir -p "$d" 2>/dev/null || continue
+        if [ -w "$d" ]; then print -r -- "$d"; return 0; fi
+    done
+    print -r -- "${TMPDIR:-/tmp}"
+}
+
 report_mode() {
     local app="$1"
-    local out="${TMPDIR:-/tmp}/aurora17-report.txt"
+    local out; out="$(diagnostics_dir)/report.txt"
 
     {
         print -r -- "==== aurora17 report ===================================="
@@ -2109,8 +2140,7 @@ bundle_mode() {
     setopt localoptions nullglob
     local app="$1"
     local stamp; stamp="$(date '+%Y%m%d-%H%M%S')"
-    local dest="$HOME/Desktop"
-    [ -d "$dest" ] || dest="${TMPDIR:-/tmp}"
+    local dest; dest="$(diagnostics_dir)"
     local work="${TMPDIR:-/tmp}/aurora17-bundle-$stamp"
     local zipf="$dest/aurora17-bundle-$stamp.zip"
 
@@ -2166,6 +2196,13 @@ bundle_mode() {
     ( cd "${work:h}" && zip -qr "$zipf" "${work:t}" ) \
         || { say "Could not write $zipf"; rm -rf "$work"; return 1 }
     rm -rf "$work"
+
+    # Keep the three newest zips and drop the rest, so running this after every
+    # failed attempt does not fill the folder up.
+    local old
+    for old in ${(f)"$(/bin/ls -t -- "$dest"/aurora17-bundle-*.zip(N) 2>/dev/null | tail -n +4)"}; do
+        [ -n "$old" ] && rm -f "$old"
+    done
 
     say ""
     say "Wrote $zipf"
@@ -3902,7 +3939,11 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
     say "                                  CrossOver's window leaves FIFA and Aurora"
     say "                                  running and the ports held)"
     say "To check an install at any time:  ./setup.sh --verify"
-    say "If anything goes wrong:           ./setup.sh --bundle   (then send the zip)"
+    say "If anything goes wrong:           double-click Diagnostics.command, or run"
+    say "                                  ./setup.sh --bundle, then send the zip it"
+    say "                                  writes into the diagnostics folder. Every"
+    say "                                  other check and repair is a double-click in"
+    say "                                  that folder: see diagnostics/README.md."
     say "To undo everything:               ./uninstall.sh"
     say ""
     exit 0
