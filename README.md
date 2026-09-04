@@ -59,6 +59,16 @@ bar. Press **⌘Q** to quit it properly.
 
 ## Something wrong?
 
+Double-click **Diagnostics.command**. It collects the logs a bug report needs
+into one zip in the **diagnostics** folder and opens that folder for you.
+
+Every other check and repair is a double-click in there too — check the
+install, unstick a bottle, repair the signature, run a smoke test — one
+`.command` file each, listed in `diagnostics/README.md`. Nothing there needs
+Terminal, and the ones that only look at things say so.
+
+The same actions from Terminal, if you prefer:
+
 ```sh
 ./setup.sh --verify     # checks everything, changes nothing
 ./setup.sh --unstick    # bottle stuck loading forever? quit CrossOver, run this
@@ -80,7 +90,9 @@ one file it put in your Aurora17 folder. Your own CrossOver was never changed.
 | `START HERE offline.command` | install (single player, no Aurora17) |
 | `PLAY FIFA 17 offline.command` | play offline without opening CrossOver |
 | `Stop.command` | quit game, Aurora and CrossOver cleanly |
+| `Diagnostics.command` | collect the logs for a bug report |
 | `Uninstall.command` | undo everything |
+| `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh` | what the .command files run |
 | `fixes/` | the files that go into the CrossOver copy, with source and checksums |
 | `aurora17/` | the PowerShell stand-in and certificate Aurora needs |

@@ -25,7 +25,7 @@ CrossOver.
 5. [Stop and clean up](#stop-and-clean-up)
 6. [Troubleshooting](#troubleshooting) — start at [Check these first](#check-these-first)
 7. [Manual install](#manual-install-step-by-step) — the same thing by hand
-8. [Reference](#reference) — version notes, FIFA 15, uninstall, file list
+8. [Reference](#reference) — version notes, uninstall, file list
 
 **How to read the troubleshooting section:** every problem is a red box, and
 the fix is the green box right under it.
@@ -234,16 +234,22 @@ to two minutes it prints one of:
 | `INCONCLUSIVE` | the game exited cleanly before a session was issued. Normal if you closed it yourself |
 | `nothing launched` | PLAY was never pressed |
 
-**4. Asking someone for help?** Send the bundle, not a description:
+**4. Asking someone for help?** Send the bundle, not a description. Either
+double-click **Diagnostics.command**, or:
 
 ```sh
 ./setup.sh --bundle
 ```
 
-It writes `aurora17-bundle-<date>.zip` to your Desktop with the report, the
-Aurora logs, the bottle's hosts file and settings, and the checksums. It
-contains no account, password or session token. `./setup.sh --report` prints
-the same diagnosis without the logs.
+It writes `aurora17-bundle-<date>.zip` into the **diagnostics** folder beside
+`setup.sh`, with the report, the Aurora logs, the bottle's hosts file and
+settings, and the checksums. It contains no account, password or session
+token. `./setup.sh --report` prints the same diagnosis
+without the logs and saves it as `diagnostics/report.txt`.
+
+Every other check and repair is a double-click in that folder too — one
+`.command` file each, listed in `diagnostics/README.md`. Nothing there needs
+Terminal.
 
 ### CrossOver GUI never finishes loading the bottle
 
@@ -502,6 +508,21 @@ The same information, for reference:
 
 ### The game quits about 20 seconds in
 
+Two different faults land in the same twenty-second window, and `--verify` says
+everything checks out for both. **The exit code in the connector log tells them
+apart. Read it before doing anything else:**
+
+| exit code | cause | go to |
+|---|---|---|
+| `0xFFFFFFFA` | no EA licence file | [below](#0xfffffffa--no-licence-file) |
+| `0x00000003` | the game aborts itself at Origin start-up, about 6 launches in 7 on the machines seen so far | [below](#0x00000003--the-start-up-race) |
+
+```sh
+grep 'exited with code' ~/Library/Application\ Support/CrossOver/Bottles/Aurora17/drive_c/users/crossover/AppData/Local/Aurora17/Logs/connector-*.log | tail -1
+```
+
+#### `0xFFFFFFFA` — no licence file
+
 > [!CAUTION]
 > 🔴 `--verify` says everything checks out. The shim loads. The game still dies. The connector log shows:
 > ```
@@ -527,6 +548,39 @@ Moving to a new bottle? Your Ultimate Team club lives at
 old bottle. Copy that file across. Leave `access-sessions.json`, it is
 regenerated.
 
+#### `0x00000003` — the start-up race
+
+> [!CAUTION]
+> 🔴 The licence file **is** present, `--verify` is clean, and the launcher reports `ERROR [Code 25]`. The connector log ends:
+> ```
+> +00:00  Started the direct FIFA17 launch candidate (pid N)
+> +00:02  signaled verified shim readiness
+> +00:22  exited with code 0x00000003
+> ```
+> Offline play is fine. Pressing PLAY again sometimes works.
+
+> [!TIP]
+> 🟢 **Since 2026-09-05 the launcher retries this by itself**, up to four launches per PLAY, and only reports code 25 when all four died. Each try takes about 35 seconds, so *WORKING...* can last two minutes before either the game stays up or the error appears. If it still fails: double-click **Stop.command**, wait for it to finish, press PLAY again. Do **not** remake the bottle.
+
+**What is known.** The game aborts itself (`0x00000003` is a C-runtime
+`abort()`) about 1.3 seconds after its first `GetDefaultUser` call to the
+redirect shim. One bundle held 21 launches on one Mac, one bottle, one
+configuration, inside 100 minutes: 3 played, 18 died. The ones that survived
+~7 seconds past that first call made a second call and went on to play. Nothing
+that stays constant between launches — the settings, macOS 26, the bottle, the
+game files, the network — can toggle 21 times in 100 minutes, so none of those
+is the cause. The same signature was found on a second Mac. Stopping cleanly
+between attempts seems to matter: the last 11 back-to-back attempts in that
+bundle all failed.
+
+**What a useful report contains.** Fail once, then **Diagnostics.command**
+straight away, and say which macOS version you are on. Every connector log is
+kept, so a bundle taken after several attempts still shows each one's exit
+code.
+
+> [!NOTE]
+> `origin-auth-code-sync-bridge-failed pipe-capability` in `redirect-shim.log`, and `MakeWindowAssociation: Ignoring flags 7` and `[D3DMetal] Unsupported API: D3D11 timestamp query` in a graphics log, all appear on machines that play fine. None of them is the reason the game quit. Also: `redirect-shim.log` is written in UTC, the connector and client logs in local time — line them up before comparing.
+
 ### "The Origin client was terminated"
 
 > [!CAUTION]
@@ -551,7 +605,7 @@ launcher and in `%LOCALAPPDATA%\Aurora17\Logs\connector-*.log`.
 | 12 | the packaged server would not start | check `server/` is not missing from your Aurora17 folder |
 | 13 | the server started but never passed its readiness check | see Code 13 above |
 | 14 | the control key could not be created or read | `%LOCALAPPDATA%\Aurora17` is not writable |
-| 15 | the player-head cache could not be refreshed | close FIFA, PLAY again |
+| 15 | the player-head cache could not be refreshed | since 2026-09-05 only when Windows has no Documents folder at all; a cache that cannot be moved is cleared in place and the launch goes on |
 | 16 | FIFA is already running | close it |
 | 17 | the server refused to enroll the account | check the server log |
 | 18 / 19 | the launcher could not be started or found | do not rename or move `Aurora17Connector.exe` |
@@ -560,7 +614,7 @@ launcher and in `%LOCALAPPDATA%\Aurora17\Logs\connector-*.log`.
 | 22 | no `redirector-dev.pfx`, and no PKI module to make one | run `./setup.sh` again ([step 8a](#8a-the-certificate)) |
 | 23 | Aurora asked for something the stand-in does not implement | send a bundle |
 | 24 | no licence file, and no `_fifa17.exe` next to the game | start FIFA 17 once from CrossOver, then PLAY again |
-| 25 | FIFA quit within a minute of starting | if you closed it yourself, ignore; otherwise the newest `client-*.log` says why |
+| 25 | FIFA quit within a minute of starting, four launches in a row | if you closed it yourself, ignore; otherwise see [`0x00000003`](#0x00000003--the-start-up-race) |
 
 ### Installer exit codes
 
@@ -885,14 +939,16 @@ CodeWeavers' own signature. Reinstall CrossOver to have it exactly as shipped.
 | `START HERE.command`, `START HERE offline.command` | install, normal or offline |
 | `PLAY FIFA 17 offline.command` | play offline without opening CrossOver |
 | `Stop.command`, `Uninstall.command` | clean quit, undo |
-| `setup.sh`, `uninstall.sh`, `setup-both.sh` | what the .command files run |
+| `Diagnostics.command` | collect the logs for a bug report into `diagnostics/` |
+| `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
+| `setup.sh`, `uninstall.sh` | what the .command files run |
+| `setup-both.sh`, `FIFA 15.command`, `Both games.command` | the FIFA 15 install, and both games at once |
 | `fixes/` | the seven files for the CrossOver copy, source and checksums |
 | `aurora17/` | the PowerShell stand-in, its source, the certificate, checksums |
 | `patches/` | the Wine source changes the fixes were built from |
 | `build.sh` | rebuilds `fixes/` from source |
 | `fifa15/` | the FIFA 15 offline patch |
 | `LICENSE`, `NOTICE.md` | MIT for our parts, LGPL for the Wine parts |
-| `setup.sh` `uninstall.sh` | what the two `.command` files run |
 
 The Wine files are built from published CrossOver source. The changes are in
 `patches/` as the licence requires, and `./build.sh` rebuilds them, so you can
