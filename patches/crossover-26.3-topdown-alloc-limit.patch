@@ -1,0 +1,25 @@
+--- a/dlls/ntdll/unix/virtual.c	2026-09-02 18:50:29
++++ b/dlls/ntdll/unix/virtual.c	2026-09-02 18:50:29
+@@ -5321,6 +5321,22 @@
+         limit = get_zero_bits_limit( zero_bits );
+     else
+         limit = 0;
++
++    /* CX_TOPDOWN_LIMIT: Windows hands MEM_TOP_DOWN allocations addresses just below the
++     * user-space limit (0x7FFFFFxx0000), whose low 32 bits have bits 30/31 set.  On macOS
++     * Wine's top-down region ends around 0x7ff001dxxxxx.  Code generated at runtime by some
++     * protectors bakes assumptions about those bits into opaque predicates, so let the top
++     * be steered to a Windows-looking address (e.g. 0x1ffffffff -> 0x1FFxx0000). */
++    if ((type & MEM_TOP_DOWN) && !*ret)
++    {
++        static ULONG_PTR topdown_limit = ~(ULONG_PTR)0;
++        if (topdown_limit == ~(ULONG_PTR)0)
++        {
++            const char *env = getenv( "CX_TOPDOWN_LIMIT" );
++            topdown_limit = env ? strtoull( env, NULL, 0 ) : 0;
++        }
++        if (topdown_limit && (!limit || topdown_limit < limit)) limit = topdown_limit;
++    }
+ 
+     {
+         NTSTATUS status = allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );

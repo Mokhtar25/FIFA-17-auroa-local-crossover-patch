@@ -228,7 +228,7 @@ to two minutes it prints one of:
 | result | meaning |
 |---|---|
 | `PASS` | the session was issued, Ultimate Team should load |
-| `FAIL: FIFA exited on its own` | the game quit. The connector log's exit code says which fault: see [The game quits about 20 seconds in](#the-game-quits-about-20-seconds-in) |
+| `FAIL: FIFA exited on its own` | the game quit, usually code `0xFFFFFFFA`. See [The game quits about 20 seconds in](#the-game-quits-about-20-seconds-in) |
 | `FAIL: the shim was refused an auth code` | no session was enrolled. See the elevated setup error below |
 | `FAIL: the auth-code bridge kept failing` | same as the first FAIL, seen from the shim's side |
 | `INCONCLUSIVE` | the game exited cleanly before a session was issued. Normal if you closed it yourself |
@@ -244,8 +244,8 @@ double-click **Diagnostics.command**, or:
 It writes `aurora17-bundle-<date>.zip` into the **diagnostics** folder beside
 `setup.sh`, with the report, the Aurora logs, the bottle's hosts file and
 settings, and the checksums. It contains no account, password or session
-token. `./setup.sh --report` prints the same diagnosis without the logs and
-saves it as `diagnostics/report.txt`.
+token. `./setup.sh --report` prints the same diagnosis
+without the logs and saves it as `diagnostics/report.txt`.
 
 Every other check and repair is a double-click in that folder too — one
 `.command` file each, listed in `diagnostics/README.md`. Nothing there needs
@@ -515,7 +515,7 @@ apart. Read it before doing anything else:**
 | exit code | cause | go to |
 |---|---|---|
 | `0xFFFFFFFA` | no EA licence file | [below](#0xfffffffa--no-licence-file) |
-| `0x00000003` | the game quit itself at Direct3D start-up | [below](#0x00000003--dies-at-direct3d-start-up) |
+| `0x00000003` | the game aborts itself at Origin start-up, about 6 launches in 7 on the machines seen so far | [below](#0x00000003--the-start-up-race) |
 
 ```sh
 grep 'exited with code' ~/Library/Application\ Support/CrossOver/Bottles/Aurora17/drive_c/users/crossover/AppData/Local/Aurora17/Logs/connector-*.log | tail -1
@@ -548,7 +548,7 @@ Moving to a new bottle? Your Ultimate Team club lives at
 old bottle. Copy that file across. Leave `access-sessions.json`, it is
 regenerated.
 
-#### `0x00000003` — dies at Direct3D start-up
+#### `0x00000003` — the start-up race
 
 > [!CAUTION]
 > 🔴 The licence file **is** present, `--verify` is clean, and the launcher reports `ERROR [Code 25]`. The connector log ends:
@@ -557,41 +557,29 @@ regenerated.
 > +00:02  signaled verified shim readiness
 > +00:22  exited with code 0x00000003
 > ```
-> and the newest `client-*.log` shows the LSX handshake completing and every request answered, with `SetDownloaderUtilization` a tenth of a second before the exit.
+> Offline play is fine. Pressing PLAY again sometimes works.
 
 > [!TIP]
-> 🟢 This is **not** an Aurora fault, whatever the error code suggests. Every request the game made was served; it quit on its own immediately afterwards, while starting Direct3D. Code 25 is `ERR_FIFA_QUIT_EARLY`, which only reports that the game left early — it cannot see why.
+> 🟢 **Since 2026-09-05 the launcher retries this by itself**, up to four launches per PLAY, and only reports code 25 when all four died. Each try takes about 35 seconds, so *WORKING...* can last two minutes before either the game stays up or the error appears. If it still fails: double-click **Stop.command**, wait for it to finish, press PLAY again. Do **not** remake the bottle.
 
-Work through these in order.
+**What is known.** The game aborts itself (`0x00000003` is a C-runtime
+`abort()`) about 1.3 seconds after its first `GetDefaultUser` call to the
+redirect shim. One bundle held 21 launches on one Mac, one bottle, one
+configuration, inside 100 minutes: 3 played, 18 died. The ones that survived
+~7 seconds past that first call made a second call and went on to play. Nothing
+that stays constant between launches — the settings, macOS 26, the bottle, the
+game files, the network — can toggle 21 times in 100 minutes, so none of those
+is the cause. The same signature was found on a second Mac. Stopping cleanly
+between attempts seems to matter: the last 11 back-to-back attempts in that
+bundle all failed.
 
-**1. Take out anything that is not ours.** Open
-`~/Library/Application Support/CrossOver/Bottles/Aurora17/cxbottle.conf`. Under
-`[EnvironmentVariables]` there should be **only** the keys from
-[step 6](#6-add-three-settings-to-the-bottle) (plus the sound one, if you have
-it). Delete anything else — `WINEMSYNC`, `DXVK_CONFIG_FILE` and a
-`CX_GRAPHICS_BACKEND` changed to something other than `d3dmetal` have all
-turned up on bottles that fail this way. **Quit CrossOver with ⌘Q first**, or it
-writes the file back out over your edit. Then try again.
-
-**2. Check your macOS version.** `sw_vers -productVersion`. These fixes are
-built against CrossOver 26.3, whose D3DMetal predates the newest macOS
-releases; the failures seen so far have been on much newer macOS than this was
-developed on. There is no fix here yet — but say which version you are on in a
-bug report, because it is the thing that separates the machines that play from
-the machines that do not.
-
-**3. Get the graphics log.** This is what a useful report contains:
-
-```sh
-WINEDEBUG=+d3d,+dxgi ./setup.sh --play-offline 2>&1 | tee ~/Desktop/fifa-d3d.log
-```
-
-Then `./setup.sh --bundle`, and send both. The game is exiting deliberately at
-device or swap-chain creation, and that log names what it asked for and did not
-get.
+**What a useful report contains.** Fail once, then **Diagnostics.command**
+straight away, and say which macOS version you are on. Every connector log is
+kept, so a bundle taken after several attempts still shows each one's exit
+code.
 
 > [!NOTE]
-> `MakeWindowAssociation: Ignoring flags 7` and `[D3DMetal] Unsupported API: D3D11 timestamp query` both appear in these logs and are **normal**. Nearly every DXGI program prints the first, and D3DMetal prints the second for any unsupported call. Neither is the reason the game quit.
+> `origin-auth-code-sync-bridge-failed pipe-capability` in `redirect-shim.log`, and `MakeWindowAssociation: Ignoring flags 7` and `[D3DMetal] Unsupported API: D3D11 timestamp query` in a graphics log, all appear on machines that play fine. None of them is the reason the game quit. Also: `redirect-shim.log` is written in UTC, the connector and client logs in local time — line them up before comparing.
 
 ### "The Origin client was terminated"
 
@@ -617,7 +605,7 @@ launcher and in `%LOCALAPPDATA%\Aurora17\Logs\connector-*.log`.
 | 12 | the packaged server would not start | check `server/` is not missing from your Aurora17 folder |
 | 13 | the server started but never passed its readiness check | see Code 13 above |
 | 14 | the control key could not be created or read | `%LOCALAPPDATA%\Aurora17` is not writable |
-| 15 | the player-head cache could not be refreshed | close FIFA, PLAY again |
+| 15 | the player-head cache could not be refreshed | since 2026-09-05 only when Windows has no Documents folder at all; a cache that cannot be moved is cleared in place and the launch goes on |
 | 16 | FIFA is already running | close it |
 | 17 | the server refused to enroll the account | check the server log |
 | 18 / 19 | the launcher could not be started or found | do not rename or move `Aurora17Connector.exe` |
@@ -626,7 +614,7 @@ launcher and in `%LOCALAPPDATA%\Aurora17\Logs\connector-*.log`.
 | 22 | no `redirector-dev.pfx`, and no PKI module to make one | run `./setup.sh` again ([step 8a](#8a-the-certificate)) |
 | 23 | Aurora asked for something the stand-in does not implement | send a bundle |
 | 24 | no licence file, and no `_fifa17.exe` next to the game | start FIFA 17 once from CrossOver, then PLAY again |
-| 25 | FIFA quit within a minute of starting | if you closed it yourself, ignore; otherwise see [The game quits about 20 seconds in](#the-game-quits-about-20-seconds-in) — the exit code in the connector log says which fault |
+| 25 | FIFA quit within a minute of starting, four launches in a row | if you closed it yourself, ignore; otherwise see [`0x00000003`](#0x00000003--the-start-up-race) |
 
 ### Installer exit codes
 
@@ -887,6 +875,7 @@ Double-click the server, wait a few seconds, double-click the game. When it
 eventually stops with `Session request was rejected with HTTP 401`, press
 **PLAY FIFA 17** in Aurora's own window once to renew the sign-in.
 
+
 ### Uninstall
 
 ```sh
@@ -912,6 +901,8 @@ CodeWeavers' own signature. Reinstall CrossOver to have it exactly as shipped.
 | `START HERE.command`, `START HERE offline.command` | install, normal or offline |
 | `PLAY FIFA 17 offline.command` | play offline without opening CrossOver |
 | `Stop.command`, `Uninstall.command` | clean quit, undo |
+| `Diagnostics.command` | collect the logs for a bug report into `diagnostics/` |
+| `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh` | what the .command files run |
 | `fixes/` | the seven files for the CrossOver copy, source and checksums |
 | `aurora17/` | the PowerShell stand-in, its source, the certificate, checksums |

@@ -141,6 +141,10 @@ case "$FLAG" in
         BLURB=( "Runs:  ./setup.sh $FLAG" ) ;;
 esac
 
+if [ -n "${AURORA_GAME:-}" ] && [ "$AURORA_GAME" = fifa15 ]; then
+    TITLE="$TITLE — FIFA 15"
+fi
+
 underline=""
 repeat ${#TITLE}; do underline="$underline="; done
 
@@ -154,7 +158,11 @@ for line in "${BLURB[@]}"; do
 done
 print -r -- ""
 
-./setup.sh "$FLAG"
+if [ "${AURORA_GAME:-}" = fifa15 ]; then
+    ./setup.sh --fifa15 "$FLAG"
+else
+    ./setup.sh "$FLAG"
+fi
 rc=$?
 
 print -r -- ""

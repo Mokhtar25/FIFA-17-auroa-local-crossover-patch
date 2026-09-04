@@ -36,6 +36,10 @@
  * really started" rather than "the player quit". BUGS.md §18's game died 17-25 s
  * in, every time. */
 #define FIFA_EARLY_QUIT_MS       (60 * 1000)
+/* How many times one PLAY will relaunch on the code 25 start-up race before it
+ * gives up and reports. At the measured ~14% per-launch success this takes a
+ * user-visible launch to roughly 50%. */
+#define FIFA_LAUNCH_ATTEMPTS     4
 
 /* Distinct error codes */
 #define ERR_MUTEX_LOCKED         10
@@ -577,8 +581,11 @@ static int ensure_licence(const wchar_t *localappdata)
     return 0;
 }
 
-/* FIFA is gone within a minute of the launch. Which of the two failures is it? */
-static int fifa_quit_early(DWORD seconds, DWORD connector_code, BOOL have_connector_code)
+/* FIFA is gone within a minute of the launch. Which of the two failures is it?
+ * `attempts` is how many launches this PLAY made, so the code 25 text says out loud
+ * that the retry ran and how often. */
+static int fifa_quit_early(DWORD seconds, DWORD connector_code, BOOL have_connector_code,
+                           int attempts)
 {
     wchar_t lic[MAX_PATH];
     licence_file_path(lic, MAX_PATH);
@@ -588,17 +595,27 @@ static int fifa_quit_early(DWORD seconds, DWORD connector_code, BOOL have_connec
             L"at %s. That is the Origin activation path: the game relaunches itself and the "
             L"process Aurora17 is watching exits 0xFFFFFFFA. Start FIFA 17 once from CrossOver, "
             L"then PLAY again.", (unsigned long)seconds, lic);
+
+    wchar_t tried[192];
+    if (attempts > 1)
+        _snwprintf(tried, 191,
+                   L"FIFA 17 was launched %d times and quit %lu seconds in on the last try",
+                   attempts, (unsigned long)seconds);
+    else
+        _snwprintf(tried, 191, L"FIFA 17 quit %lu seconds after starting",
+                   (unsigned long)seconds);
+    tried[191] = 0;
+
     if (have_connector_code)
         return fail_code(ERR_FIFA_QUIT_EARLY,
-            L"FIFA 17 quit %lu seconds after starting; the Aurora17 launch connector exited with "
-            L"code %lu (0x%08lx). If you closed FIFA yourself, ignore this. Otherwise see the "
-            L"newest client-*.log in %%LOCALAPPDATA%%\\Aurora17\\Logs.",
-            (unsigned long)seconds, (unsigned long)connector_code, (unsigned long)connector_code);
+            L"%s; the Aurora17 launch connector exited with code %lu (0x%08lx). If you closed "
+            L"FIFA yourself, ignore this. Otherwise see the newest client-*.log in "
+            L"%%LOCALAPPDATA%%\\Aurora17\\Logs.",
+            tried, (unsigned long)connector_code, (unsigned long)connector_code);
     return fail_code(ERR_FIFA_QUIT_EARLY,
-            L"FIFA 17 quit %lu seconds after starting (the launch connector still owns the "
-            L"process, so its exit code is not visible here). If you closed FIFA yourself, ignore "
-            L"this. Otherwise see the newest client-*.log in %%LOCALAPPDATA%%\\Aurora17\\Logs.",
-            (unsigned long)seconds);
+            L"%s (the launch connector still owns the process, so its exit code is not visible "
+            L"here). If you closed FIFA yourself, ignore this. Otherwise see the newest "
+            L"client-*.log in %%LOCALAPPDATA%%\\Aurora17\\Logs.", tried);
 }
 
 /* --------------------------------------------------------------- shim state */
@@ -777,6 +794,57 @@ static BOOL server_healthy(const char *key)
 
 /* ------------------------------------------------------------- head cache */
 
+/* Deletes everything inside `dir`, depth first, keeping `dir` itself. Returns TRUE
+ * when it ends up empty; on FALSE, *first_err (when given) holds the Win32 error of
+ * the first thing that would not go. Deliberately plain Win32 - no SHFileOperation,
+ * so no new library dependency. */
+static BOOL remove_tree_contents(const wchar_t *dir, DWORD *first_err)
+{
+    wchar_t pattern[MAX_PATH];
+    _snwprintf(pattern, MAX_PATH - 1, L"%s\\*", dir);
+    pattern[MAX_PATH - 1] = 0;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        DWORD e = GetLastError();
+        if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) return TRUE;
+        if (first_err && !*first_err) *first_err = e;
+        return FALSE;
+    }
+
+    BOOL all = TRUE;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        wchar_t child[MAX_PATH];
+        join(child, MAX_PATH, dir, fd.cFileName);
+        BOOL ok;
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        {
+            /* Contents first; a directory only goes once it is empty. */
+            ok = remove_tree_contents(child, first_err);
+            if (!RemoveDirectoryW(child)) ok = FALSE;
+        }
+        else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            ok = RemoveDirectoryW(child);        /* a junction: unlink, never follow */
+        else
+        {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
+                SetFileAttributesW(child, fd.dwFileAttributes & ~(DWORD)FILE_ATTRIBUTE_READONLY);
+            ok = DeleteFileW(child);
+        }
+        if (!ok)
+        {
+            if (first_err && !*first_err) *first_err = GetLastError();
+            all = FALSE;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return all;
+}
+
 static int refresh_player_head_cache(const char *generation)
 {
     procid list[8];
@@ -823,13 +891,37 @@ static int refresh_player_head_cache(const char *generation)
     wchar_t quarantine[MAX_PATH];
     _snwprintf(quarantine, MAX_PATH - 1, L"%s\\atlFUTPlayerHeads.aurora17-stale-%04d%02d%02dT%02d%02d%02d%03d",
                root, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    /* TODO item 6b. Player-head images are FUT player faces: cosmetic. A cache that
+     * cannot be renamed is never a reason to refuse to start the game -- and it does
+     * happen, because the bottle symlinks Documents out to the real ~/Documents, which
+     * since Ventura sits behind macOS TCC and returns ERROR_ACCESS_DENIED (5).
+     * MoveFileW -> empty in place -> warn and carry on. */
+    BOOL quarantined = FALSE;
     if (dir_exists(quarantine))
-        return fail_code(ERR_HEAD_CACHE, L"Refusing to overwrite an existing cache quarantine.");
-    if (!MoveFileW(cache, quarantine))
-        return fail_code(ERR_HEAD_CACHE, L"Could not quarantine the stale player-head cache (%lu).", GetLastError());
+        out(L"Warning: a player-head cache quarantine already exists at %s; emptying the "
+            L"stale cache in place instead.\n", quarantine);
+    else if (MoveFileW(cache, quarantine))
+        quarantined = TRUE;
+    else
+        out(L"Warning: could not quarantine the stale player-head cache (%lu); emptying it "
+            L"in place instead.\n", (unsigned long)GetLastError());
+
+    if (!quarantined)
+    {
+        DWORD del_err = 0;
+        if (!remove_tree_contents(cache, &del_err))
+            out(L"Warning: some player-head cache files could not be deleted (%lu). Carrying "
+                L"on -- player faces are cosmetic and some may be stale.\n",
+                (unsigned long)del_err);
+    }
+
     ensure_dir(cache);
     if (generation && *generation) write_all_utf8(marker, generation);
-    out(L"Quarantined the stale player-head cache and created an empty one.\n");
+    if (quarantined)
+        out(L"Quarantined the stale player-head cache and created an empty one.\n");
+    else
+        out(L"Refreshed the stale player-head cache in place.\n");
     return 0;
 }
 
@@ -1150,139 +1242,181 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
     slash = wcsrchr(connector_dir, L'\\');
     if (slash) *slash = 0;
 
-    out(L"Enrolling...\n");
-    char *resp = NULL;
-    int st = http_request("POST", CONTROL_PORT, "/v1/control/bootstrap-tickets", key,
-                          "application/json",
-                          "{\"AccountId\":\"1000000000001\",\"PersonaId\":\"2000000000001\","
-                          "\"DisplayName\":\"Aurora17\",\"Audience\":\"fifa17\"}",
-                          30000, &resp);
-    if (st < 200 || st > 299 || !resp)
-    { free(resp); rc = fail_code(ERR_ENROLL_FAIL, L"The Aurora17 server refused to mint a bootstrap ticket (HTTP %d).", st); goto done; }
-    char *ticket = json_string(resp, "bootstrapTicket");
-    free(resp);
-    if (!ticket || !*ticket)
-    { free(ticket); rc = fail_code(ERR_ENROLL_FAIL, L"The ticket response contained no bootstrapTicket."); goto done; }
-
-    wchar_t temp_dir[MAX_PATH], ticket_file[MAX_PATH];
-    GetTempPathW(MAX_PATH, temp_dir);
-    _snwprintf(ticket_file, MAX_PATH - 1, L"%saurora17-ticket-%lu-%lu",
-               temp_dir, (unsigned long)GetCurrentProcessId(), GetTickCount());
-    BOOL wrote = write_all_utf8(ticket_file, ticket);
-    SecureZeroMemory(ticket, strlen(ticket));
-    free(ticket);
-    if (!wrote) { rc = fail_code(ERR_ENROLL_FAIL, L"The one-time ticket could not be staged."); goto done; }
-
-    wchar_t cmd[MAX_PATH + 32];
-    _snwprintf(cmd, MAX_PATH + 31, L"\"%s\" enroll", connector);
-    DWORD epid = 0;
-    HANDLE eh = spawn(cmd, connector_dir, NULL, NULL, ticket_file, &epid);
-    DWORD ecode = 1;
-    if (eh)
+    /* TODO item 1: code 25 is a start-up race, not a configuration fault -- FIFA17.exe
+     * abort()s ~1.3 s after its first Origin GetDefaultUser on roughly six launches in
+     * seven, and simply pressing PLAY again eventually works. Retry that one signature
+     * (the game appeared, went away inside the watch window, licence file present) and
+     * nothing else: code 24, a connector that dies before the game appears, a failed
+     * enrolment and the five-minute timeout are all deterministic and still fail once. */
+    int attempt;
+    for (attempt = 1; ; attempt++)
     {
-        WaitForSingleObject(eh, 120000);
-        GetExitCodeProcess(eh, &ecode);
-        CloseHandle(eh);
-    }
-    DeleteFileW(ticket_file);
-    if (!eh || ecode != 0)
-    { rc = fail_code(ERR_ENROLL_FAIL, L"The Aurora17 connector could not enroll the account (exit %lu).", ecode); goto done; }
+        BOOL      race = FALSE;      /* this attempt hit the code 25 signature */
+        DWORD     race_seconds = 0;
+        DWORD     race_ccode = 0;
+        BOOL      race_have_ccode = FALSE;
 
-    out(L"Launching FIFA 17...\n");
-    out(L"If FIFA Configuration opens, click Play; Aurora17 keeps the session ready for four minutes.\n");
-    _snwprintf(cmd, MAX_PATH + 31, L"\"%s\" launch", connector);
-    DWORD lpid = 0;
-    HANDLE lh = spawn(cmd, connector_dir, NULL, NULL, NULL, &lpid);
-    if (!lh) { rc = fail_code(ERR_CONNECTOR_FAIL, L"Windows did not start the Aurora17 launch connector (%lu).", GetLastError()); goto done; }
+        out(L"Enrolling...\n");
+        char *resp = NULL;
+        int st = http_request("POST", CONTROL_PORT, "/v1/control/bootstrap-tickets", key,
+                              "application/json",
+                              "{\"AccountId\":\"1000000000001\",\"PersonaId\":\"2000000000001\","
+                              "\"DisplayName\":\"Aurora17\",\"Audience\":\"fifa17\"}",
+                              30000, &resp);
+        if (st < 200 || st > 299 || !resp)
+        { free(resp); rc = fail_code(ERR_ENROLL_FAIL, L"The Aurora17 server refused to mint a bootstrap ticket (HTTP %d).", st); goto done; }
+        char *ticket = json_string(resp, "bootstrapTicket");
+        free(resp);
+        if (!ticket || !*ticket)
+        { free(ticket); rc = fail_code(ERR_ENROLL_FAIL, L"The ticket response contained no bootstrapTicket."); goto done; }
 
-    ULONGLONG lstart = process_start(lh);
-    state_read(&server_pid, &server_start, &launch_pid, &launch_start);
-    state_write(server_pid, server_start, lpid, lstart);
+        wchar_t temp_dir[MAX_PATH], ticket_file[MAX_PATH];
+        GetTempPathW(MAX_PATH, temp_dir);
+        _snwprintf(ticket_file, MAX_PATH - 1, L"%saurora17-ticket-%lu-%lu",
+                   temp_dir, (unsigned long)GetCurrentProcessId(), GetTickCount());
+        BOOL wrote = write_all_utf8(ticket_file, ticket);
+        SecureZeroMemory(ticket, strlen(ticket));
+        free(ticket);
+        if (!wrote) { rc = fail_code(ERR_ENROLL_FAIL, L"The one-time ticket could not be staged."); goto done; }
 
-    DWORD waited = 0;
-    DWORD game_pid = 0;
-    for (;;)
-    {
-        Sleep(1000);
-        waited += 1000;
-        if (WaitForSingleObject(lh, 0) == WAIT_OBJECT_0)
+        wchar_t cmd[MAX_PATH + 32];
+        _snwprintf(cmd, MAX_PATH + 31, L"\"%s\" enroll", connector);
+        DWORD epid = 0;
+        HANDLE eh = spawn(cmd, connector_dir, NULL, NULL, ticket_file, &epid);
+        DWORD ecode = 1;
+        if (eh)
         {
-            DWORD code = 0;
-            GetExitCodeProcess(lh, &code);
-            /* A launch connector that exits before the game appears has failed; its
-             * own log carries the reason (an expired session returns HTTP 401). */
-            if (!game_pid)
+            WaitForSingleObject(eh, 120000);
+            GetExitCodeProcess(eh, &ecode);
+            CloseHandle(eh);
+        }
+        DeleteFileW(ticket_file);
+        if (!eh || ecode != 0)
+        { rc = fail_code(ERR_ENROLL_FAIL, L"The Aurora17 connector could not enroll the account (exit %lu).", ecode); goto done; }
+
+        out(L"Launching FIFA 17...\n");
+        out(L"If FIFA Configuration opens, click Play; Aurora17 keeps the session ready for four minutes.\n");
+        _snwprintf(cmd, MAX_PATH + 31, L"\"%s\" launch", connector);
+        DWORD lpid = 0;
+        HANDLE lh = spawn(cmd, connector_dir, NULL, NULL, NULL, &lpid);
+        if (!lh) { rc = fail_code(ERR_CONNECTOR_FAIL, L"Windows did not start the Aurora17 launch connector (%lu).", GetLastError()); goto done; }
+
+        ULONGLONG lstart = process_start(lh);
+        /* Every attempt records its own launch pid, so a later PLAY still stops the
+         * connector that is actually running. */
+        state_read(&server_pid, &server_start, &launch_pid, &launch_start);
+        state_write(server_pid, server_start, lpid, lstart);
+
+        DWORD waited = 0;
+        DWORD game_pid = 0;
+        for (;;)
+        {
+            Sleep(1000);
+            waited += 1000;
+            if (WaitForSingleObject(lh, 0) == WAIT_OBJECT_0)
+            {
+                DWORD code = 0;
+                GetExitCodeProcess(lh, &code);
+                /* A launch connector that exits before the game appears has failed; its
+                 * own log carries the reason (an expired session returns HTTP 401). */
+                if (!game_pid)
+                {
+                    CloseHandle(lh);
+                    if (!licence_present())
+                    {
+                        wchar_t lic[MAX_PATH];
+                        licence_file_path(lic, MAX_PATH);
+                        rc = fail_code(ERR_LICENCE_MISSING,
+                                       L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
+                                       L"before FIFA 17 started, and this bottle has no licence file at "
+                                       L"%s. Start FIFA 17 once from CrossOver, then PLAY again.",
+                                       code, code, lic);
+                    }
+                    else
+                        rc = fail_code(ERR_CONNECTOR_FAIL,
+                                       L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
+                                       L"before FIFA 17 started. See the connector log.", code, code);
+                    goto done;
+                }
+            }
+            int n = find_processes(L"FIFA17.exe", fifa, 8);
+            for (int i = 0; i < n; i++)
+            {
+                if (fifa[i].start >= lstart) { game_pid = fifa[i].pid; break; }
+            }
+            if (game_pid)
+            {
+                Sleep(2000);
+                waited += 2000;
+                if (process_is(game_pid, L"FIFA17.exe", 0)) break;
+                /* Gone in two seconds. Without a licence the game relaunches itself,
+                 * so look for the replacement before calling the launch dead. */
+                n = find_processes(L"FIFA17.exe", fifa, 8);
+                game_pid = 0;
+                for (int i = 0; i < n; i++)
+                    if (fifa[i].start >= lstart) { game_pid = fifa[i].pid; break; }
+                if (game_pid) continue;
+                race = TRUE;
+                race_seconds = waited / 1000;
+                break;
+            }
+            if (waited >= FIFA_LAUNCH_TIMEOUT_MS)
             {
                 CloseHandle(lh);
-                if (!licence_present())
-                {
-                    wchar_t lic[MAX_PATH];
-                    licence_file_path(lic, MAX_PATH);
-                    rc = fail_code(ERR_LICENCE_MISSING,
-                                   L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
-                                   L"before FIFA 17 started, and this bottle has no licence file at "
-                                   L"%s. Start FIFA 17 once from CrossOver, then PLAY again.",
-                                   code, code, lic);
-                }
-                else
-                    rc = fail_code(ERR_CONNECTOR_FAIL,
-                                   L"The Aurora17 launch connector exited with code %lu (0x%08lx) "
-                                   L"before FIFA 17 started. See the connector log.", code, code);
+                rc = fail_code(ERR_FIFA_TIMEOUT, L"FIFA 17 did not start before the five-minute launch deadline.");
                 goto done;
             }
         }
-        int n = find_processes(L"FIFA17.exe", fifa, 8);
-        for (int i = 0; i < n; i++)
-        {
-            if (fifa[i].start >= lstart) { game_pid = fifa[i].pid; break; }
-        }
-        if (game_pid)
-        {
-            Sleep(2000);
-            waited += 2000;
-            if (process_is(game_pid, L"FIFA17.exe", 0)) break;
-            /* Gone in two seconds. Without a licence the game relaunches itself,
-             * so look for the replacement before calling the launch dead. */
-            n = find_processes(L"FIFA17.exe", fifa, 8);
-            game_pid = 0;
-            for (int i = 0; i < n; i++)
-                if (fifa[i].start >= lstart) { game_pid = fifa[i].pid; break; }
-            if (game_pid) continue;
-            CloseHandle(lh);
-            rc = fifa_quit_early(waited / 1000, 0, FALSE);
-            goto done;
-        }
-        if (waited >= FIFA_LAUNCH_TIMEOUT_MS)
-        {
-            CloseHandle(lh);
-            rc = fail_code(ERR_FIFA_TIMEOUT, L"FIFA 17 did not start before the five-minute launch deadline.");
-            goto done;
-        }
-    }
-    out(L"FIFA 17 is running (pid %lu). Go to Ultimate Team.\n", (unsigned long)game_pid);
 
-    /* §18 again: on a bottle without the licence file the game gets exactly this
-     * far every time, then exits 0xFFFFFFFA seventeen to twenty-five seconds in
-     * while the connector reports nothing and the launcher shows "WORKING...".
-     * Watching the first minute is what turns that silence into an error code. */
-    DWORD watch_until = waited + 25000;
-    if (watch_until < FIFA_EARLY_QUIT_MS) watch_until = FIFA_EARLY_QUIT_MS;
-    while (waited < watch_until)
-    {
-        Sleep(1000);
-        waited += 1000;
-        if (process_is(game_pid, L"FIFA17.exe", 0)) continue;
-        int alive = find_processes(L"FIFA17.exe", fifa, 8);
-        if (alive > 0) { game_pid = fifa[alive - 1].pid; continue; }
+        if (!race)
+        {
+            out(L"FIFA 17 is running (pid %lu). Go to Ultimate Team.\n", (unsigned long)game_pid);
 
-        DWORD ccode = 0;
-        BOOL have_ccode = (WaitForSingleObject(lh, 0) == WAIT_OBJECT_0) &&
-                          GetExitCodeProcess(lh, &ccode);
+            /* §18 again: on a bottle without the licence file the game gets exactly this
+             * far every time, then exits 0xFFFFFFFA seventeen to twenty-five seconds in
+             * while the connector reports nothing and the launcher shows "WORKING...".
+             * Watching the first minute is what turns that silence into an error code. */
+            DWORD watch_until = waited + 25000;
+            if (watch_until < FIFA_EARLY_QUIT_MS) watch_until = FIFA_EARLY_QUIT_MS;
+            while (waited < watch_until)
+            {
+                Sleep(1000);
+                waited += 1000;
+                if (process_is(game_pid, L"FIFA17.exe", 0)) continue;
+                int alive = find_processes(L"FIFA17.exe", fifa, 8);
+                if (alive > 0) { game_pid = fifa[alive - 1].pid; continue; }
+
+                race_have_ccode = (WaitForSingleObject(lh, 0) == WAIT_OBJECT_0) &&
+                                  GetExitCodeProcess(lh, &race_ccode);
+                race = TRUE;
+                race_seconds = waited / 1000;
+                break;
+            }
+        }
+
         CloseHandle(lh);
-        rc = fifa_quit_early(waited / 1000, ccode, have_ccode);
-        goto done;
+        if (!race) break;                        /* the game survived the watch window */
+
+        /* Code 24 is deterministic (fifa_quit_early says so itself), and the last
+         * attempt has to report rather than retry. */
+        if (!licence_present() || attempt >= FIFA_LAUNCH_ATTEMPTS)
+        {
+            rc = fifa_quit_early(race_seconds, race_ccode, race_have_ccode, attempt);
+            goto done;
+        }
+
+        out(L"FIFA 17 quit %lu seconds in with the licence file present. This is the known "
+            L"start-up race; trying again (attempt %d of %d)...\n",
+            (unsigned long)race_seconds, attempt + 1, FIFA_LAUNCH_ATTEMPTS);
+
+        /* Leave nothing from this attempt behind: the next one refuses to run while a
+         * FIFA17.exe is up, and its own connector must not race ours. */
+        procid stale[8];
+        int stale_n = find_processes(L"FIFA17.exe", stale, 8);
+        for (int i = 0; i < stale_n; i++) kill_pid(stale[i].pid);
+        if (lpid && process_is(lpid, L"Aurora17Connector.exe", lstart)) kill_pid(lpid);
+        Sleep(3000);
     }
-    CloseHandle(lh);
 
 done:
     if (mutex) { if (held) ReleaseMutex(mutex); CloseHandle(mutex); }
