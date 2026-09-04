@@ -228,7 +228,7 @@ to two minutes it prints one of:
 | result | meaning |
 |---|---|
 | `PASS` | the session was issued, Ultimate Team should load |
-| `FAIL: FIFA exited on its own` | the game quit, usually code `0xFFFFFFFA`. See [The game quits about 20 seconds in](#the-game-quits-about-20-seconds-in) |
+| `FAIL: FIFA exited on its own` | the game quit. The connector log's exit code says which fault: see [The game quits about 20 seconds in](#the-game-quits-about-20-seconds-in) |
 | `FAIL: the shim was refused an auth code` | no session was enrolled. See the elevated setup error below |
 | `FAIL: the auth-code bridge kept failing` | same as the first FAIL, seen from the shim's side |
 | `INCONCLUSIVE` | the game exited cleanly before a session was issued. Normal if you closed it yourself |
@@ -502,6 +502,21 @@ The same information, for reference:
 
 ### The game quits about 20 seconds in
 
+Two different faults land in the same twenty-second window, and `--verify` says
+everything checks out for both. **The exit code in the connector log tells them
+apart. Read it before doing anything else:**
+
+| exit code | cause | go to |
+|---|---|---|
+| `0xFFFFFFFA` | no EA licence file | [below](#0xfffffffa--no-licence-file) |
+| `0x00000003` | the game quit itself at Direct3D start-up | [below](#0x00000003--dies-at-direct3d-start-up) |
+
+```sh
+grep 'exited with code' ~/Library/Application\ Support/CrossOver/Bottles/Aurora17/drive_c/users/crossover/AppData/Local/Aurora17/Logs/connector-*.log | tail -1
+```
+
+#### `0xFFFFFFFA` — no licence file
+
 > [!CAUTION]
 > 🔴 `--verify` says everything checks out. The shim loads. The game still dies. The connector log shows:
 > ```
@@ -526,6 +541,51 @@ Moving to a new bottle? Your Ultimate Team club lives at
 `drive_c\users\crossover\AppData\Local\Aurora17\Server\fut-state.json` in the
 old bottle. Copy that file across. Leave `access-sessions.json`, it is
 regenerated.
+
+#### `0x00000003` — dies at Direct3D start-up
+
+> [!CAUTION]
+> 🔴 The licence file **is** present, `--verify` is clean, and the launcher reports `ERROR [Code 25]`. The connector log ends:
+> ```
+> +00:00  Started the direct FIFA17 launch candidate (pid N)
+> +00:02  signaled verified shim readiness
+> +00:22  exited with code 0x00000003
+> ```
+> and the newest `client-*.log` shows the LSX handshake completing and every request answered, with `SetDownloaderUtilization` a tenth of a second before the exit.
+
+> [!TIP]
+> 🟢 This is **not** an Aurora fault, whatever the error code suggests. Every request the game made was served; it quit on its own immediately afterwards, while starting Direct3D. Code 25 is `ERR_FIFA_QUIT_EARLY`, which only reports that the game left early — it cannot see why.
+
+Work through these in order.
+
+**1. Take out anything that is not ours.** Open
+`~/Library/Application Support/CrossOver/Bottles/Aurora17/cxbottle.conf`. Under
+`[EnvironmentVariables]` there should be **only** the keys from
+[step 6](#6-add-three-settings-to-the-bottle) (plus the sound one, if you have
+it). Delete anything else — `WINEMSYNC`, `DXVK_CONFIG_FILE` and a
+`CX_GRAPHICS_BACKEND` changed to something other than `d3dmetal` have all
+turned up on bottles that fail this way. **Quit CrossOver with ⌘Q first**, or it
+writes the file back out over your edit. Then try again.
+
+**2. Check your macOS version.** `sw_vers -productVersion`. These fixes are
+built against CrossOver 26.3, whose D3DMetal predates the newest macOS
+releases; the failures seen so far have been on much newer macOS than this was
+developed on. There is no fix here yet — but say which version you are on in a
+bug report, because it is the thing that separates the machines that play from
+the machines that do not.
+
+**3. Get the graphics log.** This is what a useful report contains:
+
+```sh
+WINEDEBUG=+d3d,+dxgi ./setup.sh --play-offline 2>&1 | tee ~/Desktop/fifa-d3d.log
+```
+
+Then `./setup.sh --bundle`, and send both. The game is exiting deliberately at
+device or swap-chain creation, and that log names what it asked for and did not
+get.
+
+> [!NOTE]
+> `MakeWindowAssociation: Ignoring flags 7` and `[D3DMetal] Unsupported API: D3D11 timestamp query` both appear in these logs and are **normal**. Nearly every DXGI program prints the first, and D3DMetal prints the second for any unsupported call. Neither is the reason the game quit.
 
 ### "The Origin client was terminated"
 
@@ -560,7 +620,7 @@ launcher and in `%LOCALAPPDATA%\Aurora17\Logs\connector-*.log`.
 | 22 | no `redirector-dev.pfx`, and no PKI module to make one | run `./setup.sh` again ([step 8a](#8a-the-certificate)) |
 | 23 | Aurora asked for something the stand-in does not implement | send a bundle |
 | 24 | no licence file, and no `_fifa17.exe` next to the game | start FIFA 17 once from CrossOver, then PLAY again |
-| 25 | FIFA quit within a minute of starting | if you closed it yourself, ignore; otherwise the newest `client-*.log` says why |
+| 25 | FIFA quit within a minute of starting | if you closed it yourself, ignore; otherwise see [The game quits about 20 seconds in](#the-game-quits-about-20-seconds-in) — the exit code in the connector log says which fault |
 
 ### Installer exit codes
 
