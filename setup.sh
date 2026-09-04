@@ -1427,15 +1427,42 @@ aurora_dir_find() {
     return 1
 }
 
+# Whether Aurora17 has actually been used in this bottle, whatever the receipt
+# says. Either signal is written by Aurora itself and by nothing else: the
+# hosts receipt it leaves once it owns the EA mappings, and the game folder its
+# connector records on the first PLAY.
+aurora_in_use() {
+    local rc gd
+    rc="$(hosts_receipt_file 2>/dev/null || true)"
+    [ -n "$rc" ] && [ -f "$rc" ] && return 0
+    gd="$(connector_game_dir 2>/dev/null || true)"
+    [ -n "$gd" ] && return 0
+    return 1
+}
+
 verify_install() {
     local app="$1" problems=0
     # An offline install (./setup.sh --offline) has no Aurora17 by design, so
     # the checks for Aurora's stand-in, its EA names and its certificate would
     # all report BAD on a perfectly good install. The receipt says which kind
     # this was; the flag says so during the install itself.
-    local offline=0
+    local offline=0 offline_from_receipt=0
     [ "${NO_AURORA:-0}" = 1 ] && offline=1
-    [ -f "$RECEIPT" ] && grep -q '^offline=1$' "$RECEIPT" && offline=1
+    if [ "$offline" = 0 ] && [ -f "$RECEIPT" ] && grep -q '^offline=1$' "$RECEIPT"; then
+        offline=1; offline_from_receipt=1
+    fi
+    # The receipt records the last thing setup.sh was asked to do, not what the
+    # bottle is being used for. Running --offline over a bottle that already
+    # had Aurora17 in it rewrites the receipt and leaves every online piece in
+    # place and working -- and this then skipped all of them and finished with
+    # "Everything checks out", which is the worst answer a check can give.
+    # Believe the bottle over the receipt.
+    if [ "$offline_from_receipt" = 1 ] && aurora_in_use; then
+        offline=0
+        note "the receipt says this was an offline install, but Aurora17 has run"
+        say "        in the $BOTTLE bottle since, so its parts are checked below."
+        say "        To correct the receipt, re-run  ./setup.sh  without --offline."
+    fi
     say ""
     say "Checking $app"
     say ""
