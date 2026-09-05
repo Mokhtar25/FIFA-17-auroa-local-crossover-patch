@@ -35,7 +35,21 @@ fi
 set -eu
 
 HERE="${0:A:h}"
+case "${1:-}" in
+    --help|-h)
+        print -r -- "Usage: ./build.sh /path/to/crossover-sources-26.3.0.tar.gz [outdir]"
+        print -r -- "       ./build.sh --deps"
+        exit 0 ;;
+    --deps) [ "$#" -eq 1 ] || { print -r -- "--deps takes no arguments"; exit 2; } ;;
+    -*) print -r -- "Unknown option: $1 (try: ./build.sh --help)"; exit 2 ;;
+esac
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || {
+    print -r -- "Expected a source tarball and optional output directory (try: ./build.sh --help)"
+    exit 2
+}
 OUT="${2:-$HERE/build-out}"
+# Later commands change directory; all build paths must retain their meaning.
+OUT="${OUT:A}"
 
 # Colour only when writing to a terminal; NO_COLOR=1 turns it off.
 _paint() {
