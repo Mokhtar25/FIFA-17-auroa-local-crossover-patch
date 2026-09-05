@@ -110,6 +110,12 @@ case "${1:-}" in
     -*) print -r -- "Unknown option: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
 esac
 
+# A second flag must never become a source path or be silently ignored.
+if [ "$#" -gt 1 ] || [[ "${1:-}" == -* ]]; then
+    print -r -- "Expected at most one CrossOver app path (try: ./setup.sh --help)"
+    exit $E_UNSUPPORTED
+fi
+
 # Colour, only when the output is a terminal. Piped or saved output -- the
 # report file, the bundle -- stays plain. NO_COLOR=1 turns it off anywhere.
 # Checked on every call, not once: --report runs these inside a pipe to tee.
@@ -1477,8 +1483,8 @@ $APP_MGMT_HINT
 resign_app() {
     local app="$1"
     local ent after
-    ent="$(mktemp -t cxent).plist"
-    after="$(mktemp -t cxent).plist"
+    ent="$(mktemp -t cxent)"
+    after="$(mktemp -t cxent)"
 
     # Failing to read the original entitlements is not the same as there being
     # none. Treating it as "none" is how the four CrossOver needs get silently
@@ -1879,7 +1885,7 @@ verify_install() {
             || { bad "$so is not signed — run ./setup.sh --resign"; problems=$((problems+1)); }
     done
 
-    local ent; ent="$(mktemp -t cxent).plist"
+    local ent; ent="$(mktemp -t cxent)"
     if codesign -d --entitlements "$ent" --xml "$app" 2>/dev/null && [ -s "$ent" ]; then
         local -a keys; keys=( ${(f)"$(entitlement_keys "$ent")"} )
         [[ " ${keys[*]} " == *" $LIBVAL_KEY "* ]] \
@@ -2563,10 +2569,10 @@ bundle_mode() {
     # Collected in the temp folder and deleted once it is zipped: the zip is
     # the thing that gets sent, and a second unzipped copy of it beside the
     # commands is only something else to mistake for the one to attach.
-    local work="${TMPDIR:-/tmp}/aurora17-bundle-$stamp"
-    local zipf="$dest/aurora17-bundle-$stamp.zip"
+    local work
+    work="$(mktemp -d "${TMPDIR:-/tmp}/aurora17-bundle-$stamp.XXXXXX")" || return 1
+    local zipf="$dest/${work:t}.zip"
 
-    rm -rf "$work"
     mkdir -p "$work/logs"
 
     say "Collecting..."
@@ -2584,7 +2590,10 @@ bundle_mode() {
     # and the old glob (server-*.log) never matched it.
     for kind in connector server client; do
         keep=8; [ "$kind" = connector ] && keep=200
-        for f in ${(f)"$(/bin/ls -t -- "$logs"/$kind-*.log "$logs"/$kind-*.log.err(N) 2>/dev/null | head -"$keep")"}; do
+        local -a candidates
+        candidates=( "$logs"/$kind-*.log(N) "$logs"/$kind-*.log.err(N) )
+        (( ${#candidates} )) || continue
+        for f in ${(f)"$(/bin/ls -t -- "${candidates[@]}" 2>/dev/null | head -"$keep")"}; do
             [ -n "$f" ] && cp "$f" "$work/logs/" 2>/dev/null || true
         done
     done
@@ -2621,7 +2630,6 @@ bundle_mode() {
         done
     } > "$work/payload.txt" 2>&1
 
-    rm -f "$zipf"
     ( cd "${work:h}" && zip -qr "$zipf" "${work:t}" ) \
         || { say "Could not write $zipf"; rm -rf "$work"; return 1 }
 
@@ -4145,7 +4153,7 @@ ok "all six files present in CrossOver, and the ws2_32.so we edit"
 # on, and it runs at the very end -- after 2 GB has been copied and six files
 # replaced. Read them from the original now, while nothing has happened yet, so
 # a CrossOver that cannot supply them stops here instead of there.
-PRE_ENT="$(mktemp -t cxpre).plist"
+PRE_ENT="$(mktemp -t cxpre)"
 read_entitlements "$SRC" "$PRE_ENT" && PRE_RC=0 || PRE_RC=$?
 if [ "$PRE_RC" -eq 0 ]; then
     ok "CrossOver's own permissions can be read and kept"
