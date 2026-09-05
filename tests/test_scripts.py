@@ -27,6 +27,10 @@ class ScriptTests(unittest.TestCase):
             ("setup.sh", ["--help"], 0),
             ("setup.sh", ["--verify", "--offline"], 2),
             ("setup.sh", ["one.app", "two.app"], 2),
+            # --fifa15 takes one mode after it; the guard below the case block
+            # must still see an empty argument list once both are shifted off.
+            ("setup.sh", ["--fifa15", "--unknown"], 2),
+            ("setup.sh", ["--fifa15", "one.app", "two.app"], 2),
             ("uninstall.sh", ["--help"], 0),
             ("uninstall.sh", ["--unknown"], 2),
             ("uninstall.sh", ["one.app", "two.app"], 2),
@@ -34,6 +38,8 @@ class ScriptTests(unittest.TestCase):
             ("build.sh", ["--unknown"], 2),
             ("build.sh", ["--deps", "extra"], 2),
             ("build.sh", [], 2),
+            ("setup-both.sh", ["--help"], 0),
+            ("setup-both.sh", ["--unknown"], 2),
         ]
         for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):
             for script, args, expected in cases:
