@@ -146,7 +146,39 @@ says `BAD … not the shipped stand-in` until they do.
 | Wine's root import | `dlls/crypt32/rootstore.c` `CRYPT_ImportSystemRootCertsToReg`, called from `store.c` when the LocalMachine `Root` store is opened |
 | The shim's log events | `redirect-shim.log` is UTC; connector and client logs are local time |
 
-## 8. Bundles this rests on (user-supplied, in `~/Downloads`)
+## 8. Separate match-entry crash on macOS 26.6.2
+
+Bundle `aurora17-bundle-20260905-102827.PDkdCG.zip` reports macOS 26.6.2
+arm64 and CrossOver 26.3. The user reports connecting successfully, then
+crashing when entering a match with the Aurora server running. This is a
+different observed failure stage; a shared underlying cause is unproven.
+The macOS-14-only observation above concerns the pre-authentication failure,
+not all crashes with online features enabled.
+
+The latest launch, on September 5 (bundle-local time, UTC−04:00):
+
+- `10:18:27` and `10:18:37`: three successful Origin auth-code responses.
+- `10:19:01.172`: `POST /ut/game/fifa17/match`, with `type: OFFLINE`, returns
+  `200 OK` and a 13,156-byte JSON response. This is FUT offline match activity
+  while connected to Aurora, not evidence of an online opponent.
+- `10:19:12.579`: `PUT /ut/game/fifa17/squad/3` returns `200 OK`.
+- `10:19:15.328`: game PID 724 exits with `0xC0000005`, about 93 seconds
+  after launch and 48 seconds after its first auth code.
+
+Evidence is in `client-20260905-101741-668.log`,
+`connector-20260905-101739-604.log`, and `wire-transcript.log`.
+Successful HTTP status codes do not establish that the response contents
+are correct. The bundle contains no CrossOver exception log or module map;
+neither the exit code nor the last request identifies the faulting code.
+
+Send the updated package, have the user rerun `START HERE.command`, then
+use `diagnostics/12 Play with a crash log.command` to reproduce the
+**match-entry** crash and `diagnostics/1 Collect diagnostics.command` to
+collect it. Compare the exception address/module using section 4 before
+grouping this with the pre-authentication crash. No fix for this match-entry
+crash has been established.
+
+## 9. Bundles this rests on (user-supplied, in `~/Downloads`)
 
 - `aurora17-bundle-20260905-132914.ebpH7m.zip` — crashing, macOS 14.6.1
 - `aurora17-bundle-20260905-143403.VDrqku.zip` — crashing, after the licence reseed
