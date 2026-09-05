@@ -19,7 +19,7 @@ Open this folder in Finder and double-click the one you want.
 | `9 Install background cleanup.command` | Installs the background job that clears strays and ports by itself. | adds a LaunchAgent |
 | `10 Re-add offline menu entry.command` | Puts the "FIFA 17 (offline)" entry back in the bottle. | the bottle |
 | `11 Re-seed the licence file.command` | Makes the game's own loader write a fresh EA licence file, and prints the hash before and after. Use it when PLAY and `FIFA17.exe` will not start but `_fifa17.exe` does. | the licence file |
-| `12 Play with a crash log.command` | Quit CrossOver first. Starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints where the crash was (which module, or generated code). The log lands in `crash-logs/` here and the next bundle picks it up. Use it for `FIFA 17 crashed` / exit code `0xC0000005`. | no (writes a log here) |
+| `12 Play with a crash log.command` | Quit CrossOver first. Starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints where the crash was (which module, or generated code). It also records every name the bottle looks up, so the log says how far the game got before it died. The log lands in `crash-logs/` here and the next bundle picks it up. Use it for `FIFA 17 crashed` / exit code `0xC0000005`. | no (writes a log here) |
 
 `Diagnostics.command`, one folder up, is the same as number 1 — it is there so
 it can be found without opening this folder.
@@ -38,7 +38,8 @@ The zip holds the checks, every connector log (one per PLAY, with that launch's
 error code) and the newest server and client logs, any crash report macOS kept
 for the game or for Wine, any CrossOver log of a launch (number 12 makes one,
 and its summary says which module a crash was in), the bottle's
-hosts file and settings, and the hashes of what is installed. The logs are the
+hosts file and settings, the Mac's network set-up (interfaces and resolvers, no
+hardware addresses), and the hashes of what is installed. The logs are the
 `logs` folder inside it — double-click the zip to open it if you want to read
 them yourself. It holds no
 account, no password and no session token. Nothing leaves your Mac on its own —

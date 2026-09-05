@@ -243,7 +243,8 @@ double-click **Diagnostics.command**, or:
 
 It writes `aurora17-bundle-<date>.zip` into the **diagnostics** folder beside
 `setup.sh`, with the report, the Aurora logs, the bottle's hosts file and
-settings, and the checksums. It contains no account, password or session
+settings, the Mac's network set-up (interfaces and resolvers, no hardware
+addresses), and the checksums. It contains no account, password or session
 token. `./setup.sh --report` prints the same diagnosis
 without the logs and saves it as `diagnostics/report.txt`.
 
@@ -516,7 +517,7 @@ apart. Read it before doing anything else:**
 |---|---|---|
 | `0xFFFFFFFA` | no EA licence file | [below](#0xfffffffa--no-licence-file) |
 | `0x00000003` | the game aborts itself at Origin start-up, about 6 launches in 7 on the machines seen so far | [below](#0x00000003--the-start-up-race) |
-| `0xC0000005` | an access violation inside the game at the EA login step, about 50 seconds in, on every launch. Seen only on macOS 14 so far | [below](#0xc0000005--a-crash-at-the-main-menu) |
+| `0xC0000005` | an access violation inside the game at the EA login step, about 50 seconds in, on every launch. One user so far, on macOS 14 and still after updating to 26; not a macOS version matter | [below](#0xc0000005--a-crash-at-the-main-menu) |
 
 ```sh
 grep 'exited with code' ~/Library/Application\ Support/CrossOver/Bottles/Aurora17/drive_c/users/crossover/AppData/Local/Aurora17/Logs/connector-*.log | tail -1
@@ -594,21 +595,28 @@ code.
 > `--verify` is clean, offline play (`_fifa17.exe`) is fine, and `redirect-shim.log` has no `origin-auth-code-entry` line for that launch. Before 2026-09-05 the launcher called this the start-up race and relaunched it three more times; it now stops on the first crash and reports **code 26**.
 
 > [!TIP]
-> 🟢 Pressing PLAY again does not help; it is the same crash each time. What helps is a log that says **where** it crashed, which none of Aurora's logs can. Quit CrossOver (⌘Q, or **Stop.command**), then double-click **`diagnostics/12 Play with a crash log.command`**. It starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints the exception and the module it was in. Then **Diagnostics.command** — the zip picks that log up. Send the zip and say which macOS version you are on.
+> 🟢 Pressing PLAY again does not help; it is the same crash each time. What helps is a log that says **where** it crashed, which none of Aurora's logs can. Quit CrossOver (⌘Q, or **Stop.command**), then double-click **`diagnostics/12 Play with a crash log.command`**. It starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints the exception and the module it was in. Then **Diagnostics.command** — the zip picks that log up. Send the zip.
 
-**What is known.** One machine so far, macOS 14.6.1; every machine that plays
-online runs macOS 15 or 26. Working and crashing launches are identical at
-every layer — same game build, same shim, same three patch addresses, same LSX
-sequence — until the moment after the third `GetProfile`, where the working
-machine asks the shim for an Origin auth code about seven seconds later and
-the crashing one is already gone. Nothing else is different in the logs: no
-HTTP, no TLS, no error, nothing refused. The crash is inside the game between
-those two points, and only CrossOver's log can say in which module. Two
-levers exist for a second run if the first log points at generated code rather
-than a module: `AURORA_CTXLOG=1 ./setup.sh --play-log` adds the `CTXAV` line
-from the ntdll instrumentation, and setting `CX_SMC_FLUSH=1` in the bottle's
-environment (cxbottle.conf) exercises the Rosetta re-translation workaround
-described in BUGS.md §3.
+**What is known.** One user so far, first on macOS 14.6.1 and then, after
+updating, on macOS 26.6.2, with the same crash on every PLAY; other people on
+26.5 and 26.6 play fine, so the macOS version is not the cause. Working and
+crashing launches are identical at every layer — same game build, same shim,
+same three patch addresses, same LSX sequence — until the moment after the
+third `GetProfile`. On a working machine the game then opens its first
+connection to Aurora's redirector, runs the Blaze pre-auth exchange and asks the
+shim for an Origin auth code about seven seconds later; on the crashing one the
+redirector never receives a connection and the game is gone. So the crash sits
+between the main menu and the game's first socket: the game's own network
+start-up, name resolution through `a17hosts.dylib`, or the shim's connect
+redirect. The report's `how far each launch got` section shows this directly
+(`du=3 auth=0` launches, `redirector requests=0`). Only CrossOver's log can say
+in which module; `--play-log` now also records every name the bottle looks up,
+so that log says whether the game got as far as asking for
+`gosredirector.ea.com`. Two levers exist for a second run if the first log
+points at generated code rather than a module: `AURORA_CTXLOG=1 ./setup.sh
+--play-log` adds the `CTXAV` line from the ntdll instrumentation, and setting
+`CX_SMC_FLUSH=1` in the bottle's environment (cxbottle.conf) exercises the
+Rosetta re-translation workaround described in BUGS.md §3.
 
 > [!NOTE]
 > The report line `root certificates: 0` is a symptom of this, not a cause. Wine fills that store from the Mac's trust store the first time the EA login step opens it; on a machine that plays online it reads 160-odd from the first successful login on. A bottle that has never reached the login step reads 0. Do not chase it.

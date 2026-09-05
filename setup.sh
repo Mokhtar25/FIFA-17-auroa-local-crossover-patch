@@ -1891,16 +1891,14 @@ verify_install() {
         && ok "is a CrossOver bundle" \
         || { bad "$app is not a CrossOver bundle"; problems=$((problems+1)); }
     # Every machine that has played online so far ran macOS 15 or 26. The one
-    # macOS 14 report (14.6.1) crashed 0xC0000005 at the main menu on every
-    # PLAY, at the EA login step, with every static check clean. Not a fault
-    # in the install, so not BAD -- but worth saying before the first PLAY,
-    # with the one thing that can locate such a crash.
+    # macOS 14 user crashed 0xC0000005 at the main menu -- and still did after
+    # updating to macOS 26, so that crash is not a macOS 14 matter. What is
+    # left is only that nobody has confirmed online play on 14. Not BAD.
     if [ "$offline" = 0 ] && [ "${GAME:-fifa17}" != fifa15 ]; then
         case "$(sw_vers -productVersion 2>/dev/null)" in
             14.*)
-                note "macOS 14: online play has not been confirmed on macOS 14 yet. The one"
-                say "        report so far (14.6.1) crashed 0xC0000005 at the main menu on every"
-                say "        PLAY. If that happens here, quit CrossOver and double-click"
+                note "macOS 14: online play has not been confirmed on macOS 14 yet. If the game"
+                say "        crashes after the main menu, quit CrossOver and double-click"
                 say "        'diagnostics/12 Play with a crash log.command', then collect a bundle." ;;
         esac
     fi
@@ -2385,6 +2383,45 @@ diagnostics_dir() {
     print -r -- "${TMPDIR:-/tmp}"
 }
 
+# One line per launch, from what the shim and the server wrote. The shim logs
+# origin-auth-capability-loaded once per game start, origin-default-user-result
+# once per GetDefaultUser (three of them means the main menu came up with the
+# licence accepted) and origin-auth-code-issued once per Origin auth code (one
+# or more means the EA login went through). Between the menu and the auth code
+# the game opens its first connection to Aurora: the redirector, right after
+# Ultimate Team is chosen. The server logs that request without a timestamp,
+# which is how a whole investigation once read "nothing on the wire" off a log
+# that had it -- so it is counted here rather than left to a grep by time.
+launch_progress() {
+    local logs="$1"
+    if [ -f "$logs/redirect-shim.log" ]; then
+        print -r -- "redirect-shim.log, newest launches (UTC): GetDefaultUser results / auth codes"
+        awk '/origin-auth-capability-loaded/{if(l!="")print l" du="du" auth="au; l=$1; du=0; au=0}
+             /origin-default-user-result/{du++} /origin-auth-code-issued/{au++}
+             END{if(l!="")print l" du="du" auth="au}' "$logs/redirect-shim.log" 2>/dev/null \
+            | tail -10 | sed 's/^/  /'
+        print -r -- "  du=0: never reached the main menu.  du=1: no licence file, or quit early."
+        print -r -- "  du=3 auth=0: main menu, then gone before the EA login.  auth>0: logged in."
+    else
+        print -r -- "(no redirect-shim.log)"
+    fi
+    local srv; srv="$(ls -t "$logs"/server-*.log 2>/dev/null | head -1)"
+    [ -n "$srv" ] || return 0
+    local rd bf tls
+    rd="$(grep -c 'Redirector <= ' "$srv" 2>/dev/null || true)"
+    tls="$(grep -c 'Blaze TLS established' "$srv" 2>/dev/null || true)"
+    bf="$(grep -c 'Blaze frame ' "$srv" 2>/dev/null || true)"
+    print -r -- "newest server log (${srv:t}): redirector requests=${rd:-0}  Blaze TLS=${tls:-0}  Blaze frames=${bf:-0}"
+    if [ "${rd:-0}" -eq 0 ]; then
+        print -r -- "  0 redirector requests: no game in this server's lifetime opened its first"
+        print -r -- "  connection to Aurora. That connection comes right after Ultimate Team is"
+        print -r -- "  chosen and before the Origin auth code, so a du=3 auth=0 launch above with"
+        print -r -- "  0 here died between the main menu and its first socket: network start-up,"
+        print -r -- "  name resolution (a17hosts) or the shim's connect redirect, not the server."
+    fi
+    return 0
+}
+
 report_mode() {
     local app="$1"
     local out; out="$(diagnostics_dir)/report.txt"
@@ -2397,6 +2434,11 @@ report_mode() {
         print -r -- "app       $app"
         print -r -- "version   $(crossover_version "$app")"
         print -r -- "bottle    $BOTTLE_DIR/$BOTTLE"
+        # Which package wrote this. A report from an older setup.sh has fewer
+        # sections, and knowing that up front saves asking for a second one.
+        local rev; rev="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || true)"
+        if [ -n "$rev" ] && [ -n "$(git -C "$HERE" status --porcelain -- setup.sh 2>/dev/null)" ]; then rev="$rev-dirty"; fi
+        print -r -- "tools     setup.sh of $(date -r "$HERE/setup.sh" '+%Y-%m-%d' 2>/dev/null), ${rev:-not a git checkout}"
         print -r -- ""
 
         print -r -- "---- which CrossOver is actually running ----------------"
@@ -2540,6 +2582,10 @@ report_mode() {
             print -r -- "NO redirect-shim.log -- the shim has never loaded."
             print -r -- "That is the version DLL override, above, nine times in ten."
         fi
+        print -r -- ""
+
+        print -r -- "---- how far each launch got ---------------------------"
+        launch_progress "$logs"
         print -r -- ""
 
         print -r -- "---- the six network mappings --------------------------"
@@ -2779,6 +2825,22 @@ crash_log_summary() {
         fi
     fi
     [ -n "$ctxav" ] && print -r -- "first AV:  $ctxav"
+    # a17hosts writes one line per name looked up when AURORA17_HOSTS_DEBUG is
+    # set, which --play-log does. Untimestamped, so placed by line number
+    # against the exception: a launch that died before its first socket is
+    # located by the last name it asked for -- or by asking for none.
+    local -a names
+    names=( ${(f)"$(grep -n -E '^a17hosts: (getaddrinfo|gethostbyname)\(' "$log" 2>/dev/null | tail -12)"} )
+    names=( ${names:#} )
+    local exline="${hits[1]%%:*}"
+    print -r -- ""
+    if (( ${#names} )); then
+        print -r -- "names looked up (a17hosts, last ${#names}; the exception is at line ${exline:-none}):"
+        for h in $names; do print -r -- "  line ${h%%:*}: $(print -r -- "${h#*:}" | cut -c1-140)"; done
+    else
+        print -r -- "names looked up: none logged -- either AURORA17_HOSTS_DEBUG was not set for this"
+        print -r -- "           launch, or nothing in the bottle resolved a name before the log ended."
+    fi
     local bt; bt="$(grep -n -m1 'Backtrace:' "$log" 2>/dev/null | cut -d: -f1 || true)"
     if [ -n "$bt" ]; then
         print -r -- ""
@@ -2847,6 +2909,8 @@ collect_crash_logs() {
             else grep -E 'trace:loaddll:.*FIFA17' "$f"; fi | head -400
             print -r -- "==== exceptions and errors"
             grep -n -E 'Unhandled exception|^CTXAV |Backtrace:|err:|^wine: ' "$f" | head -400 | cut -c1-240
+            print -r -- "==== names looked up (a17hosts)"
+            grep -n '^a17hosts: ' "$f" | tail -200 | cut -c1-200
             print -r -- "==== 40 lines after the first unhandled exception"
             local n; n="$(grep -n -m1 -E 'err:seh:NtRaiseException Unhandled exception' "$f" | cut -d: -f1 || true)"
             [ -n "$n" ] && sed -n "${n},$((n + 40))p" "$f" | cut -c1-240
@@ -2857,6 +2921,36 @@ collect_crash_logs() {
         fi
         first=0
     done
+    return 0
+}
+
+# The network as the Mac sees it, for a launch that died before its first
+# socket: which resolvers answer, which interfaces are up and with what, and
+# whether a VPN or a proxy is in the way. The Mac's own interface addresses
+# stay in -- an interface with no IPv4, or a dozen utun ones, is the kind of
+# thing this is for -- except that IPv6 addresses are cut to their first group
+# and hardware (MAC) addresses are dropped.
+collect_network_snapshot() {
+    local out="$1"
+    {
+        print -r -- "hostname        $(hostname 2>/dev/null)"
+        print -r -- "LocalHostName   $(scutil --get LocalHostName 2>/dev/null)"
+        print -r -- ""
+        print -r -- "---- resolvers (scutil --dns, unscoped) ----"
+        scutil --dns 2>/dev/null | awk '/^DNS configuration \(for scoped/{exit} {print}' | head -90
+        print -r -- ""
+        print -r -- "---- interfaces (ifconfig; no hardware addresses, IPv6 cut short) ----"
+        ifconfig -a 2>/dev/null \
+            | grep -v -E '^[[:space:]]+(ether|lladdr) ' \
+            | sed -E 's/(inet6 )[0-9a-fA-F:.]+(%[A-Za-z0-9]+)?/\1xxxx:...\2/' \
+            | head -240
+        print -r -- ""
+        print -r -- "---- hardware ports ----"
+        networksetup -listallhardwareports 2>/dev/null | grep -v 'Ethernet Address' | head -80
+        print -r -- ""
+        print -r -- "---- system proxy settings ----"
+        scutil --proxy 2>/dev/null | head -30
+    } > "$out" 2>&1 || true
     return 0
 }
 
@@ -2917,6 +3011,11 @@ bundle_mode() {
     if whence -w collect_crash_logs >/dev/null 2>&1; then
         collect_crash_logs "$work/crash-logs" "$work/crash-logs.txt" || true
     fi
+    # The Mac's network set-up, for the crash that comes before the game's
+    # first socket. Same guard, same reason.
+    if whence -w collect_network_snapshot >/dev/null 2>&1; then
+        collect_network_snapshot "$work/network.txt" || true
+    fi
 
     local bh; bh="$(bottle_hosts_file)"
     [ -f "$bh" ] && cp "$bh" "$work/bottle-hosts.txt" 2>/dev/null || true
@@ -2972,8 +3071,9 @@ bundle_mode() {
     say ""
     say "Send that file. It contains the checks above, the Aurora17 logs, any"
     say "crash report macOS kept for the game or Wine, any CrossOver log of a"
-    say "launch (see --play-log), the bottle's hosts file and its settings, and"
-    say "the hashes of what is installed. It contains no account, password or"
+    say "launch (see --play-log), the bottle's hosts file and its settings, the"
+    say "Mac's network set-up (interfaces and resolvers, no hardware addresses),"
+    say "and the hashes of what is installed. It contains no account, password or"
     say "session token."
     say ""
     return 0
@@ -4413,13 +4513,19 @@ if [ "$MODE" = play-log ]; then
         full) CHAN="-unwind,-module,-process" ;;
     esac
     [ "${AURORA_CTXLOG:-0}" = 1 ] && export CX_CTXLOG=1
+    # One line per name the bottle resolves, from a17hosts.dylib into this same
+    # log. The crash so far dies after the main menu and before the game's first
+    # connection to Aurora; whether it got as far as asking for
+    # gosredirector.ea.com is the question, and this is the only thing that
+    # answers it. A few dozen lines per launch.
+    export AURORA17_HOSTS_DEBUG=1
     mkdir -p "$CLEANUP_BASE" 2>/dev/null || true
     print -r -- "$$" > "$CLEANUP_HOLD" 2>/dev/null || true
     trap 'rm -f "$CLEANUP_HOLD" 2>/dev/null' EXIT INT TERM
     ok "Aurora17:    $ADIR"
     ok "bottle:      $BOTTLE"
     ok "log:         $LOG"
-    ok "channels:    $CHAN${CX_CTXLOG:+  (+ CX_CTXLOG=1)}"
+    ok "channels:    $CHAN${CX_CTXLOG:+  (+ CX_CTXLOG=1)}, plus every name looked up"
     say ""
     say "The Aurora17 launcher opens in a moment. Press PLAY in it and play until"
     say "the game crashes or you quit. If a box about a program error appears,"
