@@ -28,6 +28,17 @@ fi
 set -eu
 HERE="${0:A:h}"
 
+# Validate before reading the receipt or touching an installation.
+case "${1:-}" in
+    --help|-h)
+        print -r -- "Usage: ./uninstall.sh [/path/to/CrossOver.app]"
+        print -r -- "The optional path is supported for in-place installs only."
+        print -r -- "Otherwise the install receipt selects the copy to remove."
+        exit 0 ;;
+    -*) print -r -- "Unknown option: $1 (try: ./uninstall.sh --help)"; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { print -r -- "Too many arguments (try: ./uninstall.sh --help)"; exit 2; }
+
 # Same override setup.sh takes, so the throwaway-tree test undoes the install
 # it made rather than the real one.
 RECEIPT="${AURORA_RECEIPT_DIR:-$HOME/Library/Application Support/Aurora17}/install-receipt.conf"
@@ -83,6 +94,14 @@ if [ -n "${AURORA_IN_PLACE:-}" ]; then
     if [ "$AURORA_IN_PLACE" = "1" ]; then MODE=in-place; else MODE=copy; fi
 else
     MODE="${R_MODE:-copy}"
+fi
+case "$MODE" in
+    copy|in-place) ;;
+    *) fail "Unknown install mode in $RECEIPT: $MODE" ;;
+esac
+if [ "$#" -gt 0 ] && [ "$MODE" != in-place ]; then
+    print -r -- "A positional app path requires an in-place install. Use AURORA_TARGET for a copy."
+    exit 2
 fi
 
 if [ -n "${AURORA_TARGET:-}" ]; then
@@ -206,7 +225,7 @@ if [ "$MODE" = "in-place" ]; then
         # Sign the app back with the entitlements it currently carries. Signing
         # without them would take away microphone, camera and Apple Events
         # access and leave no sign that it happened.
-        ent="$(mktemp -t cxent).plist"
+        ent="$(mktemp -t cxent)"
         if codesign -d --entitlements "$ent" --xml "$APP" 2>/dev/null && [ -s "$ent" ]; then
             codesign --force --sign - -o runtime --entitlements "$ent" "$APP" 2>/dev/null || signed=0
         else
