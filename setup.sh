@@ -27,6 +27,10 @@
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
 #   ./setup.sh --play-offline             start FIFA 17 with no Aurora17 running
+#   ./setup.sh --reseed-licence           make the game's own loader write a fresh
+#                                         EA licence file, replacing whatever is
+#                                         there. Every other check only asks whether
+#                                         that file exists, so a wrong one looks fine
 #   ./setup.sh --offline-menu             (re)add the FIFA 17 (offline) entry to the
 #                                         bottle, e.g. after moving the game folder
 #   ./setup.sh --offline                  install FIFA 17 with no Aurora17 at all:
@@ -89,6 +93,7 @@ case "${1:-}" in
     --smoke) MODE=smoke; shift ;;
     --offline) MODE=install; NO_AURORA=1; shift ;;
     --play-offline) MODE=play-offline; shift ;;
+    --reseed-licence|--reseed-license) MODE=reseed-licence; shift ;;
     --offline-menu) MODE=offline-menu; shift ;;
     --ensure-licence|--ensure-license) MODE=ensure-licence; shift ;;
     --fifa15)
@@ -1682,11 +1687,26 @@ stop_bottle_game() {
 
 # Runs the loader once, waits for the file, then stops what it started.
 seed_bottle_licence() {
-    local app="$1" lic gdu gwin wine waited=0 wpid
+    local app="$1" force="${2:-0}" lic gdu gwin wine waited=0 wpid prev="" kept=""
     lic="$(bottle_licence_file)"
-    if [ -f "$lic" ]; then
+    # Presence is all the rest of this script has ever tested, and a file that
+    # is there but is not the blob _fifa17.exe writes passes every check while
+    # the game behaves as though it had none: it will not start from Aurora or
+    # from FIFA17.exe, one loader run fixes it, and something later puts the
+    # wrong bytes back. There is no safe constant to compare against -- the EA
+    # App writes a different 1649-byte file than the loader does -- so the only
+    # honest check is to make the loader write a fresh one and show both hashes.
+    if [ -f "$lic" ] && [ "$force" != 1 ]; then
         ok "the licence file is already there ($(stat -f%z "$lic") bytes)"
         return 0
+    fi
+    if [ -f "$lic" ]; then
+        prev="$(shasum -a 256 "$lic" | cut -c1-16)"
+        kept="$lic.aurora17-previous"
+        # Kept, not deleted: if the loader writes nothing we put it back, so a
+        # forced re-seed can never leave a bottle worse off than it found it.
+        mv -f "$lic" "$kept" 2>/dev/null || { note "could not move the old licence file aside"; return 1; }
+        say "        replacing the licence file that is there now ($prev)"
     fi
     if [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
         note "no bottle to seed the licence file in"
@@ -1720,8 +1740,22 @@ seed_bottle_licence() {
     stop_bottle_game
     wait "$wpid" 2>/dev/null || true
     if [ -f "$lic" ]; then
-        ok "wrote the licence file after ${waited}s ($(stat -f%z "$lic") bytes)"
+        local now; now="$(shasum -a 256 "$lic" | cut -c1-16)"
+        ok "wrote the licence file after ${waited}s ($(stat -f%z "$lic") bytes, $now)"
+        if [ -n "$prev" ] && [ "$prev" != "$now" ]; then
+            note "the licence file changed: $prev -> $now"
+            say "        The old one was not what the loader writes, which is why the"
+            say "        game would not start with it. Nothing else reports this,"
+            say "        because every other check only asks whether the file exists."
+        elif [ -n "$prev" ]; then
+            ok "unchanged, so the licence file was not the problem ($now)"
+        fi
+        [ -n "$kept" ] && rm -f "$kept" 2>/dev/null
         return 0
+    fi
+    if [ -n "$kept" ]; then
+        mv -f "$kept" "$lic" 2>/dev/null || true
+        note "the loader wrote nothing, so the licence file that was there is back."
     fi
     note "the loader ran for ${waited}s and wrote no licence file:"
     say "        $lic"
@@ -2556,6 +2590,74 @@ report_mode() {
     print -r -- "Saved to $out — send that file, or paste everything above."
 }
 
+# macOS crash reports for the game, Wine and the connector.
+#
+# A Windows-side access violation (0xC0000005) is normally turned by Wine into
+# an SEH exception and handled inside the process, so macOS never sees a crash
+# and this collects nothing -- that absence is itself an answer, and the index
+# file says so rather than leaving a silent empty folder. When the fault does
+# escape Wine, the report names the faulting module and address, which is the
+# one thing no other log in this bundle carries and the whole question in a
+# "it started, then it died" report. Wine names its processes after the PE, so
+# the game's report is FIFA17.exe-<date>.ips, not something generic.
+#
+# Only the names we put on this machine, newest twelve: a DiagnosticReports
+# folder is a record of everything that has ever crashed on it, and the rest of
+# that is none of our business.
+collect_crash_reports() {
+    setopt localoptions nullglob
+    local out="$1" index="$2"
+    local -a dirs=( "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports )
+    local -a names=( 'FIFA17.exe' '_fifa17.exe' 'wine*' 'CrossOver*' 'cxrun*' 'Aurora17*' )
+    local -a found
+    local d n f
+
+    for d in $dirs; do
+        [ -d "$d" ] || continue
+        for n in $names; do
+            found+=( "$d"/${~n}-*.ips "$d"/${~n}-*.crash "$d"/${~n}_*.ips "$d"/${~n}_*.crash )
+        done
+    done
+    # A case-insensitive filesystem matches wine* twice over; ls -t would then
+    # spend two of the twelve slots on one file.
+    found=( ${(u)found} )
+
+    if (( ! ${#found} )); then
+        {
+            print -r -- "No crash report naming FIFA17.exe, Wine or CrossOver was found in:"
+            for d in $dirs; do print -r -- "  $d"; done
+            print -r -- ""
+            print -r -- "For an 0xC0000005 that Wine handled itself this is the expected"
+            print -r -- "result: the Windows process exits with that code and macOS never"
+            print -r -- "sees a crash, so there is nothing here to collect."
+        } > "$index" 2>/dev/null || true
+        return 0
+    fi
+
+    mkdir -p "$out" 2>/dev/null || return 0
+    {
+        print -r -- "Crash reports naming the game, Wine or CrossOver (newest first):"
+        print -r -- ""
+        for f in ${(f)"$(/bin/ls -t -- ${found} 2>/dev/null | head -12)"}; do
+            [ -n "$f" ] || continue
+            cp "$f" "$out/" 2>/dev/null || continue
+            print -r -- "  ${f:t}"
+            # What faulted, in a couple of bounded lines. An .ips keeps it in
+            # JSON on the payload line -- pretty-printed, so the separator is
+            # '" : "' and not '":"' -- while a pre-Ventura .crash spells it out
+            # in headers. The rest of either file is machine inventory.
+            { grep -o -m1 '"exception" *: *{[^}]*}' "$f" 2>/dev/null
+              grep -o -m1 '"termination" *: *{[^}]*}' "$f" 2>/dev/null
+              grep -o -m1 'Exception Type:.*' "$f" 2>/dev/null
+              grep -o -m1 'Crashed Thread:.*' "$f" 2>/dev/null; } \
+                | cut -c1-240 | sed 's/^/      /' || true
+        done
+    } > "$index" 2>&1 || true
+    # setup.sh runs under set -e and a bundle is worth more than this extra:
+    # nothing collected here is ever a reason to lose the rest of it.
+    return 0
+}
+
 # Everything --report prints, plus the log files themselves, in one zip. A
 # tester's first run is the only cheap chance to collect this: by the time they
 # have been asked three questions they have already deleted the bottle.
@@ -2601,6 +2703,11 @@ bundle_mode() {
         [ -f "$logs/$f" ] && cp "$logs/$f" "$work/logs/" 2>/dev/null || true
     done
 
+    # The faulting module, when macOS caught the fault at all. Aurora's own logs
+    # can say the game exited 0xC0000005 but never which module did it, and that
+    # is exactly the question those reports come in asking.
+    collect_crash_reports "$work/crash-reports" "$work/crash-reports.txt"
+
     local bh; bh="$(bottle_hosts_file)"
     [ -f "$bh" ] && cp "$bh" "$work/bottle-hosts.txt" 2>/dev/null || true
     local rc; rc="$(hosts_receipt_file 2>/dev/null || true)"
@@ -2645,9 +2752,10 @@ bundle_mode() {
     say ""
     say "Wrote $zipf"
     say ""
-    say "Send that file. It contains the checks above, the Aurora17 logs, the"
-    say "bottle's hosts file and its settings, and the hashes of what is"
-    say "installed. It contains no account, password or session token."
+    say "Send that file. It contains the checks above, the Aurora17 logs, any"
+    say "crash report macOS kept for the game or Wine, the bottle's hosts file"
+    say "and its settings, and the hashes of what is installed. It contains no"
+    say "account, password or session token."
     say ""
     return 0
 }
@@ -3879,6 +3987,35 @@ if [ "$MODE" = bottle ]; then
         exit 0
     fi
     red "NOT FINISHED — see the lines above."
+    say ""
+    exit $E_INCOMPLETE
+fi
+
+# Replaces the EA licence file with whatever the game's own loader writes now.
+#
+# --verify, seed_bottle_licence and the stand-in's ensure_licence all test the
+# same thing: does 1027460.dlf exist. None of them looks at what is in it. A
+# bottle holding the wrong 1649-byte blob therefore passes every check while the
+# game refuses to start from Aurora or from FIFA17.exe, and the only thing that
+# has ever fixed it is running _fifa17.exe by hand. This is that, supported, and
+# it prints both hashes so the answer is on the screen either way.
+if [ "$MODE" = reseed-licence ]; then
+    say ""
+    say "Re-seeding the EA licence file"
+    say ""
+    [ -d "$TARGET" ] || die $E_INCOMPLETE "There is no $TARGET yet. Run ./setup.sh first."
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] \
+        || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         For another name:  AURORA_BOTTLE='name' ./setup.sh --reseed-licence"
+    if seed_bottle_licence "$TARGET" 1; then
+        say ""
+        ok "done — press PLAY, or double-click PLAY FIFA 17 offline.command"
+        say ""
+        exit 0
+    fi
+    say ""
+    red "NOT DONE — see the lines above."
     say ""
     exit $E_INCOMPLETE
 fi
