@@ -2036,7 +2036,11 @@ verify_install() {
     port_pids="${port_pids% }"
     if [ -z "$port_pids" ]; then
         ok "all Aurora ports ($GAME_PORTS_LABEL) are free"
-    elif [ -n "$(crossovers_running)" ]; then
+    elif [ -n "$(crossovers_running)" ] || hold_pid_alive; then
+        # hold_pid_alive covers a session started by --play-log or
+        # --play-offline: CrossOver is closed by design there, so testing
+        # crossovers_running alone called a live session an orphan, six lines
+        # after the check above had called it "playing right now".
         note "Aurora service is active on port(s) $GAME_PORTS_LABEL (PID: $port_pids)"
     else
         bad "orphaned process(es) holding Aurora port(s) (PID: $port_pids) with CrossOver closed."

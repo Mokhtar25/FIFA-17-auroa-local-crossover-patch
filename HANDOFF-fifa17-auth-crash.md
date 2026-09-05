@@ -1,17 +1,19 @@
 # FIFA 17 exits 0xC0000005 at the main menu — where this stands
 
-**Status (2026-09-05, fourth pass — read this first):** the affected user
-installed the new package and ran `12 Play with a crash log.command`. **The
-game did not crash. It played.** Same Mac (macOS 26.6.2), same bottle, same
-game files, same shim; the only things that changed were the launch path and
-the logging. So the crash is not in the install or the game data. It is
-either timing (CrossOver's log slows exceptions and DLL loads; BUGS.md §3 saw
-a protector race vanish the same way) or the launch environment (command 12
-starts the launcher from Terminal through CrossOver's command-line `wine`;
-a normal PLAY goes through the CrossOver app, with a different environment
-and the app's own macOS privacy permissions rather than Terminal's). §10 has
-the split, the three things asked of the user, and the mode to add next. The
-third-pass status below still describes the crash itself and stands.
+**Status (2026-09-05, fifth pass — read this first):** the bundle of
+18:38:01 holds three launches in ten minutes and settles it. **It is a hang,
+not the `0xC0000005` this document is named after.** The failing CrossOver
+log deadlocks on ntdll's `loader_section` (thread `02c0` blocked by `02bc`,
+60 s) with no unhandled exception; the working log has zero such waits. Both
+failed launches were started while a previous session was still alive on the
+bottle — the second one replaced the hosts mappings and started a second
+server under the live first game pid. The one launch that had the bottle to
+itself played for four and a half minutes and exited 0. `--play-log` is not
+special because of Terminal or logging: it is the only mode with a pre-flight
+refusal. §11 has the three-launch table, the millisecond-aligned LSX
+comparison, the one-line test to confirm it, and the guard to ship. §10's
+timing-vs-environment split is superseded; the crash window in §1 is
+confirmed exactly.
 
 **Status (2026-09-05, third pass):** two hypotheses are dead. The root store
 (second pass) and now macOS 14: the affected user updated to macOS 26.6.2 and
@@ -406,3 +408,131 @@ grep 'Root\\\\Certificates\\\\' "$BOTTLE/system.reg" | awk '{print $NF}' | sort 
 # did any game in a server's lifetime reach the redirector? (these lines have no timestamps)
 grep -c 'Redirector <= ' <bundle>/logs/server-*.log
 ```
+
+## 11. Fifth pass: it is a hang, and it tracks the second session
+
+`aurora17-bundle-20260905-183801.HvcJA5.zip` (macOS 26.6.2, CrossOver 26.3,
+Mac15,12 8 GB) holds **three launches in ten minutes**, and they settle §10.
+The user's words: the normal launcher "didn't launch — not crashed, just
+didn't launch"; command 12 ran fine.
+
+### 11.1 The three launches
+
+| | A — normal PLAY | B — normal PLAY | C — `--play-log` |
+|---|---|---|---|
+| started | 18:28:55 | 18:29:34 | 18:33:03 |
+| game pid | 704 | 1228 | 696 |
+| shim loaded, ready | 18:29:06 | 18:29:40 | 18:33:08 |
+| LSX connection | **never** | 18:29:58.80 | 18:33:26.69 |
+| last LSX request | — | 18:30:03.886 `GetGameInfo` | ran to 18:37:47 |
+| redirector requests on its server | **0** | **0** | **1** |
+| Blaze TLS / frames on its server | **0 / 0** | **0 / 0** | 1 / 781 |
+| auth codes | 0 | 0 | 3 |
+| shim tally | du=0 auth=0 | du=1 auth=0 | du=3 auth=3 |
+| outcome | hung, no window | hung after the menu | **played 4½ min, exit 0** |
+
+B and C are byte-identical in the LSX sequence up to the same instant:
+
+```
+B  18:29:58.870 handshake -> GetConfig GetProfile GetSetting GetGameInfo
+   18:29:58.900 IsProgressiveInstallationAvailable
+   18:30:03.884 GetProfile
+   18:30:03.886 GetGameInfo          <- last thing it ever said
+C  18:33:26.758 handshake -> GetConfig GetProfile GetSetting GetGameInfo
+   18:33:26.782 IsProgressiveInstallationAvailable
+   18:33:29.275 GetProfile
+   18:33:29.277 GetGameInfo
+   18:33:29.728 GetSetting           <- +451 ms, and on it goes
+   18:33:29.826 SetDownloaderUtilization
+   18:33:49.402 auth code issued
+```
+
+So the death window from §1 is confirmed to the millisecond, and it is
+exactly the window in which the game opens its first socket to the
+redirector. Neither A nor B ever reached it: **`Redirector <= ` appears zero
+times in `server-20260905-182847.log` and `server-20260905-182927.log`, and
+once in `server-20260905-183256.log`.**
+
+### 11.2 It is not the `0xC0000005` this document is named after
+
+Two CrossOver logs are in the bundle, one failing (18:14:51, an earlier
+command 12) and one working (18:32:38):
+
+```
+failing  err:sync:RtlpWaitForCriticalSection section 00006FFFFFFB3440
+           "../../wine/dlls/ntdll/loader.c: loader_section"
+           wait timed out in thread 02c0, blocked by 02bc, retrying (60 sec)
+         err:sync:RtlpWaitForCriticalSection section 00000000523BA870 "?"
+           wait timed out in thread 0320, blocked by 02f8, retrying (60 sec)
+working  (zero RtlpWaitForCriticalSection lines; the only two err: lines in
+          all 16016 are ZwLoadDriver winebth and the kerberos notice)
+```
+
+`unhandled: none` in both. Thread `02bc` is the one that loaded
+`FIFA17.exe`; `02c0` is waiting on ntdll's loader lock that `02bc` holds.
+That is a **loader deadlock**, not an access violation — a hang, which is
+what the user described and what the process tally shows (A and B were still
+alive, windowless, when the next launch began). The `0xC0000005` in older
+bundles may be the same deadlock reaching a watchdog; do not assume so
+without a log.
+
+### 11.3 What actually separates C from A and B
+
+Not Terminal, not privacy permissions, not locale — §10's split was wrong.
+`--play-log` is **the only mode in the package with a pre-flight refusal**
+(`setup.sh:4494`, whose own comment reads "Two launchers on one bottle fight
+over ports 47170-47173"): it dies unless CrossOver is quit *and*
+`game_leftovers` is empty. The normal PLAY, going through the CrossOver app
+and `Aurora17Connector.lnk`, has no such guard.
+
+And in this bundle it was needed. A's connector reported "FIFA 17 is running
+(pid 704)" at 18:29:01 and never logged an exit; B's connector began its own
+setup 13 s later, replaced the six hosts mappings under the live pid 704, and
+started a **second** server (`server-20260905-182927.log`, its own
+bootstrap-ticket and enrolment) while the first was still logging. C ran only
+after the user had stopped everything, because the guard made them.
+
+The failing 18:14:51 log is the counter-example that keeps this honest:
+command 12 has failed too. But it failed the same way — loader deadlock —
+and its session was the one still up when A was launched.
+
+### 11.4 The decisive test, in one line
+
+Ask the user to do exactly this, once, and report which of the two happens:
+
+```
+double-click Stop.command, wait for it to finish, then press PLAY once
+```
+
+- **It launches and reaches Ultimate Team** → the cause is the second
+  session. Ship the guard (11.5) and this is over.
+- **It hangs again** → the guard is not enough; the cause is the loader
+  deadlock on its own, and the next run is `AURORA_LOG_LEVEL=full` command 12
+  to catch which DLL `02c0` is loading when it blocks.
+
+Tell them not to press PLAY a second time when nothing appears — that is what
+made A and B overlap, and a second press cannot help a hang.
+
+### 11.5 The fix, if 11.4 confirms it
+
+1. Give the normal PLAY the guard `--play-log` already has. The connector is
+   a shipped binary and has no source here, so the guard has to go in front
+   of it: the bottle's `Aurora17Connector.lnk` should start a wrapper that
+   refuses when `prefix_holders` or the Aurora ports are non-empty, and says
+   "FIFA 17 is already running — double-click Stop.command first."
+2. Widen the port scan. `GAME_PORTS` (`setup.sh:530`) is 47170-47173, but the
+   server also binds 47174 (fut-http), 47175 (cdn-http) and UDP 17502 (QoS).
+   A leftover on those is invisible to `--report` and to `--unstick`.
+3. Fixed in this pass: `--report`'s orphaned-port check gated on
+   `crossovers_running` alone, so during any `--play-log` / `--play-offline`
+   session it printed `BAD orphaned process(es) holding Aurora port(s)` about
+   the session it had, six lines earlier, called "playing right now, not a
+   stuck bottle". This bundle shows both. It now also accepts
+   `hold_pid_alive`.
+
+### 11.6 What to tell the user
+
+The game, the install, the bottle and the shim are all fine — C proves it by
+playing for four and a half minutes and exiting 0. The game hangs when a
+previous session is still alive on the bottle. Stop.command before PLAY,
+every time, and only one press.
