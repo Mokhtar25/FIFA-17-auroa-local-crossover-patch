@@ -1,5 +1,18 @@
 # FIFA 17 exits 0xC0000005 at the main menu — where this stands
 
+**Status (2026-09-05, fourth pass — read this first):** the affected user
+installed the new package and ran `12 Play with a crash log.command`. **The
+game did not crash. It played.** Same Mac (macOS 26.6.2), same bottle, same
+game files, same shim; the only things that changed were the launch path and
+the logging. So the crash is not in the install or the game data. It is
+either timing (CrossOver's log slows exceptions and DLL loads; BUGS.md §3 saw
+a protector race vanish the same way) or the launch environment (command 12
+starts the launcher from Terminal through CrossOver's command-line `wine`;
+a normal PLAY goes through the CrossOver app, with a different environment
+and the app's own macOS privacy permissions rather than Terminal's). §10 has
+the split, the three things asked of the user, and the mode to add next. The
+third-pass status below still describes the crash itself and stands.
+
 **Status (2026-09-05, third pass):** two hypotheses are dead. The root store
 (second pass) and now macOS 14: the affected user updated to macOS 26.6.2 and
 crashes exactly as before. The second pass also misread the window — it said
@@ -270,6 +283,109 @@ use `diagnostics/12 Play with a crash log.command` to reproduce the
 collect it. Compare the exception address/module using section 4 before
 grouping this with the pre-authentication crash. No fix for this match-entry
 crash has been established.
+
+## 10. Fourth pass: it works under `--play-log`
+
+### 10.1 What happened
+
+The user re-ran `START HERE.command` from the package pushed as `9fe27ce`,
+quit CrossOver, double-clicked `12 Play with a crash log.command`, pressed
+PLAY, and the game played without crashing. No bundle from that run yet (asked
+for; see 10.3). Before this, every PLAY on that machine for two days had died
+at the main menu, on macOS 14.6.1 and on 26.6.2 alike (§1, §6).
+
+### 10.2 What it means — two candidates, nothing else
+
+Same machine, bottle, game, shim and payload hashes. What differs between a
+normal PLAY and command 12:
+
+| | normal PLAY | command 12 (`./setup.sh --play-log`) |
+|---|---|---|
+| started by | the CrossOver app, from the bottle's `Aurora17Connector.lnk` | Terminal → `CrossOver-FIFA.app/Contents/SharedSupport/CrossOver/bin/wine --bottle … --workdir <Aurora17> --cx-log <file> --debugmsg <channels> --cx-app Aurora17Connector.exe` |
+| CrossOver GUI running | yes | no (the mode refuses to start with it open) |
+| environment | the app's launchd environment: no shell variables, no `LANG`/`LC_*` from a shell | the user's Terminal environment, plus `AURORA17_HOSTS_DEBUG=1` |
+| macOS privacy permissions | the app's (TCC entries for CrossOver-FIFA.app: Local Network, files, …) | inherited from Terminal.app |
+| Wine debug channels | CrossOver's defaults, log to nowhere | `-seh,err+seh,-unwind,-process,-module,-threadname` + `+loaddll` kept, written to a file |
+| working directory of the launcher | whatever the shortcut sets | the Aurora17 folder |
+
+So, two candidates:
+
+1. **Timing.** With `err+seh` and `+loaddll` on, every exception the
+   protector raises and every DLL load takes a little longer. BUGS.md §3
+   describes a protector-side race (a wrong-offset decode in an RWX page)
+   that appeared and disappeared with logging. The seven-to-fifty-second
+   spread of the crash (§1) fits a race better than a fixed fault. Note the
+   window (§1 correction): between choosing Ultimate Team and the first
+   socket, when DirtySDK starts up and the protector decodes the networking
+   code for the first time.
+2. **Environment.** Something the CrossOver app's launch lacks or has and the
+   Terminal launch does not. The strongest specific suspect is **macOS Local
+   Network permission**: on macOS 15 and 26 an app that sends to the local
+   network or resolves `.local` names needs a TCC grant, and CrossOver-FIFA.app
+   is its own bundle with its own (possibly never-granted) entry, while a
+   process started from Terminal inherits Terminal's. DirtySDK's start-up
+   enumerates adapters and may resolve the machine's own hostname
+   (`…-MacBook-Air.local`, mDNS) before touching `gosredirector.ea.com`. A
+   denial should not crash a program, but a resolver answer the game did not
+   expect might. Locale variables (`LANG`, `LC_ALL`) are the other difference
+   worth a look; Wine reads them when present.
+
+Neither is proven. Do not pick one without the runs in 10.3.
+
+### 10.3 What the user was asked to do, and how to read each answer
+
+1. **Collect a bundle now**, before changing anything (`1 Collect
+   diagnostics.command`). The working run's `.cxlog` is in it: the sequence
+   of `a17hosts:` name lookups on *his* machine when it works, `network.txt`,
+   and `--report`'s `how far each launch got` with `redirector requests`
+   finally non-zero. Compare his lookup sequence against mine from the same
+   command (run `./setup.sh --play-log` here and diff the `a17hosts:` lines).
+   If his shows a lookup mine does not — his own hostname, a `.local` name,
+   an EA host outside the six mappings — that is the environment thread.
+2. **Normal PLAY again** through the CrossOver app. If it **still crashes**,
+   the difference is real and repeatable, go to 3. If it **now works**, the
+   new package fixed it by accident: the rebuilt `a17hosts.dylib` (debug off
+   is behaviourally identical, but it is a different binary and a different
+   UUID) or the new stand-in (which no longer relaunches; irrelevant to a
+   first-launch crash). Then have him play a few times; if it stays fixed,
+   suspect the dylib load and keep this section as the record.
+3. **Command 12 a second time.** If it works twice while normal PLAY crashes,
+   the user has a way to play today (say so), and the next step is 10.4.
+
+### 10.4 Next tool: the same launch path without the log
+
+Add `./setup.sh --play` (and `diagnostics/13 Play from Terminal.command`):
+exactly the `--play-log` block minus `--cx-log`, minus `--debugmsg`, minus
+`AURORA17_HOSTS_DEBUG`. Same `wine` binary, same `--bottle`, `--workdir`,
+`--cx-app`, same "quit CrossOver first" guard. One run splits the candidates:
+
+- **`--play` works** → environment. Then compare environments directly: add
+  to `--bundle` the output of `launchctl print gui/$(id -u)` filtered to
+  environment (or `launchctl getenv` for `LANG`, `LC_ALL`, `PATH`), the TCC
+  state for the app (`sqlite3` on the user TCC.db is not readable; instead
+  `log show --predicate 'subsystem == "com.apple.TCC"' --last 5m` right
+  after a crashing PLAY names the denied service, if any), and `env` from the
+  Terminal. Make normal PLAY match: for Local Network, System Settings →
+  Privacy & Security → Local Network → CrossOver-FIFA. For locale, set the
+  variable in `cxbottle.conf` `[EnvironmentVariables]`.
+- **`--play` crashes** → timing. Then `--play-log` with fewer channels
+  (`-all`, then `+loaddll` only) to find the least logging that still saves
+  it, and take that to CodeWeavers with the BUGS.md §3 reference; a
+  permanent workaround is `CX_SMC_FLUSH=1` in the bottle environment
+  (`patches/crossover-26.3-fifa17-rosetta.patch`, `smc_flush_on`), which
+  forces Rosetta re-translation and should be tried as the very next run.
+
+Either way, keep `--play-log` as the documented way to play until a normal
+PLAY works; SETUP.md's `0xC0000005` section should say so once 10.3 step 3
+is confirmed.
+
+### 10.5 Bookkeeping
+
+- Pushed to `main` as `9fe27ce` (the whole diagnose branch fast-forwarded).
+- `fifa15` branch: `diagnostics/11` and `12` are the FIFA 15 commands there;
+  renumber the crash-log command when syncing, and place `--play` after it.
+- The user should be told plainly that the game and the install are fine
+  and that the crash depends on how the game is started.
 
 ## 9. Bundles this rests on (user-supplied, in `~/Downloads`)
 
