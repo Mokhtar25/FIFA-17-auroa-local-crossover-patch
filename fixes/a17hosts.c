@@ -263,7 +263,15 @@ int getaddrinfo( const char *node, const char *service,
     if (!real_getaddrinfo) return EAI_FAIL;
 
     if (!a17_lookup( node, want, addr, sizeof(addr) ))
-        return real_getaddrinfo( node, service, hints, res );
+    {
+        int rc = real_getaddrinfo( node, service, hints, res );
+        /* Only with AURORA17_HOSTS_DEBUG set: which names the game asked the
+         * real resolver about, and what it said, in the order they happened.
+         * A launch that dies before its first socket is placed by the last
+         * of these lines in CrossOver's log. */
+        a17_log( "getaddrinfo(%s) -> real resolver, rc=%d", node ? node : "(null)", rc );
+        return rc;
+    }
 
     /* Hand the literal to the real resolver so the addrinfo chain it returns
      * is one freeaddrinfo() can free, and so service/socktype/protocol are
@@ -295,12 +303,16 @@ struct hostent *gethostbyname( const char *name )
     family = a17_lookup( name, AF_UNSPEC, addr, sizeof(addr) );
     if (!family)
     {
+        struct hostent *he;
         if (!real_gethostbyname)
         {
             h_errno = NO_RECOVERY;
             return NULL;
         }
-        return real_gethostbyname( name );
+        he = real_gethostbyname( name );
+        a17_log( "gethostbyname(%s) -> real resolver, %s", name ? name : "(null)",
+                 he ? "answered" : "no answer" );
+        return he;
     }
 
     pthread_mutex_lock( &a17_lock );
