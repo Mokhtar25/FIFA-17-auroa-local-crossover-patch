@@ -68,6 +68,7 @@ report_mode() { print -r -- "test report"; }
 bottle_hosts_file() { print -r -- "$PWD/missing-hosts"; }
 hosts_receipt_file() { return 1; }
 shasum() { return 0; }
+collect_crash_reports() { print -r -- "stub" > "$2"; }
 '''
             harness += "\nbundle_mode() {" + function + "\n}\n"
             harness += '\nbundle_mode "$PWD/missing.app"\nbundle_mode "$PWD/missing.app"\n'
@@ -83,6 +84,8 @@ shasum() { return 0; }
                 with zipfile.ZipFile(archive) as bundle:
                     self.assertFalse(any("unrelated.txt" in name for name in bundle.namelist()))
                     self.assertTrue(any(name.endswith("/report.txt") for name in bundle.namelist()))
+                    self.assertTrue(any(name.endswith("/crash-reports.txt")
+                                        for name in bundle.namelist()))
             self.assertFalse(list(work.glob("aurora17-bundle-*")))
 
 

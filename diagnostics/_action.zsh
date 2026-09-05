@@ -130,6 +130,23 @@ case "$FLAG" in
           ""
           "With it installed no script has to be run to unstick anything."
         ) ;;
+    --reseed-licence)
+        TITLE="Re-seed the licence file"
+        BLURB=(
+          "Use this when the game will not start from PLAY or from FIFA17.exe,"
+          "but it does start when you run _fifa17.exe yourself."
+          ""
+          "Every other check only asks whether the licence file is there. It"
+          "never looks at what is in it, so a bottle holding the wrong one is"
+          "reported as fine while the game behaves as though it had none."
+          ""
+          "This runs the game's own loader to write a fresh licence file, and"
+          "prints the hash before and after so you can see whether the old one"
+          "was the problem. The old file is put back if the loader writes"
+          "nothing, so this cannot leave the bottle worse than it found it."
+          ""
+          "Nothing else in the bottle is touched, and your saves are not."
+        ) ;;
     --offline-menu)
         TITLE="Re-add the offline menu entry"
         BLURB=(
