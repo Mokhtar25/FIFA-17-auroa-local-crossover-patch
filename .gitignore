@@ -2,3 +2,5 @@
 *.orig
 diagnostics/aurora17-bundle-*.zip
 diagnostics/report.txt
+__pycache__/
+diagnostics/crash-logs/

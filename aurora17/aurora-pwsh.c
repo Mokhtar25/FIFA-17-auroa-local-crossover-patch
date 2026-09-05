@@ -58,6 +58,7 @@
 #define ERR_UNSUPPORTED_CMD      23
 #define ERR_LICENCE_MISSING      24
 #define ERR_FIFA_QUIT_EARLY      25
+#define ERR_FIFA_CRASHED         26
 
 /* ------------------------------------------------------------------ output */
 
@@ -581,11 +582,75 @@ static int ensure_licence(const wchar_t *localappdata)
     return 0;
 }
 
+/* The game's own exit code, as the launch connector wrote it. This program never
+ * holds a handle on FIFA17.exe -- the connector owns it -- so the only place that
+ * code exists is the connector's log: "... exited with code 0xC0000005." Read every
+ * connector-*.log written since this launch started and take the line from the one
+ * written last. FALSE when no such line has appeared yet; the connector writes it
+ * within a second of the game going, so the caller waits a little and asks again. */
+static BOOL game_exit_code_from_log(const wchar_t *localappdata, ULONGLONG since, DWORD *code)
+{
+    wchar_t logdir[MAX_PATH], pattern[MAX_PATH];
+    join(logdir, MAX_PATH, localappdata, L"Aurora17\\Logs");
+    _snwprintf(pattern, MAX_PATH - 1, L"%s\\connector-*.log", logdir);
+    pattern[MAX_PATH - 1] = 0;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+
+    ULONGLONG best_time = 0;
+    BOOL found = FALSE;
+    do {
+        ULARGE_INTEGER t;
+        t.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+        t.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        if (t.QuadPart < since || t.QuadPart < best_time) continue;
+
+        wchar_t path[MAX_PATH];
+        join(path, MAX_PATH, logdir, fd.cFileName);
+        char *text = read_all_utf8(path, NULL);
+        if (!text) continue;
+        const char *needle = "exited with code 0x", *p = text, *last = NULL;
+        while ((p = strstr(p, needle))) { last = p + strlen(needle); p = last; }
+        if (last)
+        {
+            char *end = NULL;
+            unsigned long v = strtoul(last, &end, 16);
+            if (end && end > last) { *code = (DWORD)v; found = TRUE; best_time = t.QuadPart; }
+        }
+        free(text);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+/* An NTSTATUS exit code (0xC0000005 and friends) is the game dying on an unhandled
+ * exception. That is not the start-up race: on every machine it has been seen on it
+ * came back identically on every launch, so relaunching it four times only costs
+ * two minutes and then calls it the race. Say what it is, and where the one thing
+ * that can locate it -- CrossOver's own log of the launch -- comes from. */
+static int fifa_crashed(DWORD seconds, DWORD code)
+{
+    const wchar_t *what = L"an unhandled exception";
+    if (code == 0xC0000005) what = L"an access violation";
+    else if (code == 0xC000001D) what = L"an illegal instruction";
+    else if (code == 0xC00000FD) what = L"a stack overflow";
+    return fail_code(ERR_FIFA_CRASHED,
+        L"FIFA 17 crashed %lu seconds after starting: exit code 0x%08lX, %s inside the game. "
+        L"This is not the start-up race, so it was not relaunched; pressing PLAY again gives "
+        L"the same result. To find out where it crashed: quit CrossOver, double-click "
+        L"'12 Play with a crash log.command' in the diagnostics folder, press PLAY in the "
+        L"launcher it opens, and once the game has crashed run '1 Collect diagnostics.command' "
+        L"and send the zip.",
+        (unsigned long)seconds, (unsigned long)code, what);
+}
+
 /* FIFA is gone within a minute of the launch. Which of the two failures is it?
  * `attempts` is how many launches this PLAY made, so the code 25 text says out loud
  * that the retry ran and how often. */
 static int fifa_quit_early(DWORD seconds, DWORD connector_code, BOOL have_connector_code,
-                           int attempts)
+                           DWORD game_code, BOOL have_game_code, int attempts)
 {
     wchar_t lic[MAX_PATH];
     licence_file_path(lic, MAX_PATH);
@@ -596,15 +661,22 @@ static int fifa_quit_early(DWORD seconds, DWORD connector_code, BOOL have_connec
             L"process Aurora17 is watching exits 0xFFFFFFFA. Start FIFA 17 once from CrossOver, "
             L"then PLAY again.", (unsigned long)seconds, lic);
 
-    wchar_t tried[192];
+    wchar_t tried[256];
     if (attempts > 1)
-        _snwprintf(tried, 191,
+        _snwprintf(tried, 255,
                    L"FIFA 17 was launched %d times and quit %lu seconds in on the last try",
                    attempts, (unsigned long)seconds);
     else
-        _snwprintf(tried, 191, L"FIFA 17 quit %lu seconds after starting",
+        _snwprintf(tried, 255, L"FIFA 17 quit %lu seconds after starting",
                    (unsigned long)seconds);
-    tried[191] = 0;
+    tried[255] = 0;
+    if (have_game_code)
+    {
+        size_t n = wcslen(tried);
+        _snwprintf(tried + n, 255 - n, L" (the game's exit code was 0x%08lX)",
+                   (unsigned long)game_code);
+        tried[255] = 0;
+    }
 
     if (have_connector_code)
         return fail_code(ERR_FIFA_QUIT_EARLY,
@@ -1397,17 +1469,43 @@ static int run_play(const wchar_t *script_path, int argc, wchar_t **argv)
         CloseHandle(lh);
         if (!race) break;                        /* the game survived the watch window */
 
+        /* Which early exit was it? The connector logs the game's own exit code, and
+         * that is what tells them apart: 0x00000003 is the abort() of the start-up
+         * race, which a relaunch does get past; 0xC0000005 is an unhandled exception
+         * inside the game, which has never been seen to clear on a relaunch. Before
+         * this was read, a crash was relaunched four times, cost two minutes, and was
+         * then reported as the race -- which sent people to the race's remedies. */
+        DWORD game_code = 0;
+        BOOL have_game_code = FALSE;
+        for (int i = 0; i < 4 && !have_game_code; i++)
+        {
+            have_game_code = game_exit_code_from_log(localappdata, lstart, &game_code);
+            if (!have_game_code) Sleep(1000);
+        }
+        if (have_game_code && (game_code & 0xC0000000) == 0xC0000000)
+        {
+            rc = fifa_crashed(race_seconds, game_code);
+            goto done;
+        }
+
         /* Code 24 is deterministic (fifa_quit_early says so itself), and the last
          * attempt has to report rather than retry. */
         if (!licence_present() || attempt >= FIFA_LAUNCH_ATTEMPTS)
         {
-            rc = fifa_quit_early(race_seconds, race_ccode, race_have_ccode, attempt);
+            rc = fifa_quit_early(race_seconds, race_ccode, race_have_ccode,
+                                 game_code, have_game_code, attempt);
             goto done;
         }
 
-        out(L"FIFA 17 quit %lu seconds in with the licence file present. This is the known "
-            L"start-up race; trying again (attempt %d of %d)...\n",
-            (unsigned long)race_seconds, attempt + 1, FIFA_LAUNCH_ATTEMPTS);
+        if (have_game_code)
+            out(L"FIFA 17 quit %lu seconds in (exit code 0x%08lX) with the licence file present. "
+                L"This is the known start-up race; trying again (attempt %d of %d)...\n",
+                (unsigned long)race_seconds, (unsigned long)game_code,
+                attempt + 1, FIFA_LAUNCH_ATTEMPTS);
+        else
+            out(L"FIFA 17 quit %lu seconds in with the licence file present. This is the known "
+                L"start-up race; trying again (attempt %d of %d)...\n",
+                (unsigned long)race_seconds, attempt + 1, FIFA_LAUNCH_ATTEMPTS);
 
         /* Leave nothing from this attempt behind: the next one refuses to run while a
          * FIFA17.exe is up, and its own connector must not race ours. */
