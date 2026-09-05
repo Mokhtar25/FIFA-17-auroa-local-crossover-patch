@@ -147,6 +147,22 @@ case "$FLAG" in
           ""
           "Nothing else in the bottle is touched, and your saves are not."
         ) ;;
+    --play-log)
+        TITLE="Play with a crash log"
+        BLURB=(
+          "Use this when PLAY ends with 'FIFA 17 crashed' (exit code 0xC0000005)"
+          "or the game dies at the main menu on every launch. Aurora's own logs"
+          "say that it died; only CrossOver's log says where."
+          ""
+          "Quit CrossOver first (Cmd-Q, or Stop.command). This starts the"
+          "Aurora17 launcher itself with CrossOver's log switched on. Press PLAY"
+          "in it, let the game crash, close the launcher, and this prints what"
+          "the log says: the exception, and the module it was in. Then run"
+          "'1 Collect diagnostics' -- the zip picks the log up."
+          ""
+          "Nothing in the install is changed. The log is kept in this folder,"
+          "under crash-logs."
+        ) ;;
     --offline-menu)
         TITLE="Re-add the offline menu entry"
         BLURB=(

@@ -516,6 +516,7 @@ apart. Read it before doing anything else:**
 |---|---|---|
 | `0xFFFFFFFA` | no EA licence file | [below](#0xfffffffa--no-licence-file) |
 | `0x00000003` | the game aborts itself at Origin start-up, about 6 launches in 7 on the machines seen so far | [below](#0x00000003--the-start-up-race) |
+| `0xC0000005` | an access violation inside the game at the EA login step, about 50 seconds in, on every launch. Seen only on macOS 14 so far | [below](#0xc0000005--a-crash-at-the-main-menu) |
 
 ```sh
 grep 'exited with code' ~/Library/Application\ Support/CrossOver/Bottles/Aurora17/drive_c/users/crossover/AppData/Local/Aurora17/Logs/connector-*.log | tail -1
@@ -581,6 +582,37 @@ code.
 > [!NOTE]
 > `origin-auth-code-sync-bridge-failed pipe-capability` in `redirect-shim.log`, and `MakeWindowAssociation: Ignoring flags 7` and `[D3DMetal] Unsupported API: D3D11 timestamp query` in a graphics log, all appear on machines that play fine. None of them is the reason the game quit. Also: `redirect-shim.log` is written in UTC, the connector and client logs in local time — line them up before comparing.
 
+#### `0xC0000005` — a crash at the main menu
+
+> [!CAUTION]
+> 🔴 The game reaches the main menu and dies about 50 seconds after launch, every launch. The connector log ends:
+> ```
+> +00:00  Started the direct FIFA17 launch candidate (pid N)
+> +00:03  signaled verified shim readiness
+> +00:49  exited with code 0xC0000005
+> ```
+> `--verify` is clean, offline play (`_fifa17.exe`) is fine, and `redirect-shim.log` has no `origin-auth-code-entry` line for that launch. Before 2026-09-05 the launcher called this the start-up race and relaunched it three more times; it now stops on the first crash and reports **code 26**.
+
+> [!TIP]
+> 🟢 Pressing PLAY again does not help; it is the same crash each time. What helps is a log that says **where** it crashed, which none of Aurora's logs can. Quit CrossOver (⌘Q, or **Stop.command**), then double-click **`diagnostics/12 Play with a crash log.command`**. It starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints the exception and the module it was in. Then **Diagnostics.command** — the zip picks that log up. Send the zip and say which macOS version you are on.
+
+**What is known.** One machine so far, macOS 14.6.1; every machine that plays
+online runs macOS 15 or 26. Working and crashing launches are identical at
+every layer — same game build, same shim, same three patch addresses, same LSX
+sequence — until the moment after the third `GetProfile`, where the working
+machine asks the shim for an Origin auth code about seven seconds later and
+the crashing one is already gone. Nothing else is different in the logs: no
+HTTP, no TLS, no error, nothing refused. The crash is inside the game between
+those two points, and only CrossOver's log can say in which module. Two
+levers exist for a second run if the first log points at generated code rather
+than a module: `AURORA_CTXLOG=1 ./setup.sh --play-log` adds the `CTXAV` line
+from the ntdll instrumentation, and setting `CX_SMC_FLUSH=1` in the bottle's
+environment (cxbottle.conf) exercises the Rosetta re-translation workaround
+described in BUGS.md §3.
+
+> [!NOTE]
+> The report line `root certificates: 0` is a symptom of this, not a cause. Wine fills that store from the Mac's trust store the first time the EA login step opens it; on a machine that plays online it reads 160-odd from the first successful login on. A bottle that has never reached the login step reads 0. Do not chase it.
+
 ### "The Origin client was terminated"
 
 > [!CAUTION]
@@ -615,6 +647,7 @@ launcher and in `%LOCALAPPDATA%\Aurora17\Logs\connector-*.log`.
 | 23 | Aurora asked for something the stand-in does not implement | send a bundle |
 | 24 | no licence file, and no `_fifa17.exe` next to the game | start FIFA 17 once from CrossOver, then PLAY again |
 | 25 | FIFA quit within a minute of starting, four launches in a row | if you closed it yourself, ignore; otherwise see [`0x00000003`](#0x00000003--the-start-up-race) |
+| 26 | FIFA crashed within a minute of starting on an unhandled exception (`0xC0000005` and the like). Not relaunched | see [`0xC0000005`](#0xc0000005--a-crash-at-the-main-menu): run `12 Play with a crash log.command`, then send a bundle |
 
 ### Installer exit codes
 

@@ -27,6 +27,10 @@
 #   ./setup.sh --bottle                   set up a bottle only, no re-copy
 #   ./setup.sh --smoke                    watch one PLAY and say pass or fail
 #   ./setup.sh --play-offline             start FIFA 17 with no Aurora17 running
+#   ./setup.sh --play-log                 start Aurora17's launcher with CrossOver's
+#                                         own log turned on, and after the game has
+#                                         gone say which module it died in. For a
+#                                         0xC0000005 that comes back on every PLAY
 #   ./setup.sh --reseed-licence           make the game's own loader write a fresh
 #                                         EA licence file, replacing whatever is
 #                                         there. Every other check only asks whether
@@ -93,6 +97,7 @@ case "${1:-}" in
     --smoke) MODE=smoke; shift ;;
     --offline) MODE=install; NO_AURORA=1; shift ;;
     --play-offline) MODE=play-offline; shift ;;
+    --play-log) MODE=play-log; shift ;;
     --reseed-licence|--reseed-license) MODE=reseed-licence; shift ;;
     --offline-menu) MODE=offline-menu; shift ;;
     --ensure-licence|--ensure-license) MODE=ensure-licence; shift ;;
@@ -1452,16 +1457,27 @@ unguarded_menu_shims() {
 }
 
 # ------------------------------------------- the bottle's certificate store
-# Reported by --report only, as an observation. A fresh bottle has an empty
-# root store and a working one had 163 certificates, so the count is worth
-# having in a diagnosis -- but it is NOT known to cause anything. The theory
-# that an empty store was what stalled a fresh bottle was tested and is wrong:
-# a full game session on a fresh 64-bit bottle left the count at 0. Treat
-# it as an open question rather than acting on this number.
+# Reported by --report only, and settled on 2026-09-05: the count is a SYMPTOM
+# of how far a launch got, never a cause. Wine fills HKLM\...\Root\Certificates
+# from the Mac's own trust store the first time any process in the bottle opens
+# the Root store (crypt32's CRYPT_ImportSystemRootCertsToReg, which writes
+# Microsoft's five roots before it asks macOS for the rest, so an import that
+# started at all leaves at least five). In every bundle seen, the first thing
+# to open that store is the game's EA login step: on the reference machine the
+# 163 entries carry the registry timestamp of the first launch, two seconds
+# before the shim's first origin-auth-code-entry; a tester's bottle went from
+# 0 to 161 in the very launch that first issued an auth code. So 0 means "no
+# launch in this bottle has ever reached the EA login", which the shim log
+# says more directly, and a bottle that plays online cannot have 0. Do not
+# make --verify fail on it, and do not try to fill it: there is nothing to
+# fill it with that the login step would not do itself.
 root_cert_count() {
-    local reg="$BOTTLE_DIR/$BOTTLE/system.reg"
+    local reg="$BOTTLE_DIR/$BOTTLE/system.reg" n
     [ -f "$reg" ] || { print -r -- 0; return 1 }
-    grep -c 'SystemCertificates\\\\Root\\\\Certificates\\\\' "$reg" 2>/dev/null || print -r -- 0
+    # grep -c prints 0 AND exits 1 on no match, so a "|| print 0" fallback
+    # printed the zero twice (visible in one tester's report).
+    n="$(grep -c 'SystemCertificates\\\\Root\\\\Certificates\\\\' "$reg" 2>/dev/null || true)"
+    print -r -- "${n:-0}"
 }
 
 # The keys currently on a bundle, one per line.
@@ -1874,6 +1890,20 @@ verify_install() {
     is_crossover_bundle "$app" \
         && ok "is a CrossOver bundle" \
         || { bad "$app is not a CrossOver bundle"; problems=$((problems+1)); }
+    # Every machine that has played online so far ran macOS 15 or 26. The one
+    # macOS 14 report (14.6.1) crashed 0xC0000005 at the main menu on every
+    # PLAY, at the EA login step, with every static check clean. Not a fault
+    # in the install, so not BAD -- but worth saying before the first PLAY,
+    # with the one thing that can locate such a crash.
+    if [ "$offline" = 0 ] && [ "${GAME:-fifa17}" != fifa15 ]; then
+        case "$(sw_vers -productVersion 2>/dev/null)" in
+            14.*)
+                note "macOS 14: online play has not been confirmed on macOS 14 yet. The one"
+                say "        report so far (14.6.1) crashed 0xC0000005 at the main menu on every"
+                say "        PLAY. If that happens here, quit CrossOver and double-click"
+                say "        'diagnostics/12 Play with a crash log.command', then collect a bundle." ;;
+        esac
+    fi
 
     local wine="$app/Contents/SharedSupport/CrossOver/lib/wine" f
     if ! ( cd "$HERE/fixes" && shasum -a 256 -c SHA256SUMS ) >/dev/null 2>&1; then
@@ -2362,7 +2392,8 @@ report_mode() {
     {
         print -r -- "==== aurora17 report ===================================="
         print -r -- "when      $(date '+%Y-%m-%d %H:%M:%S %z')"
-        print -r -- "macOS     $(sw_vers -productVersion) ($(uname -m))"
+        print -r -- "macOS     $(sw_vers -productVersion) ($(uname -m)), build $(sw_vers -buildVersion 2>/dev/null)"
+        print -r -- "mac       $(sysctl -n hw.model 2>/dev/null), $(( $(sysctl -n hw.memsize 2>/dev/null || print 0) / 1073741824 )) GB"
         print -r -- "app       $app"
         print -r -- "version   $(crossover_version "$app")"
         print -r -- "bottle    $BOTTLE_DIR/$BOTTLE"
@@ -2453,7 +2484,11 @@ report_mode() {
         print -r -- ""
 
         print -r -- "---- certificate store ---------------------------------"
-        print -r -- "root certificates: $(root_cert_count)  (observation only, cause unknown)"
+        print -r -- "root certificates: $(root_cert_count)  (filled by the game's EA login step; 0 = no launch here has reached it. A symptom, not a cause)"
+        print -r -- ""
+
+        print -r -- "---- CrossOver logs of a launch (crash logs) -----------"
+        crash_logs_report
         print -r -- ""
 
         print -r -- "---- the shim in the game folder -----------------------"
@@ -2658,6 +2693,173 @@ collect_crash_reports() {
     return 0
 }
 
+# ------------------------------------------- CrossOver's log of a launch
+# Where the crash logs --play-log writes go. CrossOver's own GUI log option
+# writes ~/Library/Logs/CrossOver/<bottle>.cxlog in the same format, and those
+# are read too when they mention the game.
+crash_log_dir() { print -r -- "$(diagnostics_dir)/crash-logs"; }
+
+# The logs worth reading, newest first: ours, then CrossOver's GUI ones that
+# name the game. At most $1 of them (default 3).
+crash_logs_found() {
+    setopt localoptions nullglob
+    local limit="${1:-3}" f
+    local -a mine theirs
+    mine=( "$(crash_log_dir)"/*.cxlog(N) )
+    for f in "$HOME/Library/Logs/CrossOver"/*.cxlog(N); do
+        grep -q -m1 -E 'FIFA17\.exe|Aurora17Connector' "$f" 2>/dev/null && theirs+=( "$f" )
+    done
+    (( ${#mine} + ${#theirs} )) || return 0
+    /bin/ls -t -- "${mine[@]}" "${theirs[@]}" 2>/dev/null | head -"$limit"
+    return 0
+}
+
+# One page from one CrossOver log: every unhandled exception in it and, for the
+# first one, the module it landed in. Wine's +loaddll trace names every module
+# a process loads and its base address, so an address is placed by the highest
+# base below it in the same pid. An address more than 256 MB above every module
+# is code that came from no module at all -- generated at run time, which for
+# this game means the protector's own -- and telling those two apart is the
+# whole reason the log exists. winedbg's backtrace and the CTXAV line from the
+# ntdll instrumentation (CX_CTXLOG=1) are printed when they are there.
+crash_log_summary() {
+    local log="$1"
+    [ -s "$log" ] || { print -r -- "no log at $log"; return 1 }
+    local -a hits
+    hits=( ${(f)"$(grep -n -E 'err:seh:NtRaiseException Unhandled exception|^wine: Unhandled|Unhandled exception: ' "$log" 2>/dev/null | head -20)"} )
+    hits=( ${hits:#} )
+    print -r -- "log:       $log"
+    print -r -- "written:   $(date -r "$log" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    print -r -- "size:      $(wc -c < "$log" | tr -d ' ') bytes, $(wc -l < "$log" | tr -d ' ') lines"
+    print -r -- "launches:  $(grep -c 'Loaded L".*FIFA17.exe" at' "$log" 2>/dev/null || true) of FIFA17.exe seen in it"
+    local ctxav; ctxav="$(grep -m1 '^CTXAV ' "$log" 2>/dev/null || true)"
+    if (( ! ${#hits} )); then
+        print -r -- "unhandled: none -- if the game died anyway, it was not an exception Wine saw"
+        [ -n "$ctxav" ] && print -r -- "first AV:  $ctxav"
+        return 0
+    fi
+    print -r -- "unhandled: ${#hits} exception(s)"
+    local h
+    for h in $hits; do print -r -- "  $(print -r -- "${h#*:}" | cut -c1-160)"; done
+
+    local line pid code addr
+    line="${hits[1]#*:}"
+    pid="$(print -r -- "$line" | awk -F: '{print $2}')"
+    code="$(print -r -- "$line" | sed -n 's/.*exception code \([0-9a-fA-F]*\).*/\1/p')"
+    addr="$(print -r -- "$line" | sed -n 's/.*addr 0x\([0-9a-fA-F]*\).*/\1/p')"
+    [ -n "$addr" ] || addr="$(print -r -- "$line" | sed -n 's/.*(0x\([0-9a-fA-F]*\)).*/\1/p')"
+    print -r -- ""
+    print -r -- "first one: code ${code:-?} at 0x${addr:-?} in pid ${pid:-?}"
+    if [ -n "$addr" ] && [ -n "$pid" ]; then
+        local best_base=0 best_name="" base name off seen=0
+        for h in ${(f)"$(grep -E "^[0-9.]+:${pid}:[0-9a-f]+:trace:loaddll:build(_ntdll)?_module Loaded L\"" "$log" 2>/dev/null \
+                        | sed -n 's/.*Loaded L"\(.*\)" at \([0-9A-Fa-f]*\):.*/\2 \1/p')"}; do
+            base="${h%% *}"; name="${h#* }"
+            [ -n "$base" ] || continue
+            seen=$((seen + 1))
+            (( 0x$base <= 0x$addr )) || continue
+            (( 0x$base >= best_base )) || continue
+            best_base=$(( 0x$base )); best_name="$name"
+        done
+        if [ "$seen" -eq 0 ]; then
+            print -r -- "module:    unknown -- the log has no +loaddll lines for pid $pid"
+        elif [ -z "$best_name" ]; then
+            print -r -- "module:    NONE -- below every module pid $pid loaded ($seen of them), so this is"
+            print -r -- "           code generated at run time, not a module: a JIT in a .NET process,"
+            print -r -- "           and in the game the protector's own code (BUGS.md 3, CX_SMC_FLUSH)."
+        else
+            off=$(( 0x$addr - best_base ))
+            if (( off > 0x10000000 )); then
+                print -r -- "module:    NONE -- $(printf '0x%x' $off) past the nearest one (${best_name##*\\\\}), so this is"
+                print -r -- "           code generated at run time, not a module: a JIT in a .NET process,"
+                print -r -- "           and in the game the protector's own code (BUGS.md 3, CX_SMC_FLUSH)."
+            else
+                print -r -- "module:    ${best_name##*\\\\} + $(printf '0x%x' $off)   (loaded at $(printf '0x%x' $best_base))"
+            fi
+        fi
+    fi
+    [ -n "$ctxav" ] && print -r -- "first AV:  $ctxav"
+    local bt; bt="$(grep -n -m1 'Backtrace:' "$log" 2>/dev/null | cut -d: -f1 || true)"
+    if [ -n "$bt" ]; then
+        print -r -- ""
+        print -r -- "winedbg backtrace (first):"
+        sed -n "${bt},$((bt + 24))p" "$log" | cut -c1-160 | sed 's/^/  /'
+    fi
+    return 0
+}
+
+# --report: the summaries of the newest logs, or how to make one.
+crash_logs_report() {
+    local f n=0
+    for f in ${(f)"$(crash_logs_found 3)"}; do
+        [ -n "$f" ] || continue
+        n=$((n + 1))
+        crash_log_summary "$f" 2>/dev/null || true
+        print -r -- ""
+    done
+    if [ "$n" -eq 0 ]; then
+        print -r -- "(none) -- Aurora's own logs say the game exited 0xC0000005 but never where."
+        print -r -- "To make one: quit CrossOver, double-click 'diagnostics/12 Play with a"
+        print -r -- "crash log.command', press PLAY there, let it crash, then collect."
+    fi
+    return 0
+}
+
+# --bundle: the summaries, a bounded extract of each log, and the whole newest
+# log when it is not enormous. The extract is what a reader needs from a
+# 30 MB trace: the header, every module the crashing process loaded, and every
+# line about an exception with a little context after it.
+collect_crash_logs() {
+    setopt localoptions nullglob
+    local out="$1" index="$2" f base pid first=1
+    local -a found
+    found=( ${(f)"$(crash_logs_found 3)"} )
+    found=( ${found:#} )
+    if (( ! ${#found} )); then
+        {
+            print -r -- "No CrossOver log of a launch was found, in"
+            print -r -- "  $(crash_log_dir)"
+            print -r -- "  $HOME/Library/Logs/CrossOver"
+            print -r -- ""
+            print -r -- "Aurora's logs record that the game exited (0xC0000005 says an access"
+            print -r -- "violation) but never where. CrossOver's own log does: to make one, quit"
+            print -r -- "CrossOver, double-click 'diagnostics/12 Play with a crash log.command',"
+            print -r -- "press PLAY in the launcher it opens, let the game crash, then run"
+            print -r -- "'1 Collect diagnostics.command' again."
+        } > "$index" 2>/dev/null || true
+        return 0
+    fi
+    mkdir -p "$out" 2>/dev/null || return 0
+    {
+        for f in $found; do
+            crash_log_summary "$f" 2>&1 || true
+            print -r -- "----"
+        done
+    } > "$index" 2>&1 || true
+    for f in $found; do
+        base="${f:t:r}"
+        pid="$(grep -m1 -E 'err:seh:NtRaiseException Unhandled exception' "$f" 2>/dev/null | awk -F: '{print $2}')"
+        {
+            print -r -- "==== extract of $f"
+            head -12 "$f"
+            print -r -- "==== modules loaded by ${pid:-every pid}"
+            if [ -n "$pid" ]; then grep -E "^[0-9.]+:${pid}:[0-9a-f]+:trace:loaddll:" "$f"
+            else grep -E 'trace:loaddll:.*FIFA17' "$f"; fi | head -400
+            print -r -- "==== exceptions and errors"
+            grep -n -E 'Unhandled exception|^CTXAV |Backtrace:|err:|^wine: ' "$f" | head -400 | cut -c1-240
+            print -r -- "==== 40 lines after the first unhandled exception"
+            local n; n="$(grep -n -m1 -E 'err:seh:NtRaiseException Unhandled exception' "$f" | cut -d: -f1 || true)"
+            [ -n "$n" ] && sed -n "${n},$((n + 40))p" "$f" | cut -c1-240
+        } > "$out/$base.extract.txt" 2>/dev/null || true
+        # The whole newest log too, when a zip can carry it.
+        if [ "$first" = 1 ] && [ "$(stat -f %z "$f" 2>/dev/null || print 0)" -le 41943040 ]; then
+            cp "$f" "$out/" 2>/dev/null || true
+        fi
+        first=0
+    done
+    return 0
+}
+
 # Everything --report prints, plus the log files themselves, in one zip. A
 # tester's first run is the only cheap chance to collect this: by the time they
 # have been asked three questions they have already deleted the bottle.
@@ -2708,6 +2910,14 @@ bundle_mode() {
     # is exactly the question those reports come in asking.
     collect_crash_reports "$work/crash-reports" "$work/crash-reports.txt"
 
+    # CrossOver's own log of a launch, when one was made (--play-log, or the
+    # GUI's log option): the only record that says which module an
+    # 0xC0000005 landed in. Guarded so an older harness without the function
+    # still bundles everything else.
+    if whence -w collect_crash_logs >/dev/null 2>&1; then
+        collect_crash_logs "$work/crash-logs" "$work/crash-logs.txt" || true
+    fi
+
     local bh; bh="$(bottle_hosts_file)"
     [ -f "$bh" ] && cp "$bh" "$work/bottle-hosts.txt" 2>/dev/null || true
     local rc; rc="$(hosts_receipt_file 2>/dev/null || true)"
@@ -2735,6 +2945,14 @@ bundle_mode() {
                 print -r -- "  MISSING                    $f"
             fi
         done
+        print -r -- ""
+        print -r -- "minimum macOS each Mach-O file declares (LC_BUILD_VERSION minos; the"
+        print -r -- "shipped ones were built with the macOS 26 SDK for a 15.0 target):"
+        for f in $FILES $RESOLVER x86_64-unix/ws2_32.so; do
+            case "$f" in *.so|*.dylib) ;; *) continue ;; esac
+            [ -f "$w/$f" ] || continue
+            print -r -- "  $(otool -l "$w/$f" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')  $f"
+        done
     } > "$work/payload.txt" 2>&1
 
     ( cd "${work:h}" && zip -qr "$zipf" "${work:t}" ) \
@@ -2753,9 +2971,10 @@ bundle_mode() {
     say "Wrote $zipf"
     say ""
     say "Send that file. It contains the checks above, the Aurora17 logs, any"
-    say "crash report macOS kept for the game or Wine, the bottle's hosts file"
-    say "and its settings, and the hashes of what is installed. It contains no"
-    say "account, password or session token."
+    say "crash report macOS kept for the game or Wine, any CrossOver log of a"
+    say "launch (see --play-log), the bottle's hosts file and its settings, and"
+    say "the hashes of what is installed. It contains no account, password or"
+    say "session token."
     say ""
     return 0
 }
@@ -4130,6 +4349,108 @@ if [ "$MODE" = play-offline ]; then
     wait "$WPID" 2>/dev/null || true
     say ""
     ok "FIFA 17 closed"
+    exit 0
+fi
+
+# Starts Aurora17's launcher from here, through the patched copy, with
+# CrossOver's own log turned on -- the same log its GUI makes with its log
+# option, written to the diagnostics folder instead. Everything the launcher
+# starts, the game included, inherits the log, so when the game dies on an
+# unhandled exception Wine's "Unhandled exception code c0000005 ... addr" line
+# and the +loaddll module map land in it, and crash_log_summary can say which
+# module the address is in -- or that it is in none, which for this game means
+# the protector's generated code. Aurora's own logs record only the exit code.
+#
+# Quiet by default: every trace channel off except loaddll and the err class
+# of seh -- the two kinds of line that matter -- so the timing of the launch
+# is as close to a normal PLAY as a log allows (BUGS.md 3 records a crash that
+# tracing made disappear).
+# AURORA_LOG_LEVEL=full keeps CrossOver's default channels (+seh traces every
+# exception the protector raises; several MB a minute). AURORA_CTXLOG=1 adds
+# the ntdll instrumentation's CTXAV line, which says whether the first access
+# violation was in a module or in generated code even without a backtrace.
+if [ "$MODE" = play-log ]; then
+    say ""
+    say "Starting Aurora17's launcher with CrossOver's log turned on"
+    say ""
+    [ -d "$TARGET" ] || die $E_INCOMPLETE "There is no $TARGET yet.
+         Run  ./setup.sh  first (or double-click START HERE.command)."
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] \
+        || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         For another name:  AURORA_BOTTLE='name' ./setup.sh --play-log"
+    ADIR="$(aurora_dir_find 2>/dev/null || true)"
+    [ -n "$ADIR" ] && ADIR="${ADIR:A}"
+    [ -n "$ADIR" ] || die $E_INCOMPLETE "No Aurora17 folder with Aurora17Connector.exe in it was found.
+         For one kept elsewhere:
+           AURORA_DIR='/path/to/Aurora17' ./setup.sh --play-log"
+    AWIN="$(unix_path_to_win "$ADIR" 2>/dev/null || true)"
+    [ -n "$AWIN" ] || die $E_INCOMPLETE "The $BOTTLE bottle has no drive letter for
+         $ADIR
+         Add one in CrossOver (Bottle > Control Panel > Drives), then try again."
+    PWINE="$TARGET/Contents/SharedSupport/CrossOver/bin/wine"
+    [ -x "$PWINE" ] || die $E_PAYLOAD "$TARGET is incomplete (no wine inside it).
+         Run ./setup.sh again."
+    # Two launchers on one bottle fight over ports 47170-47173, and a launcher
+    # started by the GUI writes no log. This one has to be the only one.
+    [ -z "$(crossovers_running)" ] \
+        || die $E_INCOMPLETE "CrossOver is open. Quit it with Cmd-Q (or double-click Stop.command),
+         wait for it to go, then run this again. The launcher has to be started
+         from here for its log to be written."
+    [ -z "$(game_leftovers)" ] \
+        || die $E_INCOMPLETE "Aurora17 or FIFA 17 is still running. Double-click Stop.command,
+         wait for it to finish, then run this again."
+    LOGDIR="$(crash_log_dir)"
+    mkdir -p "$LOGDIR" 2>/dev/null \
+        || die $E_PERMISSION "Could not make $LOGDIR to write the log into."
+    LOG="$LOGDIR/play-$(date '+%Y%m%d-%H%M%S').cxlog"
+    # CrossOver's wrapper prepends its own defaults (+seh,+unwind,+process,
+    # +module,+loaddll,+threadname) and Wine applies per-channel entries on top
+    # of them, so "-all" cannot switch a channel the wrapper named back off;
+    # each one has to be cleared by name. loaddll is the one default kept.
+    CHAN="-seh,err+seh,-unwind,-process,-module,-threadname"
+    case "${AURORA_LOG_LEVEL:-}" in
+        full) CHAN="-unwind,-module,-process" ;;
+    esac
+    [ "${AURORA_CTXLOG:-0}" = 1 ] && export CX_CTXLOG=1
+    mkdir -p "$CLEANUP_BASE" 2>/dev/null || true
+    print -r -- "$$" > "$CLEANUP_HOLD" 2>/dev/null || true
+    trap 'rm -f "$CLEANUP_HOLD" 2>/dev/null' EXIT INT TERM
+    ok "Aurora17:    $ADIR"
+    ok "bottle:      $BOTTLE"
+    ok "log:         $LOG"
+    ok "channels:    $CHAN${CX_CTXLOG:+  (+ CX_CTXLOG=1)}"
+    say ""
+    say "The Aurora17 launcher opens in a moment. Press PLAY in it and play until"
+    say "the game crashes or you quit. If a box about a program error appears,"
+    say "click Close. Then close the launcher window; this prints what the log"
+    say "says as soon as it has gone. Aurora's server stays up afterwards, as it"
+    say "does after a normal session: double-click Stop.command when you are done."
+    say ""
+    # Wait for the launcher itself (the wrapper's default). --wait-children
+    # would wait for Aurora's server, which outlives every session on purpose.
+    "$PWINE" --bottle "$BOTTLE" --workdir "$ADIR" --cx-log "$LOG" --debugmsg "$CHAN" \
+        --cx-app "$AWIN\\Aurora17Connector.exe" || true
+    # The launcher may exit before its children finish writing: let the game
+    # go if it is still going, so the exception lines are complete.
+    WAITED=0
+    while [ "$WAITED" -lt 20 ] && [ -n "$(bottle_game_pids)" ]; do
+        /bin/sleep 1
+        WAITED=$((WAITED + 1))
+    done
+    say ""
+    if [ ! -s "$LOG" ]; then
+        note "no log was written to $LOG"
+        say "        CrossOver wrote nothing at all, which means the launcher never started."
+        exit $E_INCOMPLETE
+    fi
+    say "What the log says"
+    say ""
+    crash_log_summary "$LOG" | tee "$LOG.summary.txt" | sed 's/^/  /'
+    say ""
+    ok "log kept at $LOG"
+    say "        Now double-click '1 Collect diagnostics.command' (or ./setup.sh --bundle):"
+    say "        the zip picks this log up, with the summary above."
     exit 0
 fi
 

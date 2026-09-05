@@ -1,236 +1,164 @@
-# Handoff: FIFA 17 crashes 0xC0000005 at the Origin auth step
+# FIFA 17 exits 0xC0000005 at the main menu — where this stands
 
-**Status:** root cause narrowed to one step, one strong correlation, and one
-in-repo note that contradicts it. Not closed. Read "The contradiction" before
-acting on the hypothesis.
+**Status (2026-09-05, second pass):** the earlier root-store hypothesis is
+dead, killed by evidence in this repo's own bundles. The crash is real,
+deterministic, and so far confined to the one macOS 14 machine. Nothing in
+Aurora's logs can locate it; the package now ships the tool that can, and the
+launcher no longer misreports it as the start-up race. What is still missing
+is one run of that tool on the affected machine.
 
 **Reporter:** a user on macOS 14.6.1 arm64, CrossOver 26.3, bottle `Aurora17`.
-Symptom as reported: "game crashes after the start menu."
+Symptom: "game crashes after the start menu." Every machine that plays online
+(three bundles, three people) runs macOS 15.7.8 or 26.5.
 
 ---
 
-## 1. The symptom, precisely
+## 1. What the crash is
 
-FIFA 17 launches, reaches the menu, then dies with **`0xC0000005`**
-(STATUS_ACCESS_VIOLATION), 48–59 s after launch. Six occurrences across two
-bundles, every attempt, no exceptions. Offline play on the same machine and the
-same bottle is unaffected.
+FIFA 17 reaches the main menu and dies with `0xC0000005` about 50 s after
+launch — seven crashes across two bundles, every attempt. Offline play on the
+same machine and bottle is fine (user-verified). Every static check passes.
 
-The connector misreports it:
-
-```
-WARN  Fresh admitted FIFA17 process (pid 684) exited with code 0xC0000005.
-INFO  FIFA 17 quit 48 seconds in with the licence file present.
-      This is the known start-up race; trying again (attempt 2 of 4)...
-```
-
-That is wrong and it matters. The documented start-up race (SETUP.md,
-`0x00000003 — the start-up race`) is a C-runtime `abort()` at ~22 s. This is a
-segfault at ~50 s. The retry gate keys on *duration + licence present* rather
-than exit code, so it burns four launches on a deterministic fault and sends
-users to race remedies that cannot help. **That gate is in the closed connector,
-not in this repo.**
-
----
-
-## 2. The decisive evidence: working vs broken
-
-The two runs are identical at every layer until one instant. Diffing a working
-bundle against a broken one is what found this; nothing in the broken bundle
-alone was enough.
-
-### The instant they diverge
-
-Both runs make three `GetProfile` calls over LSX, at the same cadence. Then:
-
-**Working** (`client-20260905-164700-680.log`, +03:00):
+Working and crashing launches are identical at every layer until one moment:
 
 ```
-16:47:37.862  GetProfile #3
-16:47:45.074  GetGameInfo
-16:47:45.193  Issued one PID-bound Aurora17 Origin auth-code response to FIFA17.   <-- +7.3s
-16:47:45.655  Issued one PID-bound Aurora17 Origin auth-code response to FIFA17.
-16:47:46.073  GetProfile #4  ... #5, #6, #7
-16:48:31      exited 0x00000000   (clean, user quit)
+working  (+03:00)                       crashing (+01:00)
+16:47:37.86  GetProfile  (#3)           14:33:48.57  GetProfile  (#3)
+16:47:45.07  GetGameInfo                14:33:56.22  game gone  (+7.65 s)
+16:47:45.19  auth code issued (+7.33 s)
 ```
 
-**Broken** (four separate runs, +01:00): `GetProfile #3`, then nothing, then
-`0xC0000005` at **+7.18 s, +7.66 s, +19.3 s, +19.97 s**.
+Same game build (`retail-17.0.3175939.0`), same shim (`3DFC7195D8C6`), same
+three patch RVAs, same LSX request sequence, three `GetDefaultUser` calls in
+both. In that seven-second window there is no HTTP, no TLS, no server-side
+event, no shim event and no error on either machine. The first
+`origin-auth-code-entry` never comes on the crashing one. Across the seven
+crashes the gap from `GetProfile #3` to death was 7.2, 7.6, 7.7, 9.6, 19.3,
+20.0 and 52 s, so it is the login step, not a fixed timer.
 
-The fault lands in the same window where the working run receives its auth code.
+## 2. The root-store hypothesis is dead
 
-### Shim event counts, whole bundles
+The first pass proposed that an empty `SystemCertificates\Root` store (0 on
+the crashing machine, 163 on the reference one) broke a TLS step. It does not.
+The count is a *symptom* of how far a launch got:
 
-| `redirect-shim.log` event | working | broken |
-|---|---:|---:|
-| `origin-auth-code-entry` | 9 | **0** |
-| `origin-auth-code-pipe-request` | 9 | **0** |
-| `origin-auth-code-issued` | 9 | **0** |
-| client `Issued one PID-bound …` | 3 | **0** |
-| `origin-auth-code-sync-bridge-enabled` | 12 | 24 |
-| `origin-auth-code-sync-bridge-failed` | 55 | 7 |
+- Wine fills that registry key from the Mac's trust store the first time any
+  process opens the LocalMachine Root store (`crypt32`
+  `CRYPT_ImportSystemRootCertsToReg`). It writes Microsoft's five roots
+  **before** asking macOS for the rest, so an import that started at all
+  leaves at least five. 0 means no process in that bottle ever opened the
+  store.
+- On the reference bottle every one of the 163 entries carries registry
+  timestamp `1788456140` = 2026-09-03 17:22:20Z. The shim's first ever
+  `origin-auth-code-entry` on that bottle is 17:22:22.000Z. The store was
+  filled by the login step, two seconds before the hook fired.
+- A tester's bottle read 0 in a bundle at 19:58Z on 2026-09-04 and 161 in the
+  next one at 21:32Z; the shim log in between shows the first launch that
+  ever issued an auth code (20:12:55Z). Same binaries in both bundles.
+- The game does not use schannel for EA traffic at all: it uses EA's own
+  ProtoSSL and the shim's `proto-ssl-bypass` (Aurora17's
+  `New-DevCertificate.ps1` says so in its header).
 
-The broken side is **zero, not refused**. The game never reaches the shim's
-auth-code entry point. Note the bridge *arms* in both, and the working machine
-logs `...-failed` far more often while playing fine — SETUP.md already says that
-message appears on machines that work, so do not chase it.
+So the earlier `setup.sh` comment saying "tested and is wrong" was right,
+and it now says why. `--report` prints the count with that reading. Do not
+make `--verify` fail on it and do not try to fill it.
 
-### The environment difference
+## 3. What shipped in this pass
 
-| | working | broken |
-|---|---|---|
-| bottle root certificates | **163** | **0** |
-| macOS | 15.7.8 arm64 | 14.6.1 arm64 |
-| CrossOver | 26.3 | 26.3 |
-| game build | `retail-17.0.3175939.0` | same |
-| shim | `3DFC7195D8C6` (223,232 B) | same |
-| shim patch RVAs | `0x06F28790` / `0x048ACF60` / `0x06F340AF` | **all identical** |
+| change | where |
+|---|---|
+| The launcher stops on the first crash instead of relaunching it four times as "the known start-up race". It reads the game's exit code from the connector log; an NTSTATUS (`0xC0000005`, `0xC000001D`, `0xC00000FD`, anything `0xC…`) is now **code 26** with the right words, and the race message carries the code too. | `aurora17/aurora-pwsh.c` (`game_exit_code_from_log`, `fifa_crashed`), rebuilt `powershell.exe` |
+| `./setup.sh --play-log` / `diagnostics/12 Play with a crash log.command`: starts the Aurora17 launcher through CrossOver's `--cx-log` so the game's `Unhandled exception code c0000005 … addr` line and the `+loaddll` module map are captured, then prints which module the address is in — or that it is in none (generated code). Quiet channels by default so the timing stays close to a normal PLAY; `AURORA_LOG_LEVEL=full` and `AURORA_CTXLOG=1` for more. | `setup.sh` (`crash_log_summary`, mode block) |
+| `--bundle` collects those logs (summary, bounded extract, the newest whole log), and CrossOver's own GUI logs that name the game. `--report` shows the summaries, the Mac model and the OS build. `payload.txt` lists the minimum macOS each shipped Mach-O declares. | `setup.sh` |
+| `--verify` notes on macOS 14 that online play is unconfirmed there and names the tool. | `setup.sh` |
+| `root_cert_count` no longer prints `0` twice. | `setup.sh` |
+| Docs: `0xC0000005` section, code 26, command 12. | `SETUP.md`, `README.md`, `diagnostics/README.md` |
 
----
+**The affected user must re-run the installer** (`START HERE.command`, or
+`8 Set the bottle up again.command`) to get the rebuilt stand-in; `--verify`
+says `BAD … not the shipped stand-in` until they do.
 
-## 3. Hypothesis
+## 4. What to do next, in order
 
-The Origin auth-code step is the first thing in the launch that needs **TLS**.
-Everything before it — LSX handshake, `GetProfile`, `GetGameInfo`, the ebisu
-gate — is plaintext on a local socket, which is exactly why the broken run is
-indistinguishable from the working one until that instant.
+1. On the affected machine: quit CrossOver, double-click
+   `12 Play with a crash log.command`, press PLAY, let it crash, close the
+   launcher, then `1 Collect diagnostics.command`. The bundle's
+   `crash-logs.txt` says the exception, the address and the module.
+2. Read the module line:
+   - **`FIFA17.exe + 0x…`** or another game DLL: the game's own code. Compare
+     the offset against the shim's patch sites and the Origin SDK auth path;
+     the `+seh` context in a full-level run gives the registers.
+   - **`version.dll` (the 223,232-byte one in the game folder)**: the shim.
+     Aurora17's, not ours; report to them with the offset.
+   - **`crypt32`, `ntdll`, `secur32`, `ws2_32`, `a17hosts`**: ours or
+     CrossOver's. Rebuild with symbols and look.
+   - **NONE — generated code**: the protector's runtime code, the shape of
+     BUGS.md §3 (a wrong-offset decode in an RWX page). That is the Rosetta
+     re-translation hole CrossOver's CW HACK 18947 describes. Second run with
+     `AURORA_CTXLOG=1` for the `CTXAV` line, then a third with
+     `CX_SMC_FLUSH=1` in the bottle's `cxbottle.conf`
+     `[EnvironmentVariables]` to see whether forcing re-translation changes
+     it. Rosetta on macOS 14 and on 15 are not the same build.
+3. If it **does not crash** with the log on: the crash is timing-sensitive
+   (BUGS.md §3 saw exactly that). The quiet channel set is already as light
+   as a log gets; the next step is a bottle-environment `CX_LOG` with
+   `WINEDEBUG=-all` and only `err+seh` left, set by hand.
 
-With an empty root store there is no trust anchor for the handshake to the local
-redirector, and the game faults instead of failing gracefully.
+## 5. Open observations, not conclusions
 
-This explains every observation: offline never touches TLS; all static checks
-pass because none of them tests the root store; the shim looks healthy because
-it *is* healthy.
+- **macOS 14 is the only thing that differs.** Same payload hashes on every
+  machine (`payload.txt` is byte-identical between the crashing and a working
+  bundle). Same bottle settings, same hosts, same shim, same licence loader
+  behaviour. SETUP.md has always said "tested on macOS 15".
+- **The shipped Mach-O files declare `minos 15.0`** (built with the macOS 26.2
+  SDK) while README requires macOS 14. They load on 14.6.1 — `ntdll.so` runs
+  every process and offline play is fine — so dyld does not refuse them, and
+  nothing in them calls an API newer than 10.15. Kept as an observation; a
+  rebuild with `MACOSX_DEPLOYMENT_TARGET=14.0` is cheap insurance once a
+  build tree is at hand, but there is no evidence yet that it matters.
+- **Rosetta differs between 14 and 15** (AVX support arrived in 15; the
+  translation cache behaviour CW HACK 18947 works around is undocumented).
+  The rosetta patch's `CX_DR_TRAP=2` and `CX_SMC_FLUSH` are the levers that
+  touch it.
 
-## 4. The contradiction — read this before acting
-
-`setup.sh:1454-1460`, written by an earlier investigation, says the opposite:
-
-```
-# Reported by --report only, as an observation. A fresh bottle has an empty
-# root store and a working one had 163 certificates, so the count is worth
-# having in a diagnosis -- but it is NOT known to cause anything. The theory
-# that an empty store was what stalled a fresh bottle was tested and is wrong:
-# a full game session on a fresh 64-bit bottle left the count at 0. Treat
-# it as an open question rather than acting on this number.
-```
-
-Both can be true only if that earlier test session never reached the Origin auth
-step. "A full game session" is ambiguous and may have been single-player.
-
-**The decisive check:** find that earlier session's bundle and grep its
-`redirect-shim.log` for `origin-auth-code-issued`.
-
-- **Present** → an empty root store is compatible with successful auth. The
-  hypothesis is dead and the 163-vs-0 correlation is a coincidence between two
-  machines that differ in other ways. Look elsewhere.
-- **Absent / no bundle** → the earlier test never exercised this path, it does
-  not refute anything, and the hypothesis stands.
-
-Do not update `--verify` to fail on a zero count until this is settled. If it
-resolves in favour of the hypothesis, that check is the fix that would have
-caught this on the user's first run.
-
----
-
-## 5. Ruled out, with evidence — do not re-investigate
+## 6. Ruled out, with evidence — do not re-investigate
 
 | Ruled out | Evidence |
 |---|---|
-| Wine build, D3DMetal, macOS 14.6.1, bottle settings, game files, `a17hosts.dylib` | `_fifa17.exe` (offline) plays fine on the same machine, same bottle, same patched CrossOver. User-verified. |
-| EA licence file | `--reseed-licence` produced a **byte-identical** blob (`0b758831b7af43da` before and after). Crash persisted afterwards. |
-| player-head cache (`error 5` on quarantine/delete) | Offline works with the same Documents folder. |
-| Shim mispatching / wrong build | Identical shim hash, game build and all three patch RVAs on both machines. |
-| `GetDefaultUser` "3-call ceiling" | **Normal.** All 12 working runs also show exactly 3. |
-| `GetProfile #3` being anomalous | **Normal.** The working run makes it too. |
-| macOS crash report | None exists. Wine converts the SIGSEGV to SEH and handles it in-process, so macOS records nothing. Confirmed on the user's machine. |
-
-### Dead ends already walked
-
-1. **Graphics/D3DMetal at menu build.** Plausible until offline was tested. Killed by the A/B.
-2. **Wrong licence blob.** The blob is machine-specific — the user's loader makes `0b75…`, the working machine's makes `67d1…`. Same size (1649 B), different bytes, both correct for their own machine. **Do not hardcode a known-good licence hash**; it would false-alarm every user.
-3. **Shim hook exhaustion after 3 calls.** Refuted by the working bundle.
-
----
-
-## 6. Open questions
-
-1. Does an empty root store actually break the auth handshake? (§4)
-2. Why is this bottle's root store empty when another bottle on 26.3 has 163?
-   Population happens at bottle creation; his may predate a step or have been
-   made differently. 163 → 0 is *nothing loaded*, not partial failure.
-3. Is the empty store a cause or a symptom of the same underlying thing?
-
----
+| Empty root certificate store | §2: filled *by* the login step, on every machine, two seconds before the first auth hook |
+| Wine build, D3DMetal, bottle settings, game files, `a17hosts.dylib` | offline `_fifa17.exe` plays on the same machine, bottle and patched copy |
+| EA licence file | `--reseed-licence` wrote a byte-identical blob (`0b758831b7af43da`); crash unchanged. The blob is machine-specific by design; never hardcode a known-good hash |
+| Shim mispatching / wrong build | identical shim hash, game build and all three patch RVAs on both machines |
+| `GetDefaultUser` "3-call ceiling", `GetProfile #3` | both normal; every working run shows them |
+| LSX / HTTP / TLS / server refusal in the window | nothing on the wire on either machine between `GetProfile #3` and the auth request |
+| macOS crash report | none; Wine turns the SIGSEGV into SEH and exits with the code. `crash-reports.txt` says so |
+| The start-up race (`0x00000003`, ~22 s, `abort()`) | different code, different time, and it clears on relaunch; this never did |
 
 ## 7. Code pointers
 
 | What | Where |
 |---|---|
-| `root_cert_count` — counts `SystemCertificates\Root\Certificates\` in `system.reg` | `setup.sh:1461` |
-| The "observation only" comment that contradicts the hypothesis | `setup.sh:1454-1460` |
-| Where the count is printed (report only, never a check) | `setup.sh:2456` |
-| `--verify` licence check — tests existence only | `setup.sh:2262` |
-| `seed_bottle_licence` — short-circuits on existence | `setup.sh:1689` |
-| `ensure_licence` — same, on the PLAY path | `aurora17/aurora-pwsh.c:530` |
-| `collect_crash_reports` — added during this investigation | `setup.sh:2607` |
-| TLS-related Wine patches (ours) | `patches/crossover-26.3-fifa17-online.patch`, `...-cng.patch` |
+| Launcher retry gate and the new crash verdict | `aurora17/aurora-pwsh.c`, `run_play` loop, `game_exit_code_from_log`, `fifa_crashed` |
+| `--play-log` mode | `setup.sh`, block `if [ "$MODE" = play-log ]` |
+| Summary, collection, report section | `setup.sh`: `crash_log_summary`, `collect_crash_logs`, `crash_logs_report` |
+| Root store note and count | `setup.sh`: `root_cert_count` |
+| The one-shot `CTXAV` report and `CX_SMC_FLUSH` | `patches/crossover-26.3-fifa17-rosetta.patch` (`drbp_report_av`, `smc_flush_on`) |
+| Wine's root import | `dlls/crypt32/rootstore.c` `CRYPT_ImportSystemRootCertsToReg`, called from `store.c` when the LocalMachine `Root` store is opened |
+| The shim's log events | `redirect-shim.log` is UTC; connector and client logs are local time |
 
-**Not in this repo:** the Aurora17 connector and its redirect shim
-(`version.dll`, `3dfc7195d8c69eef`, 223,232 B, installed into the game folder).
-`NOTICE.md` lists Aurora17 under "Not included, and not ours to include." Do not
-confuse it with `fixes/x86_64-windows/version.dll` (`8692fefeff4ede61`,
-77,704 B), which is Wine's and *is* built here.
+## 8. Bundles this rests on (user-supplied, in `~/Downloads`)
 
-### Minor bug noticed in passing
-
-`root_cert_count` (`setup.sh:1461`) prints `0` twice when the count is zero:
-`grep -c` outputs `0` **and** exits non-zero, so the `|| print -r -- 0` fallback
-also fires. Visible in the user's report as two lines. Cosmetic.
-
----
-
-## 8. Reproducing / data
-
-Bundles used (user-supplied, in `~/Downloads`):
-
-- `aurora17-bundle-20260905-132914.ebpH7m.zip` — broken, 3 crashes
-- `aurora17-bundle-20260905-143403.VDrqku.zip` — broken, post-licence-reseed
-- `aurora17-bundle-20260905-164900.heKB8g.zip` — **working**, the one that cracked it
-
-Useful one-liners:
+- `aurora17-bundle-20260905-132914.ebpH7m.zip` — crashing, macOS 14.6.1
+- `aurora17-bundle-20260905-143403.VDrqku.zip` — crashing, after the licence reseed
+- `aurora17-bundle-20260905-164900.heKB8g.zip` — working, macOS 15.7.8 (in `diagnostics/`)
+- `aurora17-bundle-20260904-205827.zip` / `-223209.zip` — one tester, macOS 26.5.2, before and after the first launch that reached the login step (root store 0 → 161)
+- `aurora17-bundle-20260904-224943.zip` — offline install, macOS 26.5.1 (root store 0, never online, no crash)
 
 ```sh
-# does a bundle ever issue an auth code?
-grep -c origin-auth-code-issued <bundle>/logs/redirect-shim.log
-
-# GetDefaultUser calls per run
-grep -c origin-default-user-result <bundle>/logs/redirect-shim.log
-
-# exit codes across every launch
-grep -h "exited with code" <bundle>/logs/connector-*.log
+# per launch: GetDefaultUser calls and auth codes issued
+awk '/origin-auth-capability-loaded/{if(l!="")print l" du="du" auth="au; l=$1; du=0; au=0}
+     /origin-default-user-result/{du++} /origin-auth-code-issued/{au++}
+     END{print l" du="du" auth="au}' <bundle>/logs/redirect-shim.log
+# when a bottle's root store was filled (registry key timestamps are unix time)
+grep 'Root\\\\Certificates\\\\' "$BOTTLE/system.reg" | awk '{print $NF}' | sort | uniq -c
 ```
-
-Note when correlating: `redirect-shim.log` is UTC; connector and client logs are
-local, and the two machines here are `+01:00` and `+03:00`.
-
----
-
-## 9. What shipped during this investigation
-
-Branch `diagnose-licence-blob-and-crash-reports`, commit `9c178d8`:
-
-- `--reseed-licence` + `diagnostics/11 Re-seed the licence file.command` — makes
-  the loader write a fresh licence and prints the hash before and after. Used to
-  eliminate the licence theory in one double-click.
-- `collect_crash_reports` in `bundle_mode` — keeps any macOS crash report for the
-  game, Wine or CrossOver, and writes an explicit "none, and here is why" note
-  when Wine handled the fault itself.
-
-Both are diagnostics. Neither fixes the crash.
-
-## 10. Immediate advice for the affected user
-
-Offline works — single player, career and kick-off are all available via
-`PLAY FIFA 17 offline.command`. Online and Ultimate Team are broken until this
-is resolved.

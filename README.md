@@ -73,6 +73,7 @@ The same actions from Terminal, if you prefer:
 ./setup.sh --verify     # checks everything, changes nothing
 ./setup.sh --unstick    # bottle stuck loading forever? quit CrossOver, run this
 ./setup.sh --bundle     # zips logs for a bug report (no passwords or keys)
+./setup.sh --play-log   # game crashes on every PLAY? this says which module
 ```
 
 **SETUP.md** has the full troubleshooting guide.
