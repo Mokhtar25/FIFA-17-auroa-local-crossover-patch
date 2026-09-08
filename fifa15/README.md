@@ -61,15 +61,14 @@ output and any connector error before changing more settings.
 
 `./setup.sh --fifa15 --verify` (or **diagnostics/13 Check the install (FIFA 15).command**)
 now reports whether the installed DLL is offline-patched and whether a verified
-original is available. It also checks that the current background cleanup helper
-is loaded. These checks change no game files and do not test a live launch.
+original is available. It also fails if an older version's background cleanup
+agent is still installed. These checks change no game files and do not test a
+live launch.
 
-Rerunning **FIFA 15.command** refreshes the background helper even when the
-shared app already exists. To update just cleanup, run `./setup.sh --agent`.
-The helper checks every 30 seconds, allows a 45-second grace period after the
-last observed CrossOver session, requests termination, and force-closes
-stragglers after 10 seconds. It rescans for children created during shutdown.
-It pauses while CrossOver is open or a script holds a deliberate playing session.
+Nothing runs in the background. Aurora15Connector keeps listening on port 3216
+after the game exits; **Stop.command** closes it, and `./setup.sh --unstick`
+frees a bottle whose session outlived its wineserver. Rerunning
+**FIFA 15.command** removes an older version's agent if you still have one.
 **Stop.command** performs cleanup immediately.
 
 ## What does not work yet

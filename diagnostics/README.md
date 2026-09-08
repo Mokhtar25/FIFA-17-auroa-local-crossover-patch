@@ -16,11 +16,11 @@ Open this folder in Finder and double-click the one you want.
 | `6 Repair the signature.command` | Re-signs the CrossOver copy when macOS says it is damaged. | the copy |
 | `7 Smoke test.command` | Watches one PLAY from start to finish and says pass or fail. | no |
 | `8 Set the bottle up again.command` | Puts the settings and menu entries into a freshly made bottle. | the bottle |
-| `9 Install background cleanup.command` | Installs the background job that clears strays and ports by itself. | adds a LaunchAgent |
+| `9 Remove background cleanup.command` | Takes off the 30-second LaunchAgent older versions installed. Nothing runs in the background now. | removes a LaunchAgent |
 | `10 Re-add offline menu entry.command` | Puts the "FIFA 17 (offline)" entry back in the bottle. | the bottle |
 | `11 Re-seed the licence file.command` | Makes the game's own loader write a fresh EA licence file, and prints the hash before and after. Use it when PLAY and `FIFA17.exe` will not start but `_fifa17.exe` does. | the licence file |
 | `12 Play with a crash log.command` | Quit CrossOver first. Starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints where the crash was (which module, or generated code). It also records every name the bottle looks up, so the log says how far the game got before it died. The log lands in `crash-logs/` here and the next bundle picks it up. Use it for `FIFA 17 crashed` / exit code `0xC0000005`. | no (writes a log here) |
-| `13 Check the install (FIFA 15).command` | Checks the FIFA 15 bottle, shared app, offline DLL and original-backup status, and background cleanup. | no |
+| `13 Check the install (FIFA 15).command` | Checks the FIFA 15 bottle, shared app, offline DLL and original-backup status. | no |
 
 FIFA 15 log collection and smoke tests are not supported yet. Use number 13,
 or `./setup-both.sh --verify` to check both installations.
