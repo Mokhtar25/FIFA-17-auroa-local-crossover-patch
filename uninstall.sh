@@ -216,7 +216,7 @@ if [ "$MODE" = "in-place" ]; then
     if [ "$put_back" -gt 0 ]; then
         # This re-signs ad-hoc. It does NOT restore CodeWeavers' signature,
         # their Team ID, or the original hardened-runtime flags, because those
-        # cannot be reconstructed from six replaced files. Say so rather than
+        # cannot be reconstructed from seven replaced files. Say so rather than
         # printing "signed" and letting the user believe otherwise.
         signed=1
         for so in ntdll.so winecoreaudio.so crypt32.so ws2_32.so; do
@@ -355,10 +355,10 @@ for cxm in "$TARGET/Contents/SharedSupport/CrossOver/bin/cxmenu" \
 done
 
 # --------------------------------------- background cleanup (LaunchAgent)
-# setup.sh --agent (and every successful full install) puts a timer here that
-# clears strays by itself. Unload it first so no run fires mid-removal, then
-# remove the timer, the helper and its state. The log goes too: uninstall
-# means everything we installed is gone.
+# Older versions of setup.sh put a timer here. If it is still installed,
+# unload it first so no run fires mid-removal, then remove the timer, the
+# helper and its state. The log goes too: uninstall means everything we
+# installed is gone.
 say ""
 if [ -f "$HOME/Library/LaunchAgents/com.fifa-crossover-cleanup.plist" ]; then
     launchctl bootout "gui/$UID/com.fifa-crossover-cleanup" 2>/dev/null || true

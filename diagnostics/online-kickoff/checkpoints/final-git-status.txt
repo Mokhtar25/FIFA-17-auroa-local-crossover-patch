@@ -1,0 +1,18 @@
+ M "Both games.command"
+ M MANUAL.md
+ M "PLAY FIFA 17 offline.command"
+ M README.md
+ M SETUP.md
+ M "START HERE offline.command"
+ M "START HERE.command"
+ M Stop.command
+ M diagnostics/README.md
+ M diagnostics/_action.zsh
+ M setup-both.sh
+ M setup.sh
+ M tests/test_cleanup.py
+ M tests/test_scripts.py
+ M uninstall.sh
+?? HANDOFF-dual-fifa-and-cleanup.md
+?? ONLINE-KICKOFF-ANALYSIS.md
+?? diagnostics/online-kickoff/

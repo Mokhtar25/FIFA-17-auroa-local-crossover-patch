@@ -3,8 +3,9 @@
 # game's own loader inside the Aurora17 bottle, through the patched CrossOver
 # copy. Single player only — nothing here talks to EA.
 #
-# Leave this window open while you play: it is what tells the background
-# cleanup that the game is running on purpose. Closing it stops the game.
+# Leave this window open while you play: closing it stops the game. While it
+# is open, Stop.command and --unstick treat the session as deliberate and
+# leave it alone.
 
 cd "${0:A:h}" || exit 1
 chmod +x ./setup.sh 2>/dev/null || true

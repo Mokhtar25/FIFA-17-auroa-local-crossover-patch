@@ -1,0 +1,91 @@
+{
+  "captured_at": "2026-09-08T14:15:50.068831+03:00",
+  "method": "read-only file hashing; no executable launched",
+  "files": [
+    {
+      "path": "/Users/mokhtar/Downloads/Reborn17-3.1.10.exe",
+      "bytes": 488448,
+      "sha256": "aa404d8e3540ded16c6e52b71e852c781f20e516bb369aa29b213e215396f287"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/Aurora15Connector-2.exe",
+      "bytes": 10112000,
+      "sha256": "d72650e612e3d3ac130308a7c25e8ae37b989b115163a2bc21a588851bb498e6"
+    },
+    {
+      "path": "/Users/mokhtar/Library/Application Support/CrossOver/Bottles/Aurora17/drive_c/users/crossover/AppData/Local/Reborn17/updates/Reborn17-3.1.11.exe",
+      "bytes": 502272,
+      "sha256": "4d86c8b93388658fd9cbea65bdd814cf4bd039f79d0dc9eadf0632da04030a31"
+    },
+    {
+      "path": "/Users/mokhtar/Library/Application Support/CrossOver/Bottles/Aurora17/drive_c/users/crossover/AppData/Local/Aurora15Connector/Aurora15Connector.exe",
+      "bytes": 10118144,
+      "sha256": "fbe03fd3fb6dda0b918fb0a064fa4cca800d0076d04a72516188e3e1e3818d98"
+    },
+    {
+      "path": "/Users/mokhtar/Library/Application Support/CrossOver/Bottles/Aurora15/drive_c/users/crossover/AppData/Local/Reborn17/updates/Reborn17-3.1.11.exe",
+      "bytes": 502272,
+      "sha256": "4d86c8b93388658fd9cbea65bdd814cf4bd039f79d0dc9eadf0632da04030a31"
+    },
+    {
+      "path": "/Users/mokhtar/Library/Application Support/CrossOver/Bottles/Aurora15/drive_c/users/crossover/AppData/Local/Aurora15Connector/Aurora15Connector.exe",
+      "bytes": 10671104,
+      "sha256": "081c454524d8badb3a1af295f15309385f20ff9fc780ff1cc56519e57bf7867f"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 17/FIFA17.exe",
+      "bytes": 224639408,
+      "sha256": "29c31cef12b0c3c2a7305220617c7b4fa139ab76b8c857851bdbe88987962899"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 17/version.dll",
+      "bytes": 223232,
+      "sha256": "3dfc7195d8c69eef27f1cede0738946fbe827a61704b7100321e6e627c4bf19c"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 17/CardsDLL_Win64_retail.dll",
+      "bytes": 3179952,
+      "sha256": "4706a881ae1fc7b5769fd810b25a868d29d2b16a8e65a7513436327ef645573c"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 17/aurora17-redirect.ini",
+      "bytes": 297,
+      "sha256": "895597e40e538c14dfb3bebebaa5510c5fb6a7f9624919ace1eb1cc5d191b0fa"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 15/fifa15.exe",
+      "bytes": 87268816,
+      "sha256": "3da97d0a568475e5714e06f4871b814842a705ddc62207c2b9b66b5fc085bffb"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 15/dinput8.dll",
+      "bytes": 335360,
+      "sha256": "3a0ac33957014408896f7a5002bd8ddfa9c36d099806340950a156ad4cfbbc67"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 15/ItsAMe_Origin.dll",
+      "bytes": 25088,
+      "sha256": "5b141fb03c6f50228e48ddaf8dfb49428194a1f01be1a63c826c5bce4dec487a"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 15/ItsAMe_Origin.dll.aurora15.bak",
+      "bytes": 25088,
+      "sha256": "4463ce725e2af8b858095511801901630355fe1eba66fbb8fc7a5ba3b0f0300b"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 15/EA-MITM.ini",
+      "bytes": 2758,
+      "sha256": "37d866a1307aacfa2ddb29ffa3a79e8c3b2d009fb5d4d67f38f8c5f22a6d1911"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 15/CardsDLLzf.dll",
+      "bytes": 2046464,
+      "sha256": "24c99354edc890b1df6bedc3ea4ef8c255cdd13ae2948d82cd0cd6799d54b878"
+    },
+    {
+      "path": "/Users/mokhtar/Downloads/FIFA 15/BCEnginezf.dll",
+      "bytes": 1113600,
+      "sha256": "009e8936e4e79499e189fe4a4e821b283ff8e830be697f5e55873677bb4c3b01"
+    }
+  ]
+}

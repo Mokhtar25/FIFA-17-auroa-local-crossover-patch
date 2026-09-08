@@ -121,6 +121,7 @@ say() { :; }; ok() { :; }; green() { :; }; note() { :; }
 f15_add_ntdll() { :; }; f15_add_gdiplus() { :; }; f15_check_game() { :; }
 configure_bottle() { BOTTLE_OK=1; PS_OK=1; HOSTS_OK=1; }
 crossovers_running() { :; }; wineserver_pids() { :; }
+take_setup_lock() { :; }; require_bottle_free() { :; }; end_own_wine_session() { :; }
 remove_cleanup_agent() { touch "$BOTTLE_DIR/agent-removed"; }
 '''
             harness += '\nif [ "$MODE" = bottle ]; then' + body
@@ -128,6 +129,53 @@ remove_cleanup_agent() { touch "$BOTTLE_DIR/agent-removed"; }
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue((work / 'agent-removed').exists(),
                             'FIFA 15 setup left an older background agent in place')
+
+
+class BottleGuardTests(unittest.TestCase):
+    """--bottle (and so --fifa15 on an existing copy) edits the bottle's
+    registry. It must refuse while anything is inside the bottle, exactly as
+    the full install does: a live session writes the registry back out on exit
+    and the settings are silently lost."""
+
+    def run_bottle_mode(self, holders, crossover):
+        body = section('if [ "$MODE" = bottle ]; then', '\n# Replaces the EA licence file')
+        guard = 'require_bottle_free() {' + section('require_bottle_free() {', '\n}\n') + '\n}\n'
+        with tempfile.TemporaryDirectory(prefix='fifa-guard-') as directory:
+            work = Path(directory)
+            (work / 'app').mkdir()
+            (work / 'Aurora17').mkdir()
+            harness = 'set -eu\nTARGET=' + shlex.quote(str(work / 'app')) + '\n'
+            harness += 'BOTTLE_DIR=' + shlex.quote(directory) + '\n'
+            harness += 'MODE=bottle; TARGET_EXPLICIT=1; F15_ONE=0; BOTTLE=Aurora17; GAME=fifa17\n'
+            harness += 'E_PAYLOAD=4; E_UNSUPPORTED=2; E_INCOMPLETE=5; E_PERMISSION=3\n'
+            harness += 'say() { :; }; ok() { :; }; green() { :; }; note() { :; }\n'
+            harness += 'die() { print -r -- "STOPPED $2"; exit "$1"; }\n'
+            harness += 'prefix_holders() { print -r -- ' + shlex.quote(holders) + '; }\n'
+            harness += 'crossovers_running() { print -r -- ' + shlex.quote(crossover) + '; }\n'
+            harness += 'hold_pid_alive() { return 1; }; wineserver_pids() { :; }\n'
+            harness += 'take_setup_lock() { :; }; end_own_wine_session() { :; }\n'
+            harness += 'remove_cleanup_agent() { return 1; }; f15_check_game() { :; }\n'
+            harness += 'configure_bottle() { touch "$BOTTLE_DIR/configured"; BOTTLE_OK=1; PS_OK=1; HOSTS_OK=1; }\n'
+            harness += guard + '\nif [ "$MODE" = bottle ]; then' + body
+            result = subprocess.run(['/bin/zsh', '-c', harness], capture_output=True, text=True, timeout=10)
+            return result, (work / 'configured').exists()
+
+    def test_refuses_a_bottle_open_in_crossover(self):
+        result, configured = self.run_bottle_mode('4242', '/Applications/CrossOver.app')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('open in CrossOver', result.stdout)
+        self.assertFalse(configured, 'the bottle was edited under a live session')
+
+    def test_refuses_a_bottle_held_by_leftovers(self):
+        result, configured = self.run_bottle_mode('4242', '')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('--unstick', result.stdout)
+        self.assertFalse(configured)
+
+    def test_proceeds_when_nothing_holds_the_bottle(self):
+        result, configured = self.run_bottle_mode('', '')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(configured)
 
 
 if __name__ == '__main__':

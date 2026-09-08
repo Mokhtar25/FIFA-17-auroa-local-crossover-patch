@@ -52,6 +52,10 @@ The terminal equivalent is `./setup-both.sh`; `./setup-both.sh --offline`
 sets up FIFA 17 without Aurora17, followed by the normal FIFA 15 setup.
 `./setup-both.sh --verify` checks both, even if the first check fails.
 
+If the FIFA 17 half stops as **not finished** (exit 5), the FIFA 15 half still
+runs, because FIFA 15 only needs the shared copy; the final message says what
+FIFA 17 is missing.
+
 For custom names, use:
 
 ```sh
@@ -104,6 +108,9 @@ Downloads, Windows already sees it:
 ```
 AURORA_BOTTLE="My Bottle" ./setup.sh
 ```
+
+Offline install? Skip this step: the bottle is made for you if it is not
+there yet. CrossOver must be closed while that happens.
 
 **2. Put FIFA 17 (and Aurora17) under your home folder.** Extract the Aurora17
 zip as its own folder. `~/Downloads/Aurora17` and `~/Downloads/FIFA 17` are the
@@ -160,7 +167,9 @@ Ultimate Team, nothing that needs an EA account.
 Double-click **START HERE offline.command** (or run `./setup.sh --offline`).
 
 It installs the CrossOver copy, the fixes and the bottle settings, then adds a
-**FIFA 17 (offline)** entry to the bottle. It installs nothing that talks to
+**FIFA 17 (offline)** entry to the bottle. If the `Aurora17` bottle is not
+there yet it is made for you, the same way FIFA 15 setup makes `Aurora15`;
+CrossOver must be closed while that happens. It installs nothing that talks to
 EA: no PowerShell stand-in, no EA name redirects, no certificate.
 
 Want Aurora17 later? Install Aurora17, then double-click **START HERE.command**.
@@ -211,7 +220,8 @@ Two ways, same result:
 ## Stop and clean up
 
 Double-click **Stop.command**. It closes the game, then Aurora, then
-CrossOver, in that order, and frees the bottle lock and the ports.
+CrossOver, in that order, and frees the bottle lock and the ports. It shuts
+every bottle in CrossOver down, not only the FIFA ones.
 
 **Nothing from this package runs in the background.** Versions before
 2026-09-08 installed a LaunchAgent that woke every 30 seconds for as long as
@@ -459,6 +469,12 @@ The same information, for reference:
 
 > [!TIP]
 > 🟢 `crypt32` or `secur32.dll` did not install. Run `./setup.sh --verify`, then `./setup.sh` again.
+
+> [!CAUTION]
+> 🔴 An online match disconnects a few seconds after kick-off, every time. Menus, career and the servers are all fine.
+
+> [!TIP]
+> 🟢 The bottle is loading Wine's own C runtime instead of Microsoft's, so its maths differs from every Windows player's in the last bit and the match falls apart. Both games do it: quit CrossOver with **⌘Q**, then run `./setup.sh` again for FIFA 17 or `./setup.sh --fifa15` for FIFA 15. FIFA 17 has Microsoft's files in its own game folder; for FIFA 15 the installer also has to put a pair there, from your FIFA 17 folder or the game's own `_Redist` installer. `--verify` and `--report` say both which way the bottle is set and where the Microsoft copies were found. Manual: [step 6d](#6d-point-the-bottle-at-the-games-own-c-runtime).
 
 > [!CAUTION]
 > 🔴 A connection error at the redirector. Everything else works.
@@ -726,7 +742,7 @@ Two folders matter: `x86_64-unix` and `x86_64-windows`.
 
 ### 2. Make backups
 
-Copy these six files and add `.orig` to each copy. They are how you undo.
+Copy these seven files and add `.orig` to each copy. They are how you undo.
 
 ```
 x86_64-unix/ntdll.so              →  ntdll.so.orig
@@ -735,12 +751,13 @@ x86_64-unix/crypt32.so            →  crypt32.so.orig
 x86_64-windows/version.dll        →  version.dll.orig
 x86_64-windows/crypt32.dll        →  crypt32.dll.orig
 x86_64-windows/secur32.dll        →  secur32.dll.orig
+x86_64-windows/gdiplus.dll        →  gdiplus.dll.orig
 ```
 
 ### 3. Copy the new files in
 
 From `fixes/`, copy each file over the one with the same name. The three in
-`x86_64-unix` go in `x86_64-unix`, the three in `x86_64-windows` go in
+`x86_64-unix` go in `x86_64-unix`, the four in `x86_64-windows` go in
 `x86_64-windows`.
 
 **`crypt32` is two files.** Both are needed. Replacing only `crypt32.dll` does
@@ -847,6 +864,45 @@ two lines:
 ```
 
 The second line is one long line.
+
+### 6d. Point the bottle at the game's own C runtime
+
+An online match is a lockstep simulation: your Mac and every Windows player run
+the same maths on the same inputs and have to reach the same result. Wine
+carries its own copies of the Visual C++ runtimes and loads those in preference
+to Microsoft's, and its floating point is not the same to the last bit, so the
+match is torn down at kick-off. Each game needs the runtime it was built
+against: FIFA 17 the Visual Studio 2013 pair, FIFA 15 the 2012 pair.
+
+**Quit CrossOver first.** Open `user.reg` in the bottle folder, find
+`[Software\\Wine\\DllOverrides]` again, and in the **Aurora17** bottle add:
+
+```
+"msvcr120"="native,builtin"
+"msvcp120"="native,builtin"
+```
+
+In the **Aurora15** bottle add:
+
+```
+"msvcr110"="native,builtin"
+"msvcp110"="native,builtin"
+```
+
+Only these two per game: `vcruntime140`, `ucrtbase` and the rest are different
+runtimes that other things in the bottle use, and forcing those native breaks
+them.
+
+FIFA 17 needs nothing more — Microsoft's own `msvcr120.dll` and `msvcp120.dll`
+already sit in its game folder next to `FIFA17.exe`, which is where Windows
+looks first. FIFA 15's folder ships none, so there has to be a pair for Wine to
+prefer, or it loads its own again and the match desyncs anyway.
+`./setup.sh --fifa15` provides one: it copies Microsoft's `msvcr110.dll` and
+`msvcp110.dll` out of your FIFA 17 folder (they are in there too) and puts them
+beside `fifa15.exe`; with no FIFA 17 on this Mac it runs the game's own
+`_Redist/vcredist_x64_2012_x64.exe` in the bottle instead, which installs the
+same files into the bottle's `system32`. By hand, either place works. Nothing
+is downloaded, and no file belonging to the game is changed.
 
 ### 7. The sound fix (only some Macs)
 
@@ -1029,7 +1085,7 @@ CodeWeavers' own signature. Reinstall CrossOver to have it exactly as shipped.
 | `Diagnostics.command` | collect the logs for a bug report into `diagnostics/` |
 | `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh` | what the .command files run |
-| `fixes/` | the seven files for the CrossOver copy, source and checksums |
+| `fixes/` | the eight files for the CrossOver copy, source and checksums |
 | `aurora17/` | the PowerShell stand-in, its source, the certificate, checksums |
 | `patches/` | the Wine source changes the fixes were built from |
 | `build.sh` | rebuilds `fixes/` from source |

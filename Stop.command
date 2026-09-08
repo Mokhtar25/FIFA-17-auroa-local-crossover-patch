@@ -18,6 +18,7 @@ print -r -- ""
 print -r -- "  This quits CrossOver properly: games and Aurora first, then the"
 print -r -- "  wineservers, then CrossOver itself. Closing the window (red dot)"
 print -r -- "  leaves strays behind holding ports 47170-47173 and 3216."
+print -r -- "  Every bottle in CrossOver is shut down, not only the FIFA ones."
 print -r -- ""
 
 ./setup.sh --shutdown
@@ -27,9 +28,12 @@ print -r -- ""
 case $rc in
     0) print -r -- "  ${GRN}Finished.${OFF} CrossOver has quit and the ports are free."
        print -r -- "  Next PLAY will not say 'already listening' / 'port in use'." ;;
-    3) print -r -- "  ${RED}Stopped: CrossOver would not quit.${OFF}"
-       print -r -- "  Force Quit it (Apple menu > Force Quit), then run:"
-       print -r -- "    ./setup.sh --unstick" ;;
+    3) print -r -- "  ${RED}Stopped: CrossOver would not quit, or FIFA 17 is still running"
+       print -r -- "  from PLAY FIFA 17 offline.command.${OFF} The line above says which."
+       print -r -- "  If CrossOver will not quit: Force Quit it (Apple menu > Force"
+       print -r -- "  Quit), then run:  ./setup.sh --unstick"
+       print -r -- "  If the game is running: quit it, or close its window, then run"
+       print -r -- "  this again." ;;
     *) print -r -- "  ${RED}Stopped early.${OFF} The reason is printed above."
        print -r -- "  Try:  ./setup.sh --unstick" ;;
 esac

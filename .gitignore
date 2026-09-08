@@ -5,3 +5,7 @@ diagnostics/report.txt
 __pycache__/
 diagnostics/crash-logs/
 dist/
+
+# private PvP capture runs (packets, endpoints, account names)
+diagnostics/online-kickoff/runs/
+diagnostics/online-kickoff/crt-native.*.previous
