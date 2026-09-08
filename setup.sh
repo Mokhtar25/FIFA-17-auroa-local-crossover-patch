@@ -4697,13 +4697,22 @@ if [ "$MODE" = resign ]; then
     # An install made by an older copy of this package has no resolver in it,
     # and signing a file that is not there would stop with "the copy is
     # incomplete". Put it in first: it is two small operations, and --resign is
-    # what SETUP.md sends people to when something is missing.
+    # what SETUP.md sends people to when something is missing. A resolver that
+    # is there but is not the shipped one (a debug build left from a hunt, an
+    # older package) is replaced the same way: --bottle never touches the app,
+    # so until now only a full 1 GB re-copy could clear "a17hosts.dylib is not
+    # the shipped version" from --verify.
     RESIGN_WINE="$TARGET/Contents/SharedSupport/CrossOver/lib/wine"
     if [ ! -f "$RESIGN_WINE/$RESOLVER" ]; then
         cp -X "$HERE/fixes/$RESOLVER" "$RESIGN_WINE/$RESOLVER" \
             || die $E_PERMISSION "Could not install ${RESOLVER:t} into $TARGET.
 $APP_MGMT_HINT"
         ok "added ${RESOLVER:t}"
+    elif ! cmp -s "$HERE/fixes/$RESOLVER" "$RESIGN_WINE/$RESOLVER"; then
+        cp -X "$HERE/fixes/$RESOLVER" "$RESIGN_WINE/$RESOLVER" \
+            || die $E_PERMISSION "Could not replace ${RESOLVER:t} in $TARGET.
+$APP_MGMT_HINT"
+        ok "replaced ${RESOLVER:t} with the shipped version"
     fi
     if ! ws2_32_is_patched "$RESIGN_WINE"; then
         install_name_tool -change "$LIBSYSTEM" "$RESOLVER_PATH" \
