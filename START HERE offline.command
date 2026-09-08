@@ -30,9 +30,11 @@ print -r -- ""
 print -r -- "  Your own CrossOver is not touched, and neither is any other bottle"
 print -r -- "  you run in it. The copy needs about 1 GB of disk."
 print -r -- "  The game is never modified. Nothing is downloaded."
+print -r -- "  CrossOver must be closed while this runs."
 print -r -- ""
-print -r -- "  You still need FIFA 17 itself, and a bottle called Aurora17 for it"
-print -r -- "  to live in (SETUP.md shows how to make one)."
+print -r -- "  You still need FIFA 17 itself -- in your Downloads folder, or say"
+print -r -- "  where with AURORA_GAME_DIR. The Aurora17 bottle it lives in is made"
+print -r -- "  for you if it is not there yet."
 print -r -- ""
 
 ./setup.sh --offline

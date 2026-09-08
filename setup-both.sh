@@ -8,12 +8,15 @@
 #   ./setup-both.sh --shutdown                 quit CrossOver cleanly, then free
 #   ./setup-both.sh --agent                    remove the old background cleanup agent
 #
-# It is setup.sh twice: the FIFA 17 install first (the copy, the seven files,
+# It is setup.sh twice: the FIFA 17 install first (the copy, the eight files,
 # the Aurora17 bottle, the stand-in, the EA names, the licence), then
 # setup.sh --fifa15 (the Aurora15 bottle, its settings, the game-folder check).
-# The FIFA 15 half only runs when the FIFA 17 half finished, since it needs the
-# copy that half makes. Every option setup.sh takes is documented there; exit
-# codes are setup.sh's, from whichever half stopped.
+# The FIFA 15 half needs only the copy, so it runs when the FIFA 17 half
+# finished (exit 0) and also when it stopped "not finished" (exit 5: the copy
+# is patched, something in the Aurora17 bottle is missing). Any other stop
+# means there may be no copy, and FIFA 15 is not attempted. Every option
+# setup.sh takes is documented there; exit codes are setup.sh's, FIFA 17's
+# first when both halves have one.
 
 set -u
 # Run under zsh whatever it was started with. Every line below is zsh, and the
@@ -82,22 +85,41 @@ esac
 print -r -- ""
 print -r -- "==== 1 of 2: FIFA 17 ===="
 if [ "$OFFLINE" = 1 ]; then run17 --offline "$@"; else run17 "$@"; fi
-rc=$?
-if [ "$rc" -ne 0 ]; then
+rc17=$?
+if [ "$rc17" -ne 0 ] && [ "$rc17" -ne 5 ]; then
     print -r -- ""
-    print -r -- "The FIFA 17 half stopped (exit $rc), so FIFA 15 was not set up."
+    print -r -- "The FIFA 17 half stopped (exit $rc17), so FIFA 15 was not set up."
     print -r -- "Fix what it says above and run this again."
-    exit $rc
+    exit $rc17
+fi
+if [ "$rc17" -eq 5 ]; then
+    print -r -- ""
+    print -r -- "The FIFA 17 half is not finished: the copy is patched, but something in"
+    print -r -- "the $F17 bottle is missing (listed above). FIFA 15 needs only the copy,"
+    print -r -- "so it is set up next. Then fix the FIFA 17 piece and run  ./setup.sh --bottle"
 fi
 
 print -r -- ""
 print -r -- "==== 2 of 2: FIFA 15 ===="
-run15 "$@"; rc=$?
-if [ "$rc" -ne 0 ]; then
+run15 "$@"; rc15=$?
+if [ "$rc15" -ne 0 ]; then
     print -r -- ""
-    print -r -- "FIFA 17 is set up. The FIFA 15 half stopped (exit $rc); fix what it says"
-    print -r -- "above and run  ./setup.sh --fifa15  to finish it."
-    exit $rc
+    if [ "$rc17" -eq 0 ]; then
+        print -r -- "FIFA 17 is set up. The FIFA 15 half stopped (exit $rc15); fix what it says"
+        print -r -- "above and run  ./setup.sh --fifa15  to finish it."
+        exit $rc15
+    fi
+    print -r -- "Neither half finished: FIFA 17 exit $rc17, FIFA 15 exit $rc15. Fix what each"
+    print -r -- "says above, then  ./setup.sh --bottle  for FIFA 17 and  ./setup.sh --fifa15"
+    print -r -- "for FIFA 15. To check both:  ./setup-both.sh --verify"
+    exit $rc17
+fi
+if [ "$rc17" -eq 5 ]; then
+    print -r -- ""
+    print -r -- "FIFA 15 is set up. FIFA 17 is not finished: the missing piece is listed in"
+    print -r -- "the '1 of 2' section above. Fix it, then run  ./setup.sh --bottle  (no"
+    print -r -- "re-copy). To check both:  ./setup-both.sh --verify"
+    exit 5
 fi
 
 print -r -- ""

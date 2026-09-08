@@ -11,8 +11,8 @@ Open this folder in Finder and double-click the one you want.
 | `1 Collect diagnostics.command` | Collects the report, the newest logs, the bottle settings and the hashes into one `aurora17-bundle-<date>.zip` **in this folder**. Send that zip. | no |
 | `2 Report.command` | Prints one page of diagnosis and saves it as `report.txt` here. | no |
 | `3 Check the install.command` | Checks an install that is already there and says `ok` / `note` / `BAD` for each thing. | no |
-| `4 Unstick.command` | Frees a bottle stuck on "loading", and the ports Aurora17 holds. | processes only |
-| `5 Quit CrossOver cleanly.command` | Quits CrossOver properly, so no strays and no held ports are left behind. | processes only |
+| `4 Unstick.command` | Frees a bottle stuck on "loading". It works on every bottle, not only the FIFA ones, and frees the ports Aurora17 and Aurora15 hold (47170-47173 and 3216). | processes only |
+| `5 Quit CrossOver cleanly.command` | Quits CrossOver properly and shuts every bottle down, not only the FIFA ones, so no strays and no held ports are left behind. | processes only |
 | `6 Repair the signature.command` | Re-signs the CrossOver copy when macOS says it is damaged. | the copy |
 | `7 Smoke test.command` | Watches one PLAY from start to finish and says pass or fail. | no |
 | `8 Set the bottle up again.command` | Puts the settings and menu entries into a freshly made bottle. | the bottle |

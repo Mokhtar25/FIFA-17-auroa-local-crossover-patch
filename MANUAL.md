@@ -37,7 +37,7 @@ The shipped files must be intact, or you are installing rubbish.
 ( cd fixes && shasum -a 256 -c SHA256SUMS )
 ```
 
-Eight lines, all `OK` — seven binaries plus `a17hosts.c`, the source of the
+Nine lines, all `OK` — eight binaries plus `a17hosts.c`, the source of the
 one file here that is ours rather than a rebuilt Wine component. Anything else —
 re-download, do not continue.
 
@@ -59,12 +59,12 @@ ls -d "$WINE/x86_64-unix"
 ```
 
 > Doing it **in place** instead (patching your real CrossOver, affecting every
-> bottle): skip this step and set `APP=$SRC`. Back up the six replaced files
+> bottle): skip this step and set `APP=$SRC`. Back up the seven replaced files
 > first —
 > `cp "$WINE/$f" "$WINE/$f.orig"` for each — because reinstalling CrossOver is
 > the only other way back.
 
-## 3. Install the seven files
+## 3. Install the eight files
 
 `-X` drops the quarantine flag the zip put on them. Left on, Gatekeeper can
 refuse to load them and the failure is unreadable.
@@ -72,7 +72,8 @@ refuse to load them and the failure is unreadable.
 ```sh
 for f in x86_64-unix/ntdll.so x86_64-unix/winecoreaudio.so x86_64-unix/crypt32.so \
          x86_64-unix/a17hosts.dylib \
-         x86_64-windows/version.dll x86_64-windows/crypt32.dll x86_64-windows/secur32.dll; do
+         x86_64-windows/version.dll x86_64-windows/crypt32.dll x86_64-windows/secur32.dll \
+         x86_64-windows/gdiplus.dll; do
     cp -X "fixes/$f" "$WINE/$f" && echo "ok  $f"
 done
 ```

@@ -26,15 +26,18 @@ double-click **FIFA 15.command**. The steps below are for FIFA 17 or both games.
 
 1. Put the **FIFA 17** folder and the **Aurora17** folder in your Downloads folder.
    Doing FIFA 15 too? Put the **FIFA 15** folder there as well.
-2. In CrossOver, make a new bottle: **+** → **Windows 10 64-bit** → name it exactly `Aurora17`.
-3. Aurora17 only: select the bottle, choose **Run Command**, browse to
-   `Aurora17Connector.exe`, and tick the box to save it as a launcher.
+2. Normal install (with Aurora17): in CrossOver, make a new bottle: **+** →
+   **Windows 10 64-bit** → name it exactly `Aurora17`.
+3. Normal install: select the bottle, choose **Run Command**, browse to
+   `Aurora17Connector.exe`, and tick the box to save it as a launcher. That
+   launcher is how you press PLAY.
 4. Quit CrossOver with **⌘Q**.
 
-The installer stops if the bottle is not there. SETUP.md explains each step.
+The normal install stops if the bottle is not there. SETUP.md explains each step.
 
-Only the `Aurora17` bottle is made by hand. The `Aurora15` bottle FIFA 15 needs
-is made for you.
+Steps 2 and 3 are only for the normal install. The offline install makes the
+`Aurora17` bottle for you if it is not there, and FIFA 15 makes its `Aurora15`
+bottle for you as well. Quit CrossOver first either way.
 
 ## Install
 
@@ -50,9 +53,18 @@ Pick one:
 If macOS says "Apple could not verify..." go to **System Settings → Privacy &
 Security**, scroll down, and click **Open Anyway**. You only do this once.
 
-Both games ship on **main**; no branch switching is needed. Existing users can
-run **Both games.command** to update the shared copy and configure both bottles.
+Already have FIFA 17 installed? **Both games.command** copies CrossOver again
+(about 1 GB, which is how an update reaches the copy) and sets both bottles up.
+If the FIFA 17 half is not finished, FIFA 15 is still set up, and the message
+at the end says what FIFA 17 is missing.
 For FIFA 17 offline plus FIFA 15, run `./setup-both.sh --offline`.
+
+Updating an install you already have (for example to pick up the C runtime
+fix that stops online matches disconnecting at kick-off): double-click
+**Stop.command** so CrossOver is fully quit, then in Terminal run
+`./setup.sh --bottle` for FIFA 17 and `./setup.sh --fifa15` for FIFA 15.
+Neither copies CrossOver again; they only bring the bottles up to date.
+`./setup.sh --verify` (or `--fifa15 --verify`) shows the result.
 
 Custom bottle names: `FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh`.
 Use distinct bottles. Unset `AURORA_BOTTLE` before running the combined installer.
@@ -77,10 +89,19 @@ fix right under it.
 Always use **CrossOver-FIFA**, not your normal CrossOver. They look the same,
 but only the copy has the fixes.
 
+For online matches the installer also points each bottle at Microsoft's own C
+runtime instead of Wine's. Without that, the maths differs from every Windows
+player's in the last bit and the match disconnects at kick-off. FIFA 17 has
+Microsoft's copies in its game folder already; FIFA 15 has none, so the
+installer puts a pair beside `fifa15.exe` — taken from your FIFA 17 folder, or
+installed from the VS2012 redistributable in FIFA 15's own `_Redist` folder.
+Nothing is downloaded, and no file of the game's own is changed.
+
 ## Stop
 
 Quit with **Stop.command**. It closes the game, then Aurora, then CrossOver,
-in the order that leaves no strays and no held ports.
+in the order that leaves no strays and no held ports. It shuts every bottle in
+CrossOver down, not only the FIFA ones.
 
 Nothing from this package runs in the background. Earlier versions installed a
 helper that woke every 30 seconds for as long as you owned the Mac; it is gone,

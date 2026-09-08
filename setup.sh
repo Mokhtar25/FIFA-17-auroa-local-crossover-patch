@@ -6,7 +6,10 @@
 # other bottle you run in it are left exactly as they are.
 #
 # Everything it does can be undone by running ./uninstall.sh.
-# It never touches the game, and it never downloads anything.
+# It never changes a file of the game's own, and it never downloads anything.
+# (For FIFA 15 it does add Microsoft's msvcr110/msvcp110 next to fifa15.exe,
+# copied from your FIFA 17 folder or out of the game's own _Redist installer:
+# without them an online match desyncs at kick-off.)
 #
 #   ./setup.sh [/path/to/CrossOver.app]   install
 #   ./setup.sh --resign                   repair the signature, no re-copy
@@ -39,7 +42,8 @@
 #                                         bottle, e.g. after moving the game folder
 #   ./setup.sh --offline                  install FIFA 17 with no Aurora17 at all:
 #                                         the CrossOver copy, the fixes and the
-#                                         bottle settings only. Kick-off, career
+#                                         bottle settings only (the Aurora17 bottle
+#                                         is made if it is missing). Kick-off, career
 #                                         and the rest of single player; no online,
 #                                         no FUT, no EA account. See SETUP.md.
 #
@@ -775,10 +779,19 @@ wine_leftovers() {
 # winewrapper.exe lines that start a connector from a .lnk (those contain no
 # .exe, only "Aurora15Connector-2.lnk", so matching .exe alone misses the
 # wrapper and leaves a PPID-1 stray behind).
+#
+# Both games by default; "game_leftovers fifa17" or "game_leftovers fifa15"
+# narrows it to one. --play-log needs FIFA 17's only: an Aurora15Connector
+# left listening on 3216 is a normal state, not a reason to refuse to start
+# Aurora17's launcher.
 game_leftovers() {
-    local p
+    local p pat='fifa1[57]|Aurora1[57](Connector|Client|Server|Launcher)'
+    case "${1:-}" in
+        fifa17) pat='fifa17|Aurora17(Connector|Client|Server|Launcher)' ;;
+        fifa15) pat='fifa15|Aurora15(Connector|Client|Server|Launcher)' ;;
+    esac
     for p in ${(f)"$(ps -Ao pid=,command= 2>/dev/null \
-        | grep -Ei '(fifa1[57]|Aurora1[57](Connector|Client|Server|Launcher))' \
+        | grep -Ei "($pat)" \
         | grep -v grep | grep -v 'setup\.sh' | awk '{print $1}')"}; do
         [ -n "$p" ] || continue
         wine_owned_pid "$p" && print -r -- "$p"
@@ -799,14 +812,20 @@ wineserver_pids() {
 
 # Ask every GUI to quit via Apple Events, then wait for it to go. Returns 0
 # when none is left, 1 when something is still alive (hung, needs Force Quit).
+#
+# By bundle path, never by name. Every copy is called "CrossOver" and shares
+# one bundle identifier, so 'tell application "CrossOver" to quit' reaches
+# whichever one Launch Services picks first -- and with CrossOver and
+# CrossOver-FIFA both open, the other stayed up and this reported "would not
+# quit". AppleScript takes a POSIX path as an application specifier, and
+# crossovers_running prints exactly those, one per open copy.
 quit_crossovers_gui() {
-    local waited=0 left
+    local waited=0 left app
     [ -z "$(crossovers_running)" ] && return 0
-    osascript -e 'tell application "System Events" to set cl to name of every process whose background only is false' 2>/dev/null | tr ',' '\n' \
-        | grep -i '^ *crossover' | while IFS= read -r app; do
-            app="$(print -r -- "$app" | sed 's/^ *//;s/ *$//')"
-            [ -n "$app" ] && osascript -e "tell application \"$app\" to quit" >/dev/null 2>&1 &
-        done || true
+    for app in ${(f)"$(crossovers_running)"}; do
+        [ -n "$app" ] || continue
+        osascript -e "tell application \"${app//\"/\\\"}\" to quit" >/dev/null 2>&1 &
+    done
     while [ "$waited" -lt 15 ]; do
         left="$(crossovers_running)"
         [ -z "$left" ] && return 0
@@ -857,8 +876,8 @@ shutdown_wineservers() {
 }
 
 # ----------------------------------------------------- FIFA 15 one-command
-# Makes the FIFA 15 bottle with CrossOver's own tool, so --fifa15 does not send
-# anyone to the New Bottle dialog. The copy's cxbottle is used, so the bottle
+# Makes the bottle with CrossOver's own tool, so --fifa15 and --offline do not
+# send anyone to the New Bottle dialog. The copy's cxbottle is used, so the bottle
 # is born pointing at the patched CrossOver. It runs wineboot, which takes
 # about twenty seconds and leaves user.reg and system.reg behind -- the two
 # files configure_bottle needs, and the reason a bottle CrossOver has never
@@ -880,7 +899,7 @@ make_bottle() {
          Nothing has been touched."
     fi
     ok "making it -- this takes about twenty seconds"
-    if ! out="$("$cxb" --bottle "$BOTTLE" --create --template win10_64 --description "FIFA 15" 2>&1)"; then
+    if ! out="$("$cxb" --bottle "$BOTTLE" --create --template win10_64 --description "$GAME_LABEL" 2>&1)"; then
         print -r -- "$out" | tail -5 | sed 's/^/        /'
         die $E_PERMISSION "CrossOver could not make the bottle.
          Make it yourself instead: open ${app:t}, Bottle > New Bottle,
@@ -1184,6 +1203,29 @@ OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
 if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; else OVERRIDE_DLL=version; fi
 OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 
+# ------------------------------------------------ the C runtime override
+# An online match is a lockstep simulation: every client runs the same maths on
+# the same inputs and has to arrive at the same result. Wine carries its own
+# copies of the Visual C++ runtimes and by default loads those in place of
+# Microsoft's, and Wine's floating point is not Microsoft's to the last bit, so
+# this Mac's simulation drifted from every Windows player's and the match was
+# torn down at kick-off: FIFA 17's own match report ended in GDESYNCEND and the
+# player saw a disconnect seconds after the whistle. Told to prefer the native
+# files, the same match played on -- and a goal was scored.
+#
+# Which pair depends on the game, because they were built against different
+# runtimes: FIFA 17 imports msvcr120/msvcp120 (Visual Studio 2013), FIFA 15 and
+# its DLLs import msvcr110/msvcp110 (Visual Studio 2012). Only those two per
+# game: vcruntime140/ucrtbase and the rest are different runtimes that other
+# things in the bottle use, and forcing those native breaks them.
+#
+# Nothing is downloaded either way. FIFA 17 ships Microsoft's own copies in its
+# game folder, next to FIFA17.exe, so the override alone is enough. FIFA 15
+# ships none, so f15_ensure_crt_dlls puts a Microsoft pair where the game will
+# find it first -- from the FIFA 17 folder, or out of the VS2012 redistributable
+# that FIFA 15 itself carries in _Redist.
+if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
+
 bottle_user_reg()   { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
 bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
 
@@ -1252,6 +1294,144 @@ set_reg_line() {
 
 version_override_is_set() { reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE"; }
 set_version_override()    { set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE" "\"$OVERRIDE_DLL\""; }
+
+# See the C runtime override above. Same section, same file, one line per DLL,
+# so both of these are true for FIFA 15 without touching anything: the loop
+# never runs.
+crt_override_is_set() {
+    local dll
+    for dll in $CRT_OVERRIDE_DLLS; do
+        reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "\"$dll\"=\"native,builtin\"" || return 1
+    done
+    return 0
+}
+set_crt_override() {
+    local dll
+    for dll in $CRT_OVERRIDE_DLLS; do
+        set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" \
+            "\"$dll\"=\"native,builtin\"" "\"$dll\"" || return 1
+    done
+    return 0
+}
+
+# Is this DLL Microsoft's own, and not Wine's stand-in for it? Wine's builtins
+# carry the string "Wine builtin DLL" in the clear. A real Microsoft one carries
+# "Microsoft Corporation" in its version resource, which is UTF-16 -- every
+# letter followed by a zero byte -- hence the dots in the pattern. Both greps
+# read the file as text because these are binaries and grep would otherwise
+# only say "binary file matches" and, worse, stop at the first NUL on some
+# systems.
+crt_dll_is_microsoft() {
+    local f="$1"
+    [ -f "$f" ] || return 1
+    LC_ALL=C grep -qa "Wine builtin DLL" "$f" && return 1
+    LC_ALL=C grep -qa "M.i.c.r.o.s.o.f.t. .C.o.r.p" "$f"
+}
+
+# Microsoft's copies of BOTH of this game's runtime DLLs, in one directory.
+crt_dlls_are_microsoft_in() {
+    local dir="$1" dll
+    [ -n "$dir" ] && [ -d "$dir" ] || return 1
+    for dll in $CRT_OVERRIDE_DLLS; do
+        crt_dll_is_microsoft "$dir/$dll.dll" || return 1
+    done
+    return 0
+}
+
+# Where FIFA 15 will actually find a Microsoft pair -- printed, so the report
+# can say where. Windows looks in the program's own folder before system32, and
+# the bottle's system32 holds Wine's own copies unless a redistributable has
+# been installed over them, so the game folder is asked first.
+f15_crt_native_dir() {
+    local d
+    d="$(f15_game_dir 2>/dev/null || true)"
+    if [ -n "$d" ] && crt_dlls_are_microsoft_in "$d"; then print -r -- "$d"; return 0; fi
+    d="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32"
+    if crt_dlls_are_microsoft_in "$d"; then print -r -- "$d"; return 0; fi
+    return 1
+}
+
+# A FIFA 17 install is the cheapest source of the pair FIFA 15 needs: its game
+# folder ships Microsoft's own msvcr110/msvcp110 as well as the 120 pair FIFA 17
+# itself loads. The same places game_dir_find looks, but asking for the DLLs
+# rather than for the loader -- this runs under GAME=fifa15, where nothing has
+# been told where FIFA 17 is.
+f15_crt_donor_dir() {
+    local d
+    for d in "${AURORA_GAME_DIR:-}" "$HOME/Downloads/FIFA 17" "$HOME/FIFA 17" "$HOME/Desktop/FIFA 17"; do
+        [ -n "$d" ] || continue
+        crt_dlls_are_microsoft_in "$d" && { print -r -- "$d"; return 0; }
+    done
+    return 1
+}
+
+# Puts a Microsoft-built C runtime where FIFA 15 will load it from. The registry
+# override only says "prefer the native file"; with no native file to prefer,
+# Wine loads its own and the match desyncs just the same. FIFA 17 needs none of
+# this -- Microsoft's copies ship beside FIFA17.exe -- but FIFA 15's folder has
+# none, and the ones in the bottle's system32 are Wine's.
+#
+# Three sources, cheapest first, and not one of them downloads anything: the
+# pair already sitting in a FIFA 17 folder on this Mac, then the VS2012
+# redistributable FIFA 15 itself carries in _Redist, then a note asking for the
+# files. Never a stop: only an online match cares.
+f15_ensure_crt_dlls() {
+    local app="$1" d src dll redist rwin wine sys wpid waited=0
+    d="$(f15_game_dir 2>/dev/null || true)"
+    if [ -z "$d" ]; then
+        note "no FIFA 15 folder found, so its C runtime was not checked"
+        say "        For a game kept elsewhere:  FIFA15_DIR='/path/to/FIFA 15' ./setup.sh --fifa15"
+        return 1
+    fi
+    if crt_dlls_are_microsoft_in "$d"; then
+        ok "${(j: + :)CRT_OVERRIDE_DLLS} — Microsoft's own, already beside fifa15.exe"
+        return 0
+    fi
+    if src="$(f15_crt_donor_dir)"; then
+        # Added beside the game, not over it: these two files are not part of
+        # FIFA 15 and nothing of the game's own is touched.
+        for dll in $CRT_OVERRIDE_DLLS; do
+            cp -p "$src/$dll.dll" "$d/$dll.dll" 2>/dev/null || break
+        done
+        if crt_dlls_are_microsoft_in "$d"; then
+            ok "${(j: + :)CRT_OVERRIDE_DLLS} — copied Microsoft's own beside fifa15.exe"
+            say "        from $src (nothing downloaded: they were already on this Mac)"
+            return 0
+        fi
+        note "could not copy the C runtime from $src into $d"
+    fi
+    redist="$d/_Redist/vcredist_x64_2012_x64.exe"
+    wine="$app/Contents/SharedSupport/CrossOver/bin/wine"
+    sys="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32"
+    if [ -f "$redist" ] && [ -x "$wine" ] && rwin="$(unix_path_to_win "$d/_Redist" 2>/dev/null)"; then
+        say "        installing ${redist:t} in the bottle — this takes a minute"
+        # --wait-children because the redistributable hands the real work to a
+        # second process and returns; the wrapper would otherwise be back before
+        # a single file had been written.
+        "$wine" --bottle "$BOTTLE" --wait-children --workdir "$d/_Redist" \
+            --cx-app "$rwin\\${redist:t}" /install /quiet /norestart >/dev/null 2>&1 &
+        wpid=$!
+        # Bounded: an installer that puts a dialog up behind every other window
+        # would otherwise hold the install open for as long as the user is away.
+        while [ "$waited" -lt 180 ] && kill -0 "$wpid" 2>/dev/null; do
+            /bin/sleep 1
+            waited=$((waited + 1))
+        done
+        kill -TERM "$wpid" 2>/dev/null || true
+        wait "$wpid" 2>/dev/null || true
+        if crt_dlls_are_microsoft_in "$sys"; then
+            ok "${(j: + :)CRT_OVERRIDE_DLLS} — installed into the bottle's system32 (${waited}s)"
+            say "        from the game's own _Redist folder"
+            return 0
+        fi
+        note "the VS2012 redistributable ran but system32 still holds Wine's own runtime"
+    fi
+    note "no Microsoft copy of ${(j: or :)CRT_OVERRIDE_DLLS} anywhere this looked"
+    say "        Copy msvcr110.dll and msvcp110.dll from a Windows machine, or from"
+    say "        a FIFA 17 install, into  $d"
+    say "        Offline play is unaffected; online matches desync at kick-off."
+    return 1
+}
 
 # ------------------------------------------------- the controller (BUGS.md §20)
 # On a Mac, CrossOver's winebus offers a game controller to the bottle two ways
@@ -2070,6 +2250,40 @@ verify_install() {
                  problems=$((problems+1)); }
     fi
 
+    # See the C runtime override. Offline play never notices; an online match
+    # ends at kick-off, which looks like a network fault and is not one.
+    if [ ${#CRT_OVERRIDE_DLLS} -gt 0 ] && [ -f "$(bottle_user_reg)" ]; then
+        crt_override_is_set \
+            && ok "${(j: + :)CRT_OVERRIDE_DLLS} = native,builtin in the $BOTTLE bottle" \
+            || { bad "the $BOTTLE bottle loads Wine's own C runtime rather than"
+                 say "        Microsoft's, so online matches desync at kick-off (the game"
+                 say "        shows a disconnect right after kick-off). Quit CrossOver"
+                 if [ "$GAME" = fifa15 ]; then
+                   say "        fully, then re-run  ./setup.sh --fifa15"
+                 else
+                   say "        fully, then re-run  ./setup.sh"
+                 fi
+                 problems=$((problems+1)); }
+    fi
+
+    # And an override is only half of it: Wine can only prefer a native runtime
+    # if there is one. FIFA 17 ships the pair beside FIFA17.exe, so there is
+    # nothing to look for; FIFA 15 is given one at install time and this says
+    # whether it is still there.
+    if [ "$GAME" = fifa15 ]; then
+        local crt_dir=""
+        if crt_dir="$(f15_crt_native_dir)"; then
+            ok "${(j: + :)CRT_OVERRIDE_DLLS} — Microsoft's own, in $crt_dir"
+        else
+            bad "every copy of the C runtime FIFA 15 can reach is Wine's own, so"
+            say "        the override above has nothing to prefer and online matches"
+            say "        still desync at kick-off. Quit CrossOver fully, then re-run"
+            say "        ./setup.sh --fifa15  (with FIFA15_DIR='/path/to/FIFA 15' in"
+            say "        front of it if the game is not in ~/Downloads)"
+            problems=$((problems+1))
+        fi
+    fi
+
     # Without this Aurora's helper spends five seconds looking for a proxy before
     # its first request, and the shim's five-second deadline for the Origin auth
     # code runs out first. See BUGS.md §21.
@@ -2514,6 +2728,26 @@ report_mode() {
             print -r -- "$OVERRIDE_DLL = native,builtin  OK"
         else
             print -r -- "NOT SET -- Aurora's redirect shim cannot load"
+        fi
+        print -r -- ""
+
+        print -r -- "---- C runtime DLL override ----------------------------"
+        if crt_override_is_set; then
+            print -r -- "${(j: + :)CRT_OVERRIDE_DLLS} = native,builtin  OK"
+        else
+            print -r -- "NOT SET -- online matches desync at kick-off"
+        fi
+        local crt_dir=""
+        if [ "$GAME" = fifa15 ]; then
+            crt_dir="$(f15_crt_native_dir 2>/dev/null || true)"
+            print -r -- "Microsoft copies: ${crt_dir:-none found -- Wine's own everywhere FIFA 15 looks}"
+        else
+            crt_dir="$(game_dir_find 2>/dev/null || true)"
+            if [ -n "$crt_dir" ] && crt_dlls_are_microsoft_in "$crt_dir"; then
+                print -r -- "Microsoft copies: $crt_dir (shipped with the game)"
+            else
+                print -r -- "Microsoft copies: ${crt_dir:-no FIFA 17 folder found} -- not Microsoft's"
+            fi
         fi
         print -r -- ""
 
@@ -3122,7 +3356,7 @@ configure_bottle() {
         note "no bottle called '$BOTTLE' found at"
         say "        $BOTTLE_DIR"
         say "        FIFA will not start without these settings. Once the bottle"
-        say "        exists, run:   AURORA_BOTTLE='name' ./setup.sh --resign"
+        say "        exists, run:   AURORA_BOTTLE='name' ./setup.sh --bottle"
         say "        or re-run this installer."
     else
         add_setting() {
@@ -3178,6 +3412,13 @@ configure_bottle() {
         else
             ok "no Teams audio driver here, sound fix not needed"
         fi
+        # See f15_ensure_crt_dlls. The override set below only tells Wine
+        # to prefer a native C runtime; FIFA 15's folder ships none, so one has
+        # to be put there first or there is nothing to prefer. FIFA 17 ships its
+        # own and needs nothing here.
+        if [ "$GAME" = fifa15 ]; then
+            f15_ensure_crt_dlls "$APP" || true
+        fi
         # See the comment on set_version_override. Nothing else puts this there,
         # and without it every other part of the install is wasted.
         if [ -f "$(bottle_user_reg)" ]; then
@@ -3191,6 +3432,21 @@ configure_bottle() {
                  $(bottle_user_reg)
              Without it the game will say the servers have been shut down.
              Quit CrossOver completely and run this again."
+            fi
+            # See the C runtime override. Same file again. Not a stop: without
+            # it the game installs and plays offline exactly as before, and it
+            # is only an online match that ends at kick-off.
+            if [ ${#CRT_OVERRIDE_DLLS} -gt 0 ]; then
+                if crt_override_is_set; then
+                    ok "${(j: + :)CRT_OVERRIDE_DLLS} = native,builtin — already set"
+                elif set_crt_override; then
+                    ok "${(j: + :)CRT_OVERRIDE_DLLS} = native,builtin"
+                    say "        without this, online matches desync at kick-off"
+                else
+                    note "could not point Wine at the game's own C runtime in $(bottle_user_reg)"
+                    say "        offline play is unaffected; online matches will desync at"
+                    say "        kick-off. Quit CrossOver completely and run this again."
+                fi
             fi
             # See disable_proxy_autodetect. Same file, so it is done here rather
             # than in a block of its own. Not a stop: without it the game still
@@ -3749,6 +4005,79 @@ hold_pid_alive() {
     kill -0 "$hp" 2>/dev/null
 }
 
+# Nothing may be inside the bottle while its registry is edited. Step 7 writes
+# user.reg and system.reg (the DLL override, the proxy setting, the controller
+# setting); a live Wine session keeps the registry in memory and writes it
+# back out when it exits, so anything written now would be thrown away
+# silently the next time CrossOver quits -- and the game would say the servers
+# have been shut down with every check in --verify saying ok. See
+# prefix_holders. The full install has always checked this; --bottle, and so
+# --fifa15 on an existing copy, did not, and edited a live bottle under an
+# open CrossOver.
+require_bottle_free() {
+    local -a holding
+    holding=( ${(f)"$(prefix_holders)"} )
+    holding=( ${holding:#} )
+    [ "${#holding}" -gt 0 ] || return 0
+    if [ -n "$(crossovers_running)" ]; then
+        die $E_PERMISSION "The $BOTTLE bottle is open in CrossOver.
+         Quit CrossOver completely -- Command-Q, not just closing the window --
+         and run this again. Setting the bottle up now would leave its settings
+         to be overwritten when CrossOver does quit, and the game would say the
+         servers have been shut down. Nothing has been changed."
+    fi
+    if [ "$GAME" != fifa15 ] && hold_pid_alive; then
+        die $E_PERMISSION "FIFA 17 is playing right now (started by --play-offline).
+         Quit the game first, then run this again. Nothing has been changed."
+    fi
+    die $E_PERMISSION "${#holding} leftover process(es) are still inside the $BOTTLE bottle
+         with no CrossOver running. They will overwrite whatever is written
+         here, and the bottle will hang on loading. Free it first:
+             ./setup.sh --unstick
+         Nothing has been changed."
+}
+
+# The bottle steps boot the prefix themselves -- cxbottle's wineboot, the
+# loader run that writes the licence file -- and leave that wineserver
+# running. The user then opens CrossOver, which boots a second session on the
+# same prefix: two rpcss.exe, a registry written twice, and "install, then
+# play straight away" failing for every first-time user. With no CrossOver
+# open, every CrossOver wineserver alive is this script's own or an orphan, so
+# end them and let CrossOver start clean. --bottle has done this since
+# 2026-09-02; the full install did not, and left the session it had started.
+end_own_wine_session() {
+    if [ -z "$(crossovers_running)" ] && [ -n "$(wineserver_pids)" ]; then
+        shutdown_wineservers
+        ok "ended the Wine session this script started, so CrossOver opens the bottle fresh"
+    fi
+}
+
+# One installer at a time. Two at once -- a .command double-clicked twice --
+# would delete and copy the same app over each other. A lock left behind by a
+# run that was killed names a pid that is gone, and is taken over.
+SETUP_LOCK="${TMPDIR:-/tmp}/fifa-crossover-setup.lock"
+take_setup_lock() {
+    local other
+    if ! mkdir "$SETUP_LOCK" 2>/dev/null; then
+        other="$(cat "$SETUP_LOCK/pid" 2>/dev/null || true)"
+        case "$other" in
+            ''|*[!0-9]*) ;;
+            *) kill -0 "$other" 2>/dev/null \
+                   && die $E_PERMISSION "Another copy of this installer is already running (pid $other).
+         Let it finish, then run this again. Nothing has been changed." ;;
+        esac
+        rm -rf "$SETUP_LOCK" 2>/dev/null || true
+        mkdir "$SETUP_LOCK" 2>/dev/null \
+            || die $E_PERMISSION "Could not make the lock folder $SETUP_LOCK.
+         Nothing has been changed."
+    fi
+    print -r -- "$$" > "$SETUP_LOCK/pid" 2>/dev/null || true
+    # Not "trap ... EXIT": set inside a function, zsh runs that when the
+    # FUNCTION returns, and the lock was gone before the copy began. zshexit
+    # is zsh's hook for the shell itself ending, however it ends.
+    zshexit() { rm -rf "$SETUP_LOCK" 2>/dev/null; }
+}
+
 if [ "$MODE" = unstick ] || [ "$MODE" = shutdown ]; then
 if hold_pid_alive; then
     say ""
@@ -4022,6 +4351,8 @@ if [ "$MODE" = bottle ]; then
         || die $E_PAYLOAD "No patched CrossOver at $TARGET.
          Run ./setup.sh first. If the copy is somewhere else:
              AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --bottle"
+    take_setup_lock
+    require_bottle_free
     if [ "$F15_ONE" = 1 ]; then
         f15_add_ntdll "$TARGET"
         f15_add_gdiplus "$TARGET"
@@ -4036,21 +4367,13 @@ if [ "$MODE" = bottle ]; then
     say "Setting up the $BOTTLE bottle for ${TARGET:t}"
     configure_bottle "$TARGET"
     [ "$GAME" = fifa15 ] && f15_check_game
-    # The bottle steps boot the prefix themselves (wineboot, the registry
-    # writes) and used to leave that wineserver running; the user then opened
-    # CrossOver, which booted a second session on the same prefix. Two sessions
-    # on one bottle is exactly what "install, then play straight away" gave
-    # every first-time user. With no CrossOver open, every wineserver alive is
-    # this script's own or an orphan, so end them and let CrossOver start clean.
-    if [ -z "$(crossovers_running)" ] && [ -n "$(wineserver_pids)" ]; then
-        shutdown_wineservers
-        ok "ended the Wine session this script started, so CrossOver opens the bottle fresh"
-    fi
+    end_own_wine_session
     say ""
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
         remove_cleanup_agent && note "removed the old background cleanup agent; use Stop.command instead"
         if [ "$GAME" = fifa15 ]; then
-            green "Done. Open ${TARGET:t:r}, then run FIFA 15 (or Aurora15Connector) in the $BOTTLE bottle."
+            green "Done. Open ${TARGET:t:r}, then run Aurora15Connector in the $BOTTLE bottle (or"
+            say "      fifa15.exe from the game folder, after  ./fifa15/fifa15-offline.sh apply)."
             say ""
             say "In Aurora15Connector, never press \"Repair connection\": under Wine it"
             say "kills its own Origin stand-in and the game then hangs at the flag."
@@ -4165,6 +4488,12 @@ if [ "$MODE" = play-offline ]; then
     # the same guard for the path that does not go through Aurora. It costs
     # nothing when the file is there -- seed_bottle_licence returns at once --
     # and about three seconds when it is not.
+    # A second window would seed nothing, watch the first window's game, and
+    # -- through the trap below -- kill it when closed. One session at a time.
+    if hold_pid_alive; then
+        die $E_INCOMPLETE "FIFA 17 is already running from another window (pid $(cat "$CLEANUP_HOLD" 2>/dev/null)).
+         Play in that one, or quit it first. Nothing has been started."
+    fi
     seed_bottle_licence "$TARGET" || true
     mkdir -p "$CLEANUP_BASE" 2>/dev/null || true
     print -r -- "$$" > "$CLEANUP_HOLD" 2>/dev/null || true
@@ -4184,17 +4513,19 @@ if [ "$MODE" = play-offline ]; then
     WPID=$!
     # CrossOver's wine wrapper returns as soon as it has started the program --
     # it forwards --wait-children only when asked -- so waiting on that pid is
-    # not waiting for the game. Watch the bottle instead. This matters for more
-    # than a tidy exit code: the hold file below is what tells the background
-    # cleanup that a Wine session with no CrossOver window is deliberate, and
-    # letting this script exit while the game is up would hand the game to the
-    # cleanup as a stray 45 seconds later.
+    # not waiting for the game. Watch the bottle instead: FIFA 17 in THIS
+    # bottle, by bottle_game_pids. game_leftovers matches both games and every
+    # Aurora program by name, so with Aurora15Connector listening it said
+    # "FIFA 17 is running" before the game existed and never saw it close.
+    # The hold file below is what tells --unstick and --shutdown that a Wine
+    # session with no CrossOver window is deliberate, so this script has to
+    # stay up for as long as the game is.
     WAITED=0
-    while [ "$WAITED" -lt 90 ] && [ -z "$(game_leftovers)" ]; do
+    while [ "$WAITED" -lt 90 ] && [ -z "$(bottle_game_pids)" ]; do
         /bin/sleep 1
         WAITED=$((WAITED + 1))
     done
-    if [ -z "$(game_leftovers)" ]; then
+    if [ -z "$(bottle_game_pids)" ]; then
         wait "$WPID" 2>/dev/null || true
         say ""
         note "FIFA 17 did not appear within ${WAITED}s."
@@ -4203,7 +4534,7 @@ if [ "$MODE" = play-offline ]; then
         exit $E_INCOMPLETE
     fi
     ok "FIFA 17 is running — leave this window open while you play"
-    while [ -n "$(game_leftovers)" ]; do
+    while [ -n "$(bottle_game_pids)" ]; do
         # Touching the hold keeps it obviously current for anyone reading it.
         print -r -- "$$" > "$CLEANUP_HOLD" 2>/dev/null || true
         /bin/sleep 5
@@ -4259,9 +4590,13 @@ if [ "$MODE" = play-log ]; then
         || die $E_INCOMPLETE "CrossOver is open. Quit it with Cmd-Q (or double-click Stop.command),
          wait for it to go, then run this again. The launcher has to be started
          from here for its log to be written."
-    [ -z "$(game_leftovers)" ] \
+    [ -z "$(game_leftovers fifa17)" ] \
         || die $E_INCOMPLETE "Aurora17 or FIFA 17 is still running. Double-click Stop.command,
          wait for it to finish, then run this again."
+    if hold_pid_alive; then
+        die $E_INCOMPLETE "FIFA 17 is already running from another window (pid $(cat "$CLEANUP_HOLD" 2>/dev/null)).
+         Quit it first, then run this again. Nothing has been started."
+    fi
     LOGDIR="$(crash_log_dir)"
     mkdir -p "$LOGDIR" 2>/dev/null \
         || die $E_PERMISSION "Could not make $LOGDIR to write the log into."
@@ -4428,6 +4763,7 @@ fi
 # =========================================================================
 say ""
 say "1. Checking"
+take_setup_lock
 
 case "$(uname -s)" in
     Darwin) ;;
@@ -4476,7 +4812,7 @@ done
 ok "all ${#FILES} replacement files present in CrossOver, and the ws2_32.so we edit"
 
 # Keeping CrossOver's own permissions is the one step with nothing to fall back
-# on, and it runs at the very end -- after 2 GB has been copied and six files
+# on, and it runs at the very end -- after 2 GB has been copied and seven files
 # replaced. Read them from the original now, while nothing has happened yet, so
 # a CrossOver that cannot supply them stops here instead of there.
 PRE_ENT="$(mktemp -t cxpre)"
@@ -4578,32 +4914,9 @@ if [ "$IN_PLACE" = "1" ] && app_is_running "$SRC"; then
          run this again."
 fi
 
-# Step 7 edits the bottle's user.reg and system.reg: the version override and
-# the proxy setting in one, the controller setting in the other. A live Wine
-# session keeps the registry in memory and writes it back out when it exits, so
-# the values added here would be thrown away silently the next time CrossOver
-# quits -- and the game would say the servers have been shut down with every
-# check in --verify saying ok. See prefix_holders.
-HOLDING=( ${(f)"$(prefix_holders)"} )
-HOLDING=( ${HOLDING:#} )
-if [ "${#HOLDING}" -gt 0 ]; then
-    if [ -n "$(crossovers_running)" ]; then
-        die $E_PERMISSION "The $BOTTLE bottle is open in CrossOver.
-         Quit CrossOver completely -- Command-Q, not just closing the window --
-         and run this again. Installing now would leave the bottle's settings to
-         be overwritten when it does quit, and the game would say the servers
-         have been shut down. Nothing has been changed."
-    fi
-    if hold_pid_alive; then
-        die $E_PERMISSION "FIFA 17 is playing right now (started by --play-offline).
-         Quit the game first, then run this again. Nothing has been changed."
-    fi
-    die $E_PERMISSION "${#HOLDING} leftover process(es) are still inside the $BOTTLE bottle
-         with no CrossOver running. They will overwrite whatever is written
-         here, and the bottle will hang on loading. Free it first:
-             ./setup.sh --unstick
-         Nothing has been changed."
-fi
+# Step 7 edits the bottle's registry, which a live session would overwrite on
+# its way out. See require_bottle_free.
+require_bottle_free
 
 # ------------------------------------------- the bottle has to exist first
 # The bottle is CrossOver's to make, and the launcher inside it is what a
@@ -4616,19 +4929,31 @@ fi
 # Without one the installer used to copy a gigabyte, note the missing bottle in
 # passing at step 7, and finish "done" with nothing that plays.
 #
-# Skipped for --fifa15, which makes its own bottle with cxbottle further down.
-if [ "$F15_ONE" != 1 ] && [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ]; then
-    if [ "$NO_AURORA" = 1 ]; then
-        die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
-         Make it first, in CrossOver:
-           1. Open CrossOver and press + (New Bottle).
-           2. Choose Windows 10 64-bit and name it exactly:  $BOTTLE
-           3. Quit CrossOver completely (Command-Q).
-         Then run this again. An offline install needs nothing else in the
-         bottle -- no launcher, no Aurora17.
-         Already using another name?   AURORA_BOTTLE='name' ./setup.sh --offline
+# An offline install and --fifa15 need no launcher in the bottle, so they make
+# it themselves with cxbottle -- after the copy exists, since it is the copy's
+# cxbottle that makes it. That needs CrossOver closed: an open one lists the
+# bottles it found when it started and puts the new one's registry back its
+# own way on quit. So it is checked here, before a gigabyte is copied, rather
+# than in make_bottle afterwards.
+MAKE_BOTTLE=0
+if [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
+    [ ! -e "$BOTTLE_DIR/$BOTTLE" ] \
+        || die $E_UNSUPPORTED "There is a '$BOTTLE' folder in $BOTTLE_DIR, but it is not a
+         finished bottle (no cxbottle.conf in it). Move it out of the way, or
+         make the bottle in CrossOver (+ > Windows 10 64-bit, named exactly
+         $BOTTLE) and quit CrossOver. Then run this again.
          Nothing has been changed."
+    RUNNING="$(crossovers_running)"
+    if [ -n "$RUNNING" ]; then
+        say "  CrossOver is open:"
+        print -r -- "$RUNNING" | sed 's/^/        /'
+        die $E_PERMISSION "The $BOTTLE bottle has to be made while CrossOver is closed.
+         Quit it completely -- Command-Q, not just closing the window -- and
+         run this again. Nothing has been changed."
     fi
+    MAKE_BOTTLE=1
+    ok "no $BOTTLE bottle yet -- it will be made once the copy exists"
+elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ]; then
     die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
          Make it first, in CrossOver, along with the Aurora17 launcher:
            1. Open CrossOver and press + (New Bottle).
@@ -4651,7 +4976,7 @@ say ""
 if [ "$IN_PLACE" = "1" ]; then
     say "2. Using your real CrossOver (AURORA_IN_PLACE=1)"
     say "        This changes every bottle you run in CrossOver, not just FIFA."
-    say "        ./uninstall.sh puts the six files back, but it cannot restore"
+    say "        ./uninstall.sh puts the seven files back, but it cannot restore"
     say "        CodeWeavers' own signature -- only reinstalling CrossOver does."
 else
     say "2. Making a separate CrossOver for FIFA"
@@ -4784,11 +5109,12 @@ say "6. Signing"
 sign_payload "$WINE"
 resign_app "$APP"
 
-if [ "$F15_ONE" = 1 ] && [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
+if [ "$MAKE_BOTTLE" = 1 ]; then
     make_bottle "$APP"
 fi
 configure_bottle "$APP"
 [ "$GAME" = fifa15 ] && f15_check_game
+end_own_wine_session
 
 # ------------------------------------------------------------- the receipt
 # Uninstall reads this instead of guessing at default locations.

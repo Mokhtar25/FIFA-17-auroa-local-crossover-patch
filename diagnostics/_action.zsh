@@ -83,8 +83,9 @@ case "$FLAG" in
           "Use this when a bottle sits on 'loading', or PLAY says a port is"
           "already in use."
           ""
-          "It kills the leftover Wine processes and frees the ports Aurora17"
-          "uses. It does not touch the game, the install or your saves."
+          "It kills the leftover Wine processes in every bottle and frees the"
+          "ports Aurora17 and Aurora15 use (47170-47173 and 3216). It does not"
+          "touch the game, the install or your saves."
         ) ;;
     --shutdown)
         TITLE="Quit CrossOver cleanly"
@@ -122,13 +123,14 @@ case "$FLAG" in
           "network mappings into the bottle. The CrossOver copy is not touched."
         ) ;;
     --agent)
-        TITLE="Install the background cleanup"
+        TITLE="Remove the background cleanup"
         BLURB=(
-          "This installs a small background job that clears orphaned Wine and"
-          "Aurora processes, and the ports they hold, by itself every 30"
-          "seconds after CrossOver quits."
+          "Older versions of this package installed a job that woke every 30"
+          "seconds to clear leftover Wine processes. This takes it off if it"
+          "is still there."
           ""
-          "With it installed no script has to be run to unstick anything."
+          "Nothing from this package runs in the background now. Stop.command"
+          "clears leftovers when you ask it to."
         ) ;;
     --reseed-licence)
         TITLE="Re-seed the licence file"

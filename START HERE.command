@@ -19,11 +19,12 @@ print -r -- "  FIFA 17 on a Mac — installer"
 print -r -- "  ============================"
 print -r -- ""
 print -r -- "  This makes a separate copy of CrossOver called CrossOver-FIFA and"
-print -r -- "  puts seven small files in it, plus two in your Aurora17 folder."
+print -r -- "  puts eight small files in it, plus two in your Aurora17 folder."
 print -r -- ""
 print -r -- "  Your own CrossOver is not touched, and neither is any other bottle"
 print -r -- "  you run in it. The copy needs about 1 GB of disk."
 print -r -- "  The game is never modified. Nothing is downloaded."
+print -r -- "  CrossOver must be closed while this runs."
 print -r -- ""
 
 ./setup.sh
@@ -35,11 +36,10 @@ case $rc in
         print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA (not your normal CrossOver),"
         print -r -- "  open the Aurora17 bottle, and press PLAY FIFA 17."
         print -r -- ""
-        print -r -- "  Quit however you like when you are done. A background cleanup"
-        print -r -- "  clears the leftovers by itself 45 seconds after CrossOver quits."
-        print -r -- "  It waits for CrossOver to actually quit, though, and closing a"
-        print -r -- "  window is not quitting on a Mac -- so if PLAY ever says a port is"
-        print -r -- "  in use, Command-Q CrossOver, or double-click ${GRN}Stop.command${OFF}."
+        print -r -- "  When you are done, quit with ${GRN}Stop.command${OFF} -- or Command-Q"
+        print -r -- "  CrossOver. Closing a window is not quitting on a Mac: FIFA and"
+        print -r -- "  Aurora keep running and hold their ports, and the next PLAY then"
+        print -r -- "  says a port is in use. ${GRN}Stop.command${OFF} clears that."
         ;;
     3)
         # setup.sh has already printed which permission is missing and how to

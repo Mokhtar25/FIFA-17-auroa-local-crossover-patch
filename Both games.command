@@ -17,7 +17,8 @@ print -r -- "  This makes a separate copy of CrossOver called CrossOver-FIFA, pu
 print -r -- "  the FIFA 17 fixes in it, then makes an Aurora15 bottle for FIFA 15."
 print -r -- "  Your own CrossOver is not touched. The copy needs about 1 GB."
 print -r -- "  Neither game is modified. Nothing is downloaded."
-print -r -- "  CrossOver must be closed while this runs."
+print -r -- "  CrossOver must be closed while this runs. Running this again later"
+print -r -- "  copies CrossOver again (about 1 GB) and sets both bottles up again."
 print -r -- ""
 
 ./setup-both.sh
@@ -30,7 +31,8 @@ case $rc in
     3) print -r -- "  ${RED}Stopped: macOS would not allow a change, or CrossOver is open.${OFF}"
        print -r -- "  Follow the steps above, then run this again." ;;
     4) print -r -- "  ${RED}Stopped: something did not match what it expected.${OFF} The reason is above." ;;
-    5) print -r -- "  ${RED}Not finished.${OFF} The missing piece is listed above. Fix it and run this again."
+    5) print -r -- "  ${RED}Not finished.${OFF} The missing piece is listed above. Fix it, then run"
+       print -r -- "  ./setup.sh --bottle  for FIFA 17 (no re-copy), or this again."
        print -r -- "  To check at any time:  ./setup-both.sh --verify" ;;
     *) print -r -- "  ${RED}Stopped early.${OFF} The reason is printed above." ;;
 esac
