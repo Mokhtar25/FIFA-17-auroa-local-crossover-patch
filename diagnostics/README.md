@@ -20,6 +20,10 @@ Open this folder in Finder and double-click the one you want.
 | `10 Re-add offline menu entry.command` | Puts the "FIFA 17 (offline)" entry back in the bottle. | the bottle |
 | `11 Re-seed the licence file.command` | Makes the game's own loader write a fresh EA licence file, and prints the hash before and after. Use it when PLAY and `FIFA17.exe` will not start but `_fifa17.exe` does. | the licence file |
 | `12 Play with a crash log.command` | Quit CrossOver first. Starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints where the crash was (which module, or generated code). It also records every name the bottle looks up, so the log says how far the game got before it died. The log lands in `crash-logs/` here and the next bundle picks it up. Use it for `FIFA 17 crashed` / exit code `0xC0000005`. | no (writes a log here) |
+| `13 Check the install (FIFA 15).command` | Checks the FIFA 15 bottle, shared app, offline DLL and original-backup status, and background cleanup. | no |
+
+FIFA 15 log collection and smoke tests are not supported yet. Use number 13,
+or `./setup-both.sh --verify` to check both installations.
 
 `Diagnostics.command`, one folder up, is the same as number 1 — it is there so
 it can be found without opening this folder.

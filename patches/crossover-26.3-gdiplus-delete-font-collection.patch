@@ -1,0 +1,22 @@
+--- a/dlls/gdiplus/font.c
++++ b/dlls/gdiplus/font.c
+@@ -1079,12 +1079,17 @@
+ 
+     TRACE("%p\n", fontCollection);
+ 
+-    if (!fontCollection)
++    if (!fontCollection || !*fontCollection)
+         return InvalidParameter;
+ 
+-    for (i = 0; i < (*fontCollection)->count; i++) GdipDeleteFontFamily((*fontCollection)->FontFamilies[i]);
++    /* A collection whose family list is gone but whose count is not (a stale
++     * pointer after an earlier delete, or a private font that never loaded)
++     * must not be walked: Windows GDI+ survives that call, so do we. */
++    if ((*fontCollection)->FontFamilies)
++        for (i = 0; i < (*fontCollection)->count; i++) GdipDeleteFontFamily((*fontCollection)->FontFamilies[i]);
+     free((*fontCollection)->FontFamilies);
+     free(*fontCollection);
++    *fontCollection = NULL;
+ 
+     return Ok;
+ }

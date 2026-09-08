@@ -1,11 +1,11 @@
-# FIFA 17 on a Mac — setup guide
+# FIFA 15 + FIFA 17 on a Mac — setup guide
 
 This package fixes CrossOver so FIFA 17 runs on an Apple silicon Mac. Without
 the fixes the game restarts forever, hangs on a black loading screen, has no
 sound, says the servers are shut down, or Aurora's **PLAY** button does nothing.
 
 **Your CrossOver is not changed.** The installer makes a copy called
-**CrossOver-FIFA**, puts seven small files in it, and adds one file to your
+**CrossOver-FIFA**, installs the shared Wine fixes in it, and adds one file to your
 Aurora17 folder. Every other bottle you own keeps running on your normal
 CrossOver.
 
@@ -37,6 +37,38 @@ the fix is the green box right under it.
 > 🟢 **Green = what to do about it.**
 
 ---
+
+## Both games in separate bottles
+
+Both games ship on `main`. Use one **CrossOver-FIFA** app with two bottles:
+`Aurora17` for FIFA 17 and `Aurora15` for FIFA 15. Each bottle keeps its own
+registry, DLL overrides and game-specific environment settings.
+
+1. Prepare `Aurora17` as described below; the installer creates `Aurora15`.
+2. Quit CrossOver completely, then double-click **Both games.command**.
+3. Open CrossOver-FIFA and launch each game from its own bottle.
+
+The terminal equivalent is `./setup-both.sh`; `./setup-both.sh --offline`
+sets up FIFA 17 without Aurora17, followed by the normal FIFA 15 setup.
+`./setup-both.sh --verify` checks both, even if the first check fails.
+
+For custom names, use:
+
+```sh
+FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh
+```
+
+Use the same variables for later checks. The combined installer rejects
+`AURORA_BOTTLE`, identical names and paths pointing at the same bottle. The
+single-game installer also refuses a bottle carrying the other game's profile.
+Existing separate bottles can be reused; a mixed bottle needs a new, separate
+bottle for one game. No saves or existing bottles are deleted by setup.
+
+Both profiles install the complete shared DLL payload, so rerunning the FIFA 17
+installer keeps the FIFA 15 fix. **Stop.command** stops both games, and
+**Uninstall.command** removes their shared app; bottles and saves remain.
+This describes coexistence in one installation. Playing both matches at once
+has not been validated.
 
 ## What you need
 
@@ -888,6 +920,58 @@ in. The file is made from your own copy of the game, so it is not shipped here.
 It is a raw menu entry that runs `_fifa17.exe` from your game folder.
 
 ---
+
+### FIFA 15 (experimental)
+
+The same CrossOver-FIFA copy also runs FIFA 15 (the 2015 CPY release) in its
+own `Aurora15` bottle. FIFA 17 is not affected.
+
+```sh
+./setup.sh --fifa15          # or double-click "FIFA 15.command"
+./setup-both.sh              # both games, or double-click "Both games.command"
+```
+
+It makes the copy if needed, adds `gdiplus.dll`, makes the `Aurora15` bottle
+(CrossOver must be closed), sets the bottle settings including the `dinput8`
+override that Aurora15Connector needs, and reports which `ItsAMe_Origin.dll`
+your game folder has. Game folder: `~/Downloads/FIFA 15` by default, or
+`FIFA15_DIR=/path ./setup.sh --fifa15`.
+
+Two ways to play:
+
+- **With Aurora15Connector:** start `Aurora15Connector-*.exe` in the `Aurora15`
+  bottle, sign in, press PLAY. It needs the CPY original `ItsAMe_Origin.dll`.
+  One connector at a time.
+
+  > [!CAUTION]
+  > 🔴 **Never press the connector's "Repair connection" button under CrossOver.** It kills its own Origin stand-in and the game hangs at the splash or the flag.
+
+  > [!TIP]
+  > 🟢 If the connector complains about port 3216 at start, close it and run `./setup.sh --unstick`.
+
+- **Without it:** `./fifa15/fifa15-offline.sh apply "/path/to/FIFA 15"`, then
+  run `fifa15.exe` in the `Aurora15` bottle. Run `fifa15-offline.sh revert`
+  before going back to the connector.
+
+If `apply` finds a different installed DLL, it can use a verified original from
+`ItsAMe_Origin.dll.aurora15.bak` or `.offline-orig`. It preserves the installed
+file before replacing it. Unknown files without a verified backup are refused.
+Close the game and connector before applying or reverting.
+
+`./setup.sh --fifa15 --verify` now includes the DLL and original-backup status.
+It also checks the cleanup helper version, bottle location and launchd job.
+Refresh an old or missing helper with `./setup.sh --agent`. The FIFA 15 bottle
+setup path now refreshes it automatically, and cleanup rescans for children
+created while a launcher is closing.
+
+Other forms: `./setup.sh --fifa15 --verify`, `./setup.sh --fifa15 --bottle`.
+`--smoke`, `--report` and `--bundle` are FIFA 17 only.
+
+The FIFA 15 branch records reaching the language screen, title, intro and
+attract-mode match on 2026-09-02. Input, sound and saves were not play-tested.
+On 2026-09-07, a user confirmed direct offline play passed language selection
+after applying the fix from a verified Aurora15 original backup. Automated
+checks cover separate bottle profiles, offline recovery and cleanup behavior.
 
 ## Reference
 
