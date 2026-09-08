@@ -6,7 +6,7 @@
 #   ./setup-both.sh --offline [CrossOver.app]  FIFA 17 offline, plus FIFA 15
 #   ./setup-both.sh --unstick                  free the bottles (same as setup.sh --unstick)
 #   ./setup-both.sh --shutdown                 quit CrossOver cleanly, then free
-#   ./setup-both.sh --agent                    install the background cleanup timer
+#   ./setup-both.sh --agent                    remove the old background cleanup agent
 #
 # It is setup.sh twice: the FIFA 17 install first (the copy, the seven files,
 # the Aurora17 bottle, the stand-in, the EA names, the licence), then

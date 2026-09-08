@@ -204,31 +204,33 @@ Two ways, same result:
 
 - Open **CrossOver-FIFA** → open the **Aurora17** bottle → click **FIFA 17 (offline)**.
 - Or double-click **PLAY FIFA 17 offline.command**. This does not open CrossOver.
-  **Keep that window open while you play.** It tells the background cleanup the
-  game is running on purpose. Closing the window stops the game.
+  **Keep that window open while you play.** Closing the window stops the game.
 
 ---
 
 ## Stop and clean up
 
-Quit however you like. The installer sets up a background helper that clears
-leftovers 45 seconds after CrossOver quits: the game, Aurora's programs, the
-bottle lock and the ports. You do not have to do anything.
+Double-click **Stop.command**. It closes the game, then Aurora, then
+CrossOver, in that order, and frees the bottle lock and the ports.
 
-Two rules it follows on purpose:
+**Nothing from this package runs in the background.** Versions before
+2026-09-08 installed a LaunchAgent that woke every 30 seconds for as long as
+the Mac was logged in. It is removed: any install, or `./setup.sh --agent`,
+takes it off, and `--verify` fails while one is still there. Why it went, and
+what leaves the strays in the first place, is in
+`patches/README-stray-processes.md`.
 
-- **It does nothing while CrossOver is open.** Closing a bottle window with the
-  red dot does not quit CrossOver. It stays in the menu bar. Press **⌘Q** to
-  quit it properly, or leftovers stay until you do.
-- **Quit the game before CrossOver.** If FIFA is still running when CrossOver
-  quits, the helper closes it 45 seconds later.
+Two things worth knowing, since nothing tidies up for you now:
 
-To clean up right now: double-click **Stop.command**. It closes the game, then
-Aurora, then CrossOver, in that order.
+- **Closing a bottle window does not quit CrossOver.** It stays in the menu
+  bar with the bottle live. Press **⌘Q**, or use Stop.command.
+- **The Aurora connectors are servers.** They keep listening on 3216 and
+  47170-47173 after the game exits, because that is their job. Nothing tells
+  them to stop unless you do.
 
-The helper never touches a running session, a non-Wine program or another Wine
-app's bottles. `./setup.sh --agent` reinstalls it. `./uninstall.sh` removes it.
-Its log is at `~/Library/Application Support/FIFA-CrossOver/cleanup.log`.
+If a later launch complains that a port or the bottle is busy, that is what
+`./setup.sh --unstick` is for. `./setup.sh --verify` reports leftovers without
+touching them.
 
 ---
 
@@ -959,10 +961,8 @@ file before replacing it. Unknown files without a verified backup are refused.
 Close the game and connector before applying or reverting.
 
 `./setup.sh --fifa15 --verify` now includes the DLL and original-backup status.
-It also checks the cleanup helper version, bottle location and launchd job.
-Refresh an old or missing helper with `./setup.sh --agent`. The FIFA 15 bottle
-setup path now refreshes it automatically, and cleanup rescans for children
-created while a launcher is closing.
+It also fails if an older version's background cleanup agent is still
+installed, and setting FIFA 15 up removes one.
 
 Other forms: `./setup.sh --fifa15 --verify`, `./setup.sh --fifa15 --bottle`.
 `--smoke`, `--report` and `--bundle` are FIFA 17 only.

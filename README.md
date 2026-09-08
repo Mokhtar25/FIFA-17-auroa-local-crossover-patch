@@ -79,10 +79,14 @@ but only the copy has the fixes.
 
 ## Stop
 
-Quit however you like. A background helper cleans up leftovers 45 seconds after
-CrossOver quits. The helper also rescans for connector children left behind during shutdown.
-To clean up right now, double-click **Stop.command**. Existing users can update
-just the helper with `./setup.sh --agent`.
+Quit with **Stop.command**. It closes the game, then Aurora, then CrossOver,
+in the order that leaves no strays and no held ports.
+
+Nothing from this package runs in the background. Earlier versions installed a
+helper that woke every 30 seconds for as long as you owned the Mac; it is gone,
+and installing or running `./setup.sh --agent` takes it off if you have one.
+A leftover connector costs a held port until the next launch, and Stop.command
+or `./setup.sh --unstick` clears it whenever you like.
 
 Note: closing a bottle window does not quit CrossOver. It stays in the menu
 bar. Press **⌘Q** to quit it properly.
