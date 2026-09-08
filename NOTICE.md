@@ -1,7 +1,7 @@
 # What is under which licence, and how to rebuild it
 
 Short version: **the installer, the scripts, the docs and `a17hosts.dylib` are MIT.
-The six patched Wine binaries and the patches are LGPL-2.1-or-later, because they
+The seven patched Wine binaries and the patches are LGPL-2.1-or-later, because they
 are not ours to relicense.** `./build.sh` rebuilds all of it from source.
 
 ---
@@ -21,6 +21,7 @@ are not ours to relicense.** `./build.sh` rebuilds all of it from source.
 | `fixes/x86_64-windows/version.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-windows/crypt32.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-windows/secur32.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
+| `fixes/x86_64-windows/gdiplus.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `patches/*.patch` | modifications to the above | **LGPL-2.1-or-later** |
 
 Full LGPL text: `fixes/LICENSE.LGPL`, copied verbatim from `COPYING.LIB` in the
@@ -38,14 +39,14 @@ CrossOver that you make; it never touches the original.
 
 ## Corresponding source — what the LGPL asks for, and where it is
 
-The six binaries above are modified Wine. Anyone receiving them is entitled to
+The seven binaries above are modified Wine. Anyone receiving them is entitled to
 the source they were built from and the means to rebuild them. That is:
 
 1. **The upstream source**: `crossover-sources-26.3.0.tar.gz`, published by
    CodeWeavers with that release. Not redistributed here — it is 142 MB and
    unmodified — but it is the exact tarball these patches apply to, and nothing
    else will apply cleanly.
-2. **Our modifications**: `patches/`, four unified diffs against that tarball.
+2. **Our modifications**: `patches/`, six build patches plus investigation records against that tarball.
 3. **The build**: `./build.sh`, which does all of it end to end.
 
 ```sh
@@ -53,8 +54,8 @@ the source they were built from and the means to rebuild them. That is:
 ./build.sh /path/to/crossover-sources-26.3.0.tar.gz
 ```
 
-It unpacks the tarball, applies the four patches **in the order that works**
-(rosetta → online → audio → cng; alphabetical order produces a reject — see
+It unpacks the tarball, applies the six build patches **in the order that works**
+(rosetta → online → audio → cng → topdown → gdiplus; alphabetical order produces a reject — see
 `patches/README`), configures, makes the SONAME_LIBGNUTLS edit that cannot
 travel in a patch, builds, and compares the result against `fixes/SHA256SUMS`.
 

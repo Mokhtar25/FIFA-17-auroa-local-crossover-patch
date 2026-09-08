@@ -1,0 +1,69 @@
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -859,8 +859,35 @@
+                                      &dispatch->LanguageHandler, &dispatch->HandlerData );
+ #endif
+     return STATUS_UNSUCCESSFUL;
++}
++
++
++/* CX_WIN_SEGS: macOS runs 64-bit user code with cs=0x2b/ss=0x23, while Windows always
++ * has cs=0x33/ss=0x2b.  Guests that validate CONTEXT.SegCs see the difference, so this
++ * option reports Windows selectors in the contexts handed to the guest. */
++static int win_segs_mode(void)
++{
++    static int mode = -1;
++
++    if (mode == -1)
++    {
++        const char *value = getenv( "CX_WIN_SEGS" );
++        mode = (value && value[0] && value[0] != '0');
++    }
++    return mode;
+ }
+ 
++static void apply_win_segs( CONTEXT *context )
++{
++    if (!win_segs_mode()) return;
++    if (context->SegCs != cs64_sel) return;  /* leave 32-bit contexts alone */
++    context->SegCs = 0x33;
++    context->SegSs = 0x2b;
++    context->SegDs = 0x2b;
++    context->SegEs = 0x2b;
++    context->SegGs = 0x2b;
++    context->SegFs = 0x53;
++}
+ 
+ static inline void set_sigcontext( const CONTEXT *context, ucontext_t *sigcontext )
+ {
+@@ -1254,16 +1281,16 @@
+         context->Rsp    = frame->rsp;
+         context->Rip    = frame->rip;
+         context->EFlags = frame->eflags;
+-        context->SegCs  = cs64_sel;
+-        context->SegSs  = ds64_sel;
++        context->SegCs  = win_segs_mode() ? 0x33 : cs64_sel;
++        context->SegSs  = win_segs_mode() ? 0x2b : ds64_sel;
+         context->ContextFlags |= CONTEXT_CONTROL;
+     }
+     if (needed_flags & CONTEXT_SEGMENTS)
+     {
+-        context->SegDs  = ds64_sel;
+-        context->SegEs  = ds64_sel;
+-        context->SegFs  = amd64_thread_data()->fs;
+-        context->SegGs  = ds64_sel;
++        context->SegDs  = win_segs_mode() ? 0x2b : ds64_sel;
++        context->SegEs  = win_segs_mode() ? 0x2b : ds64_sel;
++        context->SegFs  = win_segs_mode() ? 0x53 : amd64_thread_data()->fs;
++        context->SegGs  = win_segs_mode() ? 0x2b : ds64_sel;
+         context->ContextFlags |= CONTEXT_SEGMENTS;
+     }
+     if (needed_flags & CONTEXT_FLOATING_POINT)
+@@ -1618,6 +1645,7 @@
+     stack = virtual_setup_exception( (void *)rsp, stack_size, rec );
+     stack->rec               = *rec;
+     stack->context           = *context;
++    apply_win_segs( &stack->context );
+     stack->machine_frame.rip = context->Rip;
+     stack->machine_frame.rsp = context->Rsp;
+ 

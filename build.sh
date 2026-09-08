@@ -87,15 +87,14 @@ PATCHES=(
   crossover-26.3-fifa17-audio.patch
   crossover-26.3-fifa17-cng.patch
 )
-# A fifth, FIFA 15's, when this package ships it (the fifa15 branch does; main
-# does not). See patches/README-fifa15-wine-fixes.md. It changes nothing unless
+# A fifth, FIFA 15's. See patches/README-fifa15-wine-fixes.md. It changes nothing unless
 # the bottle sets CX_TOPDOWN_LIMIT, which only the FIFA 15 bottle profile does,
 # so FIFA 17 bottles run the same code either way.
 [ -f "$HERE/patches/crossover-26.3-topdown-alloc-limit.patch" ] \
     && PATCHES+=( crossover-26.3-topdown-alloc-limit.patch )
 # A sixth, also FIFA 15's: Aurora15Connector crashes at exit in Wine's gdiplus
 # (GdipDeletePrivateFontCollection walks a freed collection). Ships with the
-# FIFA 15 profile only; it adds gdiplus.dll to the build and to fixes/.
+# shared package; it adds gdiplus.dll to the build and to fixes/.
 [ -f "$HERE/patches/crossover-26.3-gdiplus-delete-font-collection.patch" ] \
     && PATCHES+=( crossover-26.3-gdiplus-delete-font-collection.patch )
 

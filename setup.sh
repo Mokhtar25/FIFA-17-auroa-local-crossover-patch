@@ -186,8 +186,8 @@ APP_MGMT_HINT='         Usually macOS refusing the write. To fix:
               If it is not listed, use Full Disk Access instead.
            3. Quit that app completely, reopen it, and run this again.'
 
-# The six Wine files the fixes replace. The FIFA 15 profile adds a seventh,
-# gdiplus.dll, where GAME is decided below.
+# Both profiles install the complete shared Wine payload, so reinstalling
+# FIFA 17 cannot remove the gdiplus fix needed by Aurora15Connector.
 FILES=(
   x86_64-unix/ntdll.so
   x86_64-unix/winecoreaudio.so
@@ -195,6 +195,7 @@ FILES=(
   x86_64-windows/version.dll
   x86_64-windows/crypt32.dll
   x86_64-windows/secur32.dll
+  x86_64-windows/gdiplus.dll
 )
 # One more file, added rather than replaced, so it is not in FILES: the thing
 # that makes name resolution work without touching /etc/hosts. See below.
@@ -474,36 +475,42 @@ case "$GAME" in
     fifa17|fifa15) ;;
     *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17 or fifa15)"; exit $E_UNSUPPORTED ;;
 esac
-# The scripts are the same on both branches of the repository; the FIFA 15
-# files (fifa15/, the gdiplus fix and its patch) ship on the fifa15 branch
-# only. Say so rather than run the FIFA 15 profile with half of it missing.
-if [ "$GAME" = fifa15 ] && [ ! -d "$HERE/fifa15" ]; then
-    print -r -- "This is the FIFA 17 package: the FIFA 15 files (fifa15/, fixes/x86_64-windows/gdiplus.dll)"
-    print -r -- "are not in it. FIFA 15 ships on the fifa15 branch of the same repository:"
-    print -r -- "    git clone -b fifa15 https://github.com/Mokhtar25/FIFA-17-auroa-local-crossover-patch"
-    exit $E_UNSUPPORTED
-fi
 if [ "$GAME" = fifa15 ]; then
-    BOTTLE="${AURORA_BOTTLE:-Aurora15}"
-    # Aurora15Connector (.NET) dies at exit in Wine's GdipDeletePrivateFontCollection:
-    # it walks a font collection whose family list is already gone. Windows GDI+
-    # survives the same call. The patched gdiplus.dll is FIFA 15's alone; FIFA 17
-    # never needed it, so main does not ship it (sync-repo.sh drops it there).
-    FILES+=( x86_64-windows/gdiplus.dll )
+    BOTTLE="${AURORA_BOTTLE:-${FIFA15_BOTTLE:-Aurora15}}"
     # No CX_DR_TRAP: the FIFA 15 protector was never seen to need it, and the
     # bottle this was proven in did not have it. CX_TOPDOWN_LIMIT is the fix
     # for its start-up crash (patches/README-fifa15-wine-fixes.md).
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" "CX_TOPDOWN_LIMIT=0x1ffffffff" )
     GAME_LABEL="FIFA 15"
     case "$MODE" in
-        smoke|report) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for FIFA 15 yet."
+        smoke|report|bundle|play-log|play-offline|offline-menu|ensure-licence|reseed-licence) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for FIFA 15 yet."
                       print -r -- "Use  ./setup.sh --fifa15 --verify  instead."
                       exit $E_UNSUPPORTED ;;
     esac
+    [ "$NO_AURORA" = 0 ] || die $E_UNSUPPORTED "--offline is for FIFA 17. Use ./setup.sh --fifa15 for FIFA 15."
 else
-    BOTTLE="${AURORA_BOTTLE:-Aurora17}"
+    BOTTLE="${AURORA_BOTTLE:-${FIFA17_BOTTLE:-Aurora17}}"
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
     GAME_LABEL="FIFA 17"
+fi
+
+# Reject reused bottles before either profile can change their settings.
+# Resolve symlinks and compare without case, since the usual Mac filesystem
+# treats Aurora15 and aurora15 as the same directory.
+if [ "$GAME" = fifa15 ]; then
+    OTHER_BOTTLE="${FIFA17_BOTTLE:-Aurora17}"
+    OTHER_SETTING=CX_DR_TRAP
+else
+    OTHER_BOTTLE="${FIFA15_BOTTLE:-Aurora15}"
+    OTHER_SETTING=CX_TOPDOWN_LIMIT
+fi
+BOTTLE_PATH="$BOTTLE_DIR/$BOTTLE"
+OTHER_BOTTLE_PATH="$BOTTLE_DIR/$OTHER_BOTTLE"
+if [ "${(L)BOTTLE_PATH:A}" = "${(L)OTHER_BOTTLE_PATH:A}" ] \
+   || grep -Eq "^\"$OTHER_SETTING\"[[:space:]]*=" "$BOTTLE_PATH/cxbottle.conf" 2>/dev/null; then
+    die $E_UNSUPPORTED "$GAME_LABEL needs its own bottle; '$BOTTLE' is assigned to the other game.
+         Use separate FIFA17_BOTTLE and FIFA15_BOTTLE names (defaults: Aurora17 and Aurora15).
+         Nothing has been changed."
 fi
 
 # --fifa15 is the whole FIFA 15 setup in one command, and what that means
@@ -948,10 +955,8 @@ f15_add_ntdll() {
         die $E_PAYLOAD "fixes/${f:t} is missing from this package. Download it again."
     fi
     if ! strings -a "$HERE/fixes/$f" 2>/dev/null | grep -q CX_TOPDOWN_LIMIT; then
-        note "fixes/${f:t} is a build without the FIFA 15 patch -- FIFA 15 will stop"
-        say "        seven seconds in. This package cannot set FIFA 15 up; get the one"
-        say "        from the fifa15 branch."
-        return 0
+        die $E_PAYLOAD "fixes/${f:t} is a build without the FIFA 15 patch.
+         Download the complete main-branch package again. FIFA 15 cannot run with this file."
     fi
     if strings -a "$wine/$f" 2>/dev/null | grep -q CX_TOPDOWN_LIMIT; then
         ok "${f:t} -- already the build with the FIFA 15 patch"
@@ -1025,9 +1030,11 @@ f15_check_game() {
             say "        To play without the connector:  ./fifa15/fifa15-offline.sh apply \"$d\"" ;;
         0:offline*)
             ok "ItsAMe_Origin.dll is offline-patched -- run fifa15.exe from the bottle"
+            print -r -- "$out" | sed 's/^/        /'
             say "        Before using Aurora15Connector:  ./fifa15/fifa15-offline.sh revert \"$d\"" ;;
         3:*)
-            ok "ItsAMe_Origin.dll is not the CPY file -- probably Aurora15Connector's own; left alone" ;;
+            note "direct offline play is not ready with the installed DLL"
+            print -r -- "$out" | sed 's/^/        /' ;;
         *)
             note "could not tell which ItsAMe_Origin.dll is there:"
             print -r -- "$out" | sed 's/^/        /' ;;
@@ -2133,6 +2140,7 @@ verify_install() {
     # checks below are FIFA 17's and are skipped for it (not re-indented).
     if [ "$GAME" = fifa15 ]; then
         ok "FIFA 15: no Aurora17 stand-in to check"
+        f15_check_game
     elif [ "$offline" = 1 ]; then
         ok "offline install: no Aurora17 stand-in to check"
     else
@@ -2344,6 +2352,7 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    verify_cleanup_agent || problems=$((problems+1))
     say ""
     if [ "$problems" -eq 0 ]; then
         # Everything here is static -- files, UUIDs, signatures, registry keys.
@@ -2354,6 +2363,11 @@ verify_install() {
         # actually answer that.
         green "Everything checks out -- every static check passed."
         say ""
+        if [ "$GAME" = fifa15 ]; then
+            say "For direct offline play, the DLL check above must say offline-patched."
+            say "Otherwise use Aurora15Connector's PLAY button. These checks do not test a launch."
+            return 0
+        fi
         say "That is not the same as \"the game will play\": these checks cannot"
         say "see a launch. To find out, run this and press PLAY when it asks:"
         say ""
@@ -3673,9 +3687,32 @@ CLEANUP_HELPER="$CLEANUP_BASE/cleanup"
 # reads as no hold at all.
 CLEANUP_HOLD="$CLEANUP_BASE/session-hold"
 CLEANUP_PLIST="$HOME/Library/LaunchAgents/$CLEANUP_LABEL.plist"
+CLEANUP_REVISION=2
+
+verify_cleanup_agent() {
+    if [ ! -x "$CLEANUP_HELPER" ] || [ ! -f "$CLEANUP_PLIST" ]; then
+        bad "background cleanup is missing; connectors can stay behind after CrossOver quits"
+    elif ! grep -Fqx "# FIFA_CLEANUP_REVISION=$CLEANUP_REVISION" "$CLEANUP_HELPER"; then
+        bad "background cleanup is outdated"
+    elif ! grep -Fqx "export CX_BOTTLE_PATH=${(q)BOTTLE_DIR}" "$CLEANUP_HELPER"; then
+        bad "background cleanup is configured for a different bottle location"
+    elif ! launchctl print "gui/$UID/$CLEANUP_LABEL" >/dev/null 2>&1; then
+        bad "background cleanup is not loaded in this login session"
+    else
+        ok "background cleanup is current and loaded (30-second checks, 45-second grace)"
+        return 0
+    fi
+    say "        Fix: ./setup.sh --agent (keep CX_BOTTLE_PATH set if using a custom location)"
+    return 1
+}
 
 write_cleanup_helper() {
-    cat > "$CLEANUP_HELPER" <<'CLEANUP_EOF'
+    {
+    print -r -- '#!/bin/zsh'
+    print -r -- "# FIFA_CLEANUP_REVISION=$CLEANUP_REVISION"
+    # launchd does not inherit the installer's custom bottle location.
+    print -r -- "export CX_BOTTLE_PATH=${(q)BOTTLE_DIR}"
+    cat <<'CLEANUP_EOF'
 #!/bin/zsh
 # FIFA CrossOver auto-cleanup, run by launchd every 30 s. Fail-closed: exits
 # without touching anything while any CrossOver GUI runs, during the grace
@@ -3901,6 +3938,18 @@ if [ "${#WS}" -gt 0 ]; then
     require_quiet || exit 0
     kill_pids TERM ${WS} || { require_quiet || exit 0; kill_pids KILL ${WS} || log "wineserver(s) would not close: ${WS}"; }
 fi
+# Launchers can leave a new child behind while their original process exits.
+# Take fresh snapshots after shutting down the original clients and servers.
+# Bound the work; a continuously respawning app is checked again next tick.
+for PASS in 1 2; do
+    require_quiet || exit 0
+    LATE=( ${(f)"$(wine_pids)"} ${(f)"$(game_pids)"} ${(f)"$(wineserver_pids)"} )
+    LATE=( ${(u)LATE:#} )
+    [ "${#LATE}" -gt 0 ] || break
+    log "cleanup rescan $PASS: ${#LATE} remaining process(es)"
+    require_quiet || exit 0
+    kill_pids TERM ${LATE} || { require_quiet || exit 0; kill_pids KILL ${LATE} || log "process(es) would not close: ${LATE}"; }
+done
 require_quiet || exit 0
 STALE=( ${(f)"$(stale_wine_sockets)"} )
 STALE=( ${STALE:#} )
@@ -3925,6 +3974,7 @@ DONE_PORTS="$(/usr/sbin/lsof -nP -iTCP:$ALL_PORTS -sTCP:LISTEN 2>/dev/null | awk
 [ -z "${DONE_PORTS% }" ] && log "ports free: $ALL_PORTS"
 exit 0
 CLEANUP_EOF
+    } > "$CLEANUP_HELPER" || return 1
     chmod +x "$CLEANUP_HELPER" 2>/dev/null || return 1
     zsh -n "$CLEANUP_HELPER" 2>/dev/null || return 1
 }
@@ -4291,6 +4341,7 @@ if [ "$MODE" = bottle ]; then
     fi
     say ""
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
+        install_cleanup_agent || note "continuing without background cleanup; ./setup.sh --agent retries it"
         if [ "$GAME" = fifa15 ]; then
             green "Done. Open ${TARGET:t:r}, then run FIFA 15 (or Aurora15Connector) in the $BOTTLE bottle."
             say ""
@@ -4715,7 +4766,7 @@ done
 [ -f "$SRCWINE/x86_64-unix/ws2_32.so" ] \
     || die $E_PAYLOAD "ws2_32.so is missing from $SRC. That is not a complete CrossOver 26.3.
          Reinstall CrossOver 26.3 from codeweavers.com, then run this again."
-ok "all six files present in CrossOver, and the ws2_32.so we edit"
+ok "all ${#FILES} replacement files present in CrossOver, and the ws2_32.so we edit"
 
 # Keeping CrossOver's own permissions is the one step with nothing to fall back
 # on, and it runs at the very end -- after 2 GB has been copied and six files
