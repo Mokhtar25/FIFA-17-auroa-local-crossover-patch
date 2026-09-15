@@ -97,6 +97,16 @@ PATCHES=(
 # shared package; it adds gdiplus.dll to the build and to fixes/.
 [ -f "$HERE/patches/crossover-26.3-gdiplus-delete-font-collection.patch" ] \
     && PATCHES+=( crossover-26.3-gdiplus-delete-font-collection.patch )
+[ -f "$HERE/patches/crossover-26.3-ole32-revoke-foreign-window.patch" ] \
+    && PATCHES+=( crossover-26.3-ole32-revoke-foreign-window.patch )
+# An eighth, also the RebornFUT launcher's. CrossOver's cross-process child
+# window hack (CX HACK 23950, shm_surface_flush in win32u) sends a synchronous
+# message to the parent process while the caller still holds the USER lock, and
+# the WebView2 browser process aborts on "BUG: holding USER lock". The patch
+# defers the flush instead. It touches only dlls/win32u, so it applies last and
+# could equally apply first.
+[ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] \
+    && PATCHES+=( crossover-26.3-win32u-shm-flush-under-user-lock.patch )
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(
@@ -108,6 +118,10 @@ TARGETS=(
 )
 [ -f "$HERE/patches/crossover-26.3-gdiplus-delete-font-collection.patch" ] \
     && TARGETS+=( dlls/gdiplus/all )
+[ -f "$HERE/patches/crossover-26.3-ole32-revoke-foreign-window.patch" ] \
+    && TARGETS+=( dlls/ole32/all )
+[ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] \
+    && TARGETS+=( dlls/win32u/all )
 
 # ---------------------------------------------------------------- the tools
 check_deps() {
@@ -260,11 +274,64 @@ fi
     || ln -s "$GNUTLS_INC/gnutls" "$WINE/build64/include/gnutls"
 ok "gnutls headers linked"
 
+# Three more configure results, for exactly the same reason, and only when the
+# win32u patch is here. configure above runs --without-freetype, so config.h
+# leaves all three undefined -- and win32u then builds with no font code and no
+# Vulkan loader, dlopens neither library, and CrossOver drops to a graphics path
+# that does not work on macOS. The two SONAMEs are dylibs CrossOver already
+# ships in lib64 and win32u opens by name at runtime, so only the freetype
+# *headers* are needed, and the tarball carries those beside wine/.
+FREETYPE_INC=""
+if [ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ]; then
+    define_config() {  # <name> <the text that follows it in the #define>
+        local name="$1" value="$2" cfg="$WINE/build64/include/config.h"
+        if grep -q "^#define $name" "$cfg" 2>/dev/null; then
+            ok "$name already defined"
+            return 0
+        fi
+        sed -i '' "s|/\* #undef $name \*/|#define $name $value|" "$cfg" \
+            || fail "Could not define $name in build64/include/config.h."
+        grep -q "^#define $name" "$cfg" \
+            || fail "$name did not take. win32u would build without freetype or
+         Vulkan and do it without a single warning."
+        ok "$name defined"
+    }
+    define_config HAVE_FT2BUILD_H 1
+    define_config SONAME_LIBFREETYPE '"libfreetype.dylib"'
+    define_config SONAME_LIBVULKAN  '"libMoltenVK.dylib"'
+
+    # The headers themselves. They are in the same tarball, one directory up
+    # from wine/ -- sources/freetype/include -- and step 2 may or may not have
+    # moved wine/ out of sources/, so look in both places.
+    for d in "${WINE:h}/freetype/include" "${WINE:h}/sources/freetype/include"; do
+        [ -d "$d" ] && { FREETYPE_INC="$d"; break }
+    done
+    [ -n "$FREETYPE_INC" ] \
+        || fail "No freetype/include beside wine/ in the unpacked tarball.
+         win32u cannot compile without ft2build.h. Delete $OUT and unpack the
+         full crossover-sources-26.3.0.tar.gz again."
+    ok "freetype headers in $FREETYPE_INC"
+fi
+
 # ------------------------------------------------------------ 5. the build
 say ""
 say "5. Building — this takes a while"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || print 8)"
-( cd "$WINE/build64" && arch -x86_64 make -j"$JOBS" $TARGETS ) \
+# win32u needs the freetype headers on the command line: configure was told
+# --without-freetype, so the generated Makefile has no -I for them, and the
+# #define above only makes win32u try to include a header it cannot find.
+# Take the flags configure actually chose out of the Makefile rather than
+# hardcoding them -- overriding CFLAGS on the make line replaces them wholesale,
+# and a guessed value silently changes how everything else is compiled.
+MAKE_ARGS=()
+if [ -n "$FREETYPE_INC" ]; then
+    MAKE_CFLAGS="$(sed -n 's/^CFLAGS *= *//p' "$WINE/build64/Makefile" | head -1)"
+    [ -n "$MAKE_CFLAGS" ] \
+        || fail "No CFLAGS line in $WINE/build64/Makefile. Delete $OUT and configure again."
+    MAKE_ARGS=( "CFLAGS=$MAKE_CFLAGS -I$FREETYPE_INC" )
+    ok "CFLAGS = $MAKE_CFLAGS -I$FREETYPE_INC"
+fi
+( cd "$WINE/build64" && arch -x86_64 make -j"$JOBS" $MAKE_ARGS $TARGETS ) \
     || fail "The build failed. The error is above."
 ok "built"
 
@@ -292,6 +359,10 @@ collect dlls/crypt32/crypt32.dll                x86_64-windows/crypt32.dll
 collect dlls/secur32/secur32.dll                x86_64-windows/secur32.dll
 [ -f "$HERE/patches/crossover-26.3-gdiplus-delete-font-collection.patch" ] \
     && collect dlls/gdiplus/gdiplus.dll             x86_64-windows/gdiplus.dll
+[ -f "$HERE/patches/crossover-26.3-ole32-revoke-foreign-window.patch" ] \
+    && collect dlls/ole32/ole32.dll                 x86_64-windows/ole32.dll
+[ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] \
+    && collect dlls/win32u/win32u.so                x86_64-unix/win32u.so
 
 # a17hosts.dylib is ours outright, not a patched Wine component, so it needs
 # none of the above -- just clang. -arch x86_64 matches ws2_32.so, which is the
@@ -352,9 +423,9 @@ say ""
 #
 # What is known about these binaries, so nobody has to discover it the hard way:
 #
-# * Only the *online* patch has ever been confirmed to rebuild byte-for-byte.
-#   The others have not been checked. That is why this script compares and
-#   reports rather than asserting.
+# * Only the *online* and *win32u* patches have ever been confirmed to rebuild
+#   byte-for-byte. The others have not been checked. That is why this script
+#   compares and reports rather than asserting.
 #
 # * crypt32.dll ships at about 4.4 MB against a stock 830 KB. That is debugging
 #   information left in by the build settings, not extra code. Harmless, and
@@ -363,7 +434,14 @@ say ""
 # * The context-save tracer that used to run unconditionally in ntdll.so is now
 #   behind CX_CTXLOG and is off unless you set it.
 #
-# * A rebuilt ntdll.so and crypt32.so lose their rpath. setup.sh puts it back
+# * win32u.so was built exactly the way this script now builds it: the three
+#   config.h defines above (HAVE_FT2BUILD_H, SONAME_LIBFREETYPE,
+#   SONAME_LIBVULKAN) plus the freetype headers from the tarball on CFLAGS. The
+#   shipped fixes/x86_64-unix/win32u.so matched a build from this tree on
+#   2026-09-15, which is as close to proof as this comparison gets.
+#
+# * A rebuilt ntdll.so, crypt32.so and win32u.so lose their rpath. setup.sh
+#   puts it back
 #   (`install_name_tool -add_rpath @loader_path/../../../lib64`); if you install
 #   by hand, do not skip that step -- without it CrossOver silently drops to a
 #   graphics path that does not work on macOS and the game hangs on the loading

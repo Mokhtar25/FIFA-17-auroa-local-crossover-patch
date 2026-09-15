@@ -37,7 +37,7 @@ The shipped files must be intact, or you are installing rubbish.
 ( cd fixes && shasum -a 256 -c SHA256SUMS )
 ```
 
-Nine lines, all `OK` — eight binaries plus `a17hosts.c`, the source of the
+Eleven lines, all `OK` — ten binaries plus `a17hosts.c`, the source of the
 one file here that is ours rather than a rebuilt Wine component. Anything else —
 re-download, do not continue.
 
@@ -59,27 +59,29 @@ ls -d "$WINE/x86_64-unix"
 ```
 
 > Doing it **in place** instead (patching your real CrossOver, affecting every
-> bottle): skip this step and set `APP=$SRC`. Back up the seven replaced files
+> bottle): skip this step and set `APP=$SRC`. Back up the nine replaced files
 > first —
 > `cp "$WINE/$f" "$WINE/$f.orig"` for each — because reinstalling CrossOver is
 > the only other way back.
 
-## 3. Install the eight files
+## 3. Install the ten files
 
 `-X` drops the quarantine flag the zip put on them. Left on, Gatekeeper can
 refuse to load them and the failure is unreadable.
 
 ```sh
 for f in x86_64-unix/ntdll.so x86_64-unix/winecoreaudio.so x86_64-unix/crypt32.so \
-         x86_64-unix/a17hosts.dylib \
+         x86_64-unix/win32u.so x86_64-unix/a17hosts.dylib \
          x86_64-windows/version.dll x86_64-windows/crypt32.dll x86_64-windows/secur32.dll \
-         x86_64-windows/gdiplus.dll; do
+         x86_64-windows/gdiplus.dll x86_64-windows/ole32.dll; do
     cp -X "fixes/$f" "$WINE/$f" && echo "ok  $f"
 done
 ```
 
 `a17hosts.dylib` is the only one that replaces nothing — it is new, and step 3a
-is what puts it in the path.
+is what puts it in the path. `ole32.dll` and `win32u.so` are only needed by the
+RebornFUT launcher (3.1.45 and later); the rest of the list is needed by the
+game itself.
 
 ## 3a. Point name resolution at the bottle's hosts file
 
@@ -109,7 +111,8 @@ the other way round undoes it exactly.
 ## 4. Repair the library search path
 
 `ntdll.so` needs it to find its sibling libraries, `crypt32.so` to find the
-gnutls CrossOver ships in `lib64`. Without it CrossOver falls back to a graphics
+gnutls CrossOver ships in `lib64`, and `win32u.so` to find `libMoltenVK.dylib`
+and `libfreetype.dylib` there. Without it CrossOver falls back to a graphics
 path that does not work on macOS and the game hangs on the loading screen.
 
 Look first — **`crypt32.so` normally already has it** and must not be given it
@@ -118,13 +121,15 @@ twice:
 ```sh
 otool -l "$WINE/x86_64-unix/ntdll.so"   | grep -A2 LC_RPATH
 otool -l "$WINE/x86_64-unix/crypt32.so" | grep -A2 LC_RPATH
+otool -l "$WINE/x86_64-unix/win32u.so"  | grep -A2 LC_RPATH
 ```
 
-Add it only to the one whose output does **not** list
-`@loader_path/../../../lib64` (normally just `ntdll.so`):
+Add it to each one whose output does **not** list
+`@loader_path/../../../lib64` (normally `ntdll.so` and `win32u.so`):
 
 ```sh
 install_name_tool -add_rpath '@loader_path/../../../lib64' "$WINE/x86_64-unix/ntdll.so"
+install_name_tool -add_rpath '@loader_path/../../../lib64' "$WINE/x86_64-unix/win32u.so"
 ```
 
 If you get this:
@@ -143,13 +148,13 @@ rpath, your `otool` is broken — `xcode-select --install`, or
 
 ## 5. Sign
 
-Five Mac binaries now need it. Changing a signed file breaks its signature, and
+Six Mac binaries now need it. Changing a signed file breaks its signature, and
 an unsigned library will not load. `a17hosts.dylib` is new, and `ws2_32.so` is
 CrossOver's own file that step 3a edited — so it is no longer covered by
 CodeWeavers' signature either.
 
 ```sh
-for so in ntdll.so winecoreaudio.so crypt32.so a17hosts.dylib ws2_32.so; do
+for so in ntdll.so winecoreaudio.so crypt32.so win32u.so a17hosts.dylib ws2_32.so; do
     codesign --force --sign - "$WINE/x86_64-unix/$so" && echo "ok  $so"
 done
 ```
@@ -191,16 +196,21 @@ CrossOver and the copy, so this is set once.
 ```sh
 CONF="$BOTTLES/$BOTTLE/cxbottle.conf"
 grep -q '^\[EnvironmentVariables\]' "$CONF" || printf '\n[EnvironmentVariables]\n' >> "$CONF"
-grep -E '^"(CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|WINE_COREAUDIO_EXCLUDE)"' "$CONF"
+grep -E '^"(CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|WINE_COREAUDIO_EXCLUDE)"' "$CONF"
 ```
 
-For each of the three that the `grep` did **not** already print, append it:
+For each of the four that the `grep` did **not** already print, append it:
 
 ```sh
 printf '"CX_GRAPHICS_BACKEND" = "d3dmetal"\n'   >> "$CONF"
 printf '"CX_DR_TRAP" = "2"\n'                   >> "$CONF"
 printf '"WINE_SIMULATE_WRITECOPY" = "1"\n'      >> "$CONF"
+printf '"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER" = "C:\\webview2-fixed\\99.0.1150.52"\n' >> "$CONF"
 ```
+
+That last line must land in the file with **single** backslashes —
+`\\` is how `printf` spells one. It names step 9's folder, so skip both
+together if you skip either.
 
 A key already present with a **different** value is not "already set" — edit
 that line to the value above, do not add a second one.
@@ -241,6 +251,50 @@ mkdir -p "$PSDIR"
 cp -X aurora17/powershell.exe "$PSDIR/powershell.exe"
 ```
 
+## 9. The browser runtime the RebornFUT launcher needs
+
+From 3.1.45 the RebornFUT launcher is a Tauri app and its window is Microsoft
+Edge WebView2. Every WebView2 runtime from version 100 on presents its frames
+through a DirectX and DirectComposition path Wine cannot drive, so the window
+opens and stays blank. Runtimes up to 99 draw through plain GDI, which
+CrossOver handles. Give the bottle its own copy of 99.0.1150.52 — 165 MB down,
+365 MB unpacked — and the setting in step 7 points the launcher at it.
+
+```sh
+CAB=Microsoft.WebView2.FixedVersionRuntime.99.0.1150.52.x64
+WV="$BOTTLES/$BOTTLE/drive_c/webview2-fixed"
+mkdir -p "$WV"
+curl -fL -o "$WV/download.cab" \
+  "https://github.com/westinyang/WebView2RuntimeArchive/releases/download/99.0.1150.52/$CAB.cab"
+shasum -a 256 "$WV/download.cab"
+# must be b43a87ae6a039daaf96a8a3766a11c317a90c1ffe973bb19087374528d611544
+```
+
+If it is anything else, delete the file and fetch it again — do not unpack it.
+Then unpack it with Wine's own `cabarc.exe`, which takes about two seconds and
+needs no Homebrew tool. It reads Windows paths only, which is why the cabinet
+went into the bottle first, and the CrossOver `wine` wrapper rewrites arguments
+that look like paths, so keep these exactly as they are (`-p X` works, `-F:*`
+gets mangled):
+
+```sh
+"$APP/Contents/SharedSupport/CrossOver/bin/wine" --bottle "$BOTTLE" \
+    --cx-app cabarc.exe -p X 'C:\webview2-fixed\download.cab' 'C:\webview2-fixed\'
+mv "$WV/$CAB" "$WV/99.0.1150.52"
+rm -f "$WV/download.cab"
+ls "$WV/99.0.1150.52/msedgewebview2.exe" "$WV/99.0.1150.52/99.0.1150.52.manifest"
+```
+
+**Launcher window blank, white or black?** Those two files and the setting are
+the whole of it. Check that `"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER" =
+"C:\webview2-fixed\99.0.1150.52"` is in the bottle's `cxbottle.conf` — with
+CrossOver quit, since it rewrites that file from memory — and that the folder
+it names is there. Inside the bottle, `cmd /c echo
+%WEBVIEW2_BROWSER_EXECUTABLE_FOLDER%` prints the path when it is set. The
+evergreen runtime the launcher installs for itself, under
+`Program Files (x86)\Microsoft\EdgeWebView`, is version 100 or later and must
+not be the one it uses: leave it alone, and leave the setting in.
+
 ---
 
 ## Check the lot
@@ -251,8 +305,8 @@ Even done by hand, this still works and checks every step above at once:
 ./setup.sh --verify
 ```
 
-It changes nothing. It compares the shipped files against `fixes/`, checks both
-rpaths, checks all five signatures, checks that `ws2_32.so` is reading the
+It changes nothing. It compares the shipped files against `fixes/`, checks all
+three rpaths, checks all six signatures, checks that `ws2_32.so` is reading the
 bottle's hosts file, checks the app kept its permissions, and checks the EA host
 redirections in the bottle.
 

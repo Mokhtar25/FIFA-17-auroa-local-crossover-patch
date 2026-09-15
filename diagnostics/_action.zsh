@@ -149,6 +149,24 @@ case "$FLAG" in
           ""
           "Nothing else in the bottle is touched, and your saves are not."
         ) ;;
+    --repair)
+        TITLE="Fix my installation"
+        BLURB=(
+          "Use this when FIFA 17 or the RebornFUT launcher stopped working after"
+          "it once did, or when this folder is newer than the install on this"
+          "Mac (an update). Nothing is copied again, so it takes a minute or two."
+          ""
+          "It quits CrossOver cleanly, puts back any fix file that is missing or"
+          "out of date in the CrossOver-FIFA copy and re-signs it, sets the"
+          "Aurora17 bottle up again (settings, overrides, hosts, menu entries,"
+          "and the WebView2 runtime the launcher's window needs -- a 165 MB"
+          "download the first time only), has the game's own loader write a"
+          "fresh licence file, and then checks the lot."
+          ""
+          "Your saves, your Ultimate Team club and the game's own files are"
+          "not touched. macOS may ask once for App Management: that is the"
+          "re-signing, and it is needed."
+        ) ;;
     --play-log)
         TITLE="Play with a crash log"
         BLURB=(

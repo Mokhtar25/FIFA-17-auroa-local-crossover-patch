@@ -1,8 +1,8 @@
-Six build patches against pristine crossover-sources-26.3.0.tar.gz, published by
+Eight build patches against pristine crossover-sources-26.3.0.tar.gz, published by
 CodeWeavers. They are modifications to Wine and are LGPL-2.1-or-later; the full
 text is in ../fixes/LICENSE.LGPL, and ../NOTICE.md says what belongs to whom.
 
-build.sh APPLIES THE FOUR FIFA 17 ONES, THEN TWO FOR FIFA 15
+build.sh APPLIES FOUR FIFA 17 ONES, TWO FOR FIFA 15, THEN THE TWO LAUNCHER ONES
 
 The fifth, crossover-26.3-topdown-alloc-limit.patch, is FIFA 15's start-up fix.
 It changes nothing unless the bottle sets CX_TOPDOWN_LIMIT, and only the FIFA 15
@@ -12,6 +12,22 @@ Both profiles install that DLL into the shared app. Any other FIFA 15 patch in t
 (README-fifa15-wine-fixes.md): not in build.sh's PATCHES list, not built into
 fixes/, not tested against FIFA 17. Ignore those.
 
+The seventh, crossover-26.3-ole32-revoke-foreign-window.patch, is for FIFA 17's
+RebornFUT launcher from 3.1.45 on. It is independent of the other six -- it
+touches dlls/ole32/ole2.c and nothing else -- so it applies last and could
+equally apply first.
+
+The eighth, crossover-26.3-win32u-shm-flush-under-user-lock.patch, is the same
+launcher's second crash. CrossOver's cross-process child-window surface hack
+(CX HACK 23950, shm_surface_flush in win32u) sends a synchronous message to the
+parent process while the caller still holds the USER lock, and the WebView2
+browser process aborts on "err:system:user_check_not_lock BUG: holding USER
+lock". The patch adds user_lock_held() and makes shm_surface_flush return FALSE
+when the lock is held, deferring to the next idle flush from the message loop.
+Wine upstream never sends a message from a surface flush, so this is
+CrossOver-only. It touches dlls/win32u (sysparams.c, win32u_private.h, dce.c)
+and nothing else, so it is independent too and applies last.
+
 APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
 
     1. crossover-26.3-fifa17-rosetta.patch
@@ -20,6 +36,8 @@ APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
     4. crossover-26.3-fifa17-cng.patch
     5. crossover-26.3-topdown-alloc-limit.patch   (ntdll/unix/virtual.c; independent)
     6. crossover-26.3-gdiplus-delete-font-collection.patch
+    7. crossover-26.3-ole32-revoke-foreign-window.patch  (dlls/ole32/ole2.c; independent)
+    8. crossover-26.3-win32u-shm-flush-under-user-lock.patch  (dlls/win32u; independent)
 
 cng must go last of the four: it builds on online, and both touch dlls/crypt32/pfx.c.
 Applying them in directory order -- the obvious thing to do with a folder of
@@ -39,12 +57,20 @@ WHAT EACH ONE COVERS
                           crypt32 (both halves), include/wincrypt.h
     topdown   FIFA 15     caps MEM_TOP_DOWN allocations at CX_TOPDOWN_LIMIT
                           ntdll/unix/virtual.c; README-fifa15-wine-fixes.md
+    ole32     RebornFUT 3.1.45+
+                          RevokeDragDrop on another process's window (WebView2)
+                          crashed the launcher; dlls/ole32/ole2.c
+    win32u    RebornFUT 3.1.45+
+                          CrossOver's shm_surface_flush sent a message while
+                          holding the USER lock and the WebView2 browser
+                          process aborted; dlls/win32u (sysparams.c,
+                          win32u_private.h, dce.c)
 
 Each patch carries its own header explaining what it changes and why, including
 the reasoning and the measurements behind it. Read the top of the file before
 the diff.
 
-ONE THING A PATCH CANNOT CARRY
+FOUR THINGS A PATCH CANNOT CARRY
 
 SONAME_LIBGNUTLS is undefined in this tree, which is a configure result and not
 source. Without defining it, the whole unix half of crypt32 compiles to stubs
@@ -58,4 +84,21 @@ that return STATUS_DLL_NOT_FOUND -- the PE side reports "call not implemented"
 Only the headers are needed; CrossOver 26.3 already ships libgnutls.30.dylib in
 its lib64 directory and crypt32 opens it by name at runtime.
 
-../build.sh does all of the above for you, including this step.
+Three more of the same kind, needed only for win32u. build.sh configures
+--without-freetype, so HAVE_FT2BUILD_H, SONAME_LIBFREETYPE and SONAME_LIBVULKAN
+are left undefined and win32u builds with no font code and no Vulkan loader --
+cleanly, and useless. In the same include/config.h:
+
+    #define HAVE_FT2BUILD_H 1
+    #define SONAME_LIBFREETYPE "libfreetype.dylib"
+    #define SONAME_LIBVULKAN "libMoltenVK.dylib"
+
+Again only the freetype *headers* are needed, and the tarball carries them
+beside wine/ at sources/freetype/include, so win32u is made with
+
+    make CFLAGS="$(the CFLAGS line from build64/Makefile) -I.../freetype/include" \
+         dlls/win32u/all
+
+and the result, dlls/win32u/win32u.so, is x86_64-unix/win32u.so in fixes/.
+
+../build.sh does all of the above for you, including these steps.

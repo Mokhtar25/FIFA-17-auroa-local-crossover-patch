@@ -7,7 +7,9 @@
 # uninstall could reach into the real CrossOver.
 #
 # Bottle settings are left alone -- they are harmless without the fixes, and
-# removing them by script risks damaging the file.
+# removing them by script risks damaging the file. The one exception is
+# WEBVIEW2_BROWSER_EXECUTABLE_FOLDER, which names a folder this script deletes:
+# left behind it would point every WebView2 app in the bottle at nothing.
 
 # Run under zsh whatever it was started with. Every line below is zsh, and the
 # very next one -- HERE="${0:A:h}" -- is the trap: bash and sh read ${0:A:h} as
@@ -144,10 +146,12 @@ FILES=(
   x86_64-unix/ntdll.so
   x86_64-unix/winecoreaudio.so
   x86_64-unix/crypt32.so
+  x86_64-unix/win32u.so          # RebornFUT launcher; restored when a backup exists
   x86_64-windows/version.dll
   x86_64-windows/crypt32.dll
   x86_64-windows/secur32.dll
   x86_64-windows/gdiplus.dll     # FIFA 15 profile only; restored when a backup exists
+  x86_64-windows/ole32.dll       # RebornFUT launcher; restored when a backup exists
 )
 
 say ""
@@ -216,10 +220,10 @@ if [ "$MODE" = "in-place" ]; then
     if [ "$put_back" -gt 0 ]; then
         # This re-signs ad-hoc. It does NOT restore CodeWeavers' signature,
         # their Team ID, or the original hardened-runtime flags, because those
-        # cannot be reconstructed from seven replaced files. Say so rather than
+        # cannot be reconstructed from nine replaced files. Say so rather than
         # printing "signed" and letting the user believe otherwise.
         signed=1
-        for so in ntdll.so winecoreaudio.so crypt32.so ws2_32.so; do
+        for so in ntdll.so winecoreaudio.so crypt32.so win32u.so ws2_32.so; do
             codesign --force --sign - "$WINE/x86_64-unix/$so" 2>/dev/null || signed=0
         done
         # Sign the app back with the entitlements it currently carries. Signing
@@ -337,6 +341,34 @@ if [ -f "$BHOSTS.bak-aurora17" ]; then
     undone=$((undone+1))
 fi
 
+# ------------------------------------ the launcher's browser runtime
+# setup.sh unpacks Microsoft's fixed-version WebView2 runtime into the bottle
+# so the RebornFUT launcher's window draws, and points the bottle at it with
+# one environment variable. Both go, the variable first, so the bottle is never
+# left naming a folder that has already been deleted. Only that one line and
+# only that one folder: every other setting in the file is left alone.
+say ""
+WV2CONF="$BOTTLE_DIR/$BOTTLE/cxbottle.conf"
+WV2DIR="$BOTTLE_DIR/$BOTTLE/drive_c/webview2-fixed"
+WV2LINE='"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER" = '
+if [ -f "$WV2CONF" ] && grep -Fq -- "$WV2LINE" "$WV2CONF"; then
+    if grep -Fv -- "$WV2LINE" "$WV2CONF" > "$WV2CONF.tmp-aurora17" \
+       && mv -f "$WV2CONF.tmp-aurora17" "$WV2CONF"; then
+        ok "took WEBVIEW2_BROWSER_EXECUTABLE_FOLDER out of the $BOTTLE bottle's settings"
+        undone=$((undone+1))
+    else
+        rm -f "$WV2CONF.tmp-aurora17"
+        note "could not edit $WV2CONF"
+        say "        Delete the WEBVIEW2_BROWSER_EXECUTABLE_FOLDER line from its"
+        say "        [EnvironmentVariables] section yourself."
+    fi
+fi
+if [ -d "$WV2DIR" ]; then
+    rm -rf "$WV2DIR"
+    ok "removed the WebView2 runtime from the $BOTTLE bottle"
+    undone=$((undone+1))
+fi
+
 # ------------------------------------------- the FIFA 17 (offline) menu entry
 # setup.sh --offline adds one entry to the bottle so the game can be started
 # from CrossOver's window. It is ours, it names a copy that is about to be
@@ -388,7 +420,9 @@ say ""
 say "Left in place, on purpose:"
 say "  * the settings in your '$BOTTLE' bottle. They do nothing without the"
 say "    fixes. To remove them, open that bottle's cxbottle.conf and delete"
-say "    them from the [EnvironmentVariables] section."
+say "    them from the [EnvironmentVariables] section. The one already taken"
+say "    out is WEBVIEW2_BROWSER_EXECUTABLE_FOLDER, because the folder it"
+say "    named has been deleted with it."
 say "  * Aurora17's own hosts receipt, if its launcher has run since. That is"
 say "    Aurora17's record, not ours. To clear it, run in the Aurora17 folder:"
 say "        .\\Aurora17Connector.exe uninstall-hosts"

@@ -1,0 +1,49 @@
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -324,6 +324,13 @@
+     }
+ }
+ 
++/* whether the current thread holds the USER lock; for callers that must not
++ * send inter-thread messages while it is held and want to defer instead */
++BOOL user_lock_held(void)
++{
++    return user_lock_thread == GetCurrentThreadId();
++}
++
+ static HANDLE get_display_device_init_mutex( void )
+ {
+     WCHAR bufferW[256];
+--- a/dlls/win32u/win32u_private.h
++++ b/dlls/win32u/win32u_private.h
+@@ -193,6 +193,7 @@
+ extern void user_lock(void);
+ extern void user_unlock(void);
+ extern void user_check_not_lock(void);
++extern BOOL user_lock_held(void);
+ 
+ /* d3dkmtc. */
+ 
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -757,6 +757,20 @@
+     struct flush_shm_surface_params params;
+ 
+     TRACE("%p\n", surface);
++
++    /* The flush is a synchronous send to the parent's process, which is not
++     * allowed while this thread holds the USER lock (send_inter_thread_message
++     * asserts on it). apply_window_pos gets here with the lock held through
++     * update_surface_region -> window_surface_set_shape -> window_surface_flush
++     * when a child of ours is resized and our own surface is the shm one, e.g.
++     * WebView2's render widget window inside its Chrome_WidgetWin_0. Keep the
++     * bounds dirty and let flush_window_surfaces() deliver them from the
++     * message loop instead. */
++    if (user_lock_held())
++    {
++        TRACE( "USER lock held, deferring flush of %p\n", surface );
++        return FALSE;
++    }
+ 
+     params.section = HandleToLong( surface->section );
+     params.hwnd = HandleToLong( surface->header.hwnd );

@@ -10,7 +10,9 @@ Aurora17 folder. Every other bottle you own keeps running on your normal
 CrossOver.
 
 - The copy needs about 1 GB of disk.
-- Nothing is downloaded.
+- One download, for FIFA 17 only: Microsoft's Edge WebView2 runtime 99
+  (165 MB, once, 365 MB unpacked into the bottle). See
+  [step 9b](#9b-the-browser-runtime-the-launcher-needs).
 - The game is never modified.
 - Both CrossOvers share the same bottles. Never open the same bottle in both at once.
 
@@ -432,13 +434,13 @@ The same information, for reference:
 > 🔴 The game opens and closes over and over, forever.
 
 > [!TIP]
-> 🟢 The `CX_DR_TRAP` bottle setting is missing. Run `./setup.sh --verify`, then `./setup.sh` again. Manual: [step 6](#6-add-three-settings-to-the-bottle).
+> 🟢 The `CX_DR_TRAP` bottle setting is missing. Run `./setup.sh --verify`, then `./setup.sh` again. Manual: [step 6](#6-add-the-settings-to-the-bottle).
 
 > [!CAUTION]
 > 🔴 Stuck on the loading screen.
 
 > [!TIP]
-> 🟢 The search path or the graphics setting is missing. Run `./setup.sh --verify`, then `./setup.sh` again. Manual: [steps 4](#4-repair-the-search-path) and [6](#6-add-three-settings-to-the-bottle).
+> 🟢 The search path or the graphics setting is missing. Run `./setup.sh --verify`, then `./setup.sh` again. Manual: [steps 4](#4-repair-the-search-path) and [6](#6-add-the-settings-to-the-bottle).
 
 > [!CAUTION]
 > 🔴 Freezes before the menu, no sound.
@@ -469,6 +471,55 @@ The same information, for reference:
 
 > [!TIP]
 > 🟢 `crypt32` or `secur32.dll` did not install. Run `./setup.sh --verify`, then `./setup.sh` again.
+
+> [!CAUTION]
+> 🔴 The **RebornFUT** launcher dies as it opens — no window, or the window
+> appears and vanishes. Version 3.1.45 and later only; the small old
+> `Reborn17-3.1.x` launcher was fine.
+
+> [!TIP]
+> 🟢 From 3.1.45 the launcher draws its interface in Microsoft WebView2, and
+> it walks into two CrossOver bugs on the way up. Both are fixed in `fixes/`.
+> First, the part of the launcher that sets drag-and-drop up revokes it on
+> every child window, including the one the Chromium browser process owns;
+> Wine's `RevokeDragDrop` followed that window's drop-target pointer into the
+> other process and crashed. `ole32.dll` makes it refuse another process's
+> window, the way `RegisterDragDrop` beside it already does — the launcher
+> loses nothing, drag-and-drop into its web view stays with Chromium. Second,
+> CrossOver's own cross-process child-window hack flushes that window's shared
+> surface by sending a synchronous message to the parent process while the
+> caller still holds the USER lock, and the browser process aborts on
+> `err:system:user_check_not_lock BUG: holding USER lock`. `win32u.so` defers
+> the flush to the next idle one from the message loop instead. An install made
+> before those files existed does not have them: double-click **Fix my
+> installation.command** (`./setup.sh --repair`), which puts both into the
+> CrossOver-FIFA copy and re-signs it without copying CrossOver again.
+> **A window that opens but stays blank** is the third part, and it is not a
+> Wine bug this package patches. Every Edge WebView2 runtime from version 100
+> on presents its frames through a DirectX and DirectComposition path Wine
+> cannot drive (D3DMetal refuses a WARP device, `dcomp.dll` is a stub); runtime
+> 99 and older draw through plain GDI, which CrossOver carries. So the installer
+> puts Microsoft's fixed-version runtime 99.0.1150.52 into the bottle (a 165 MB
+> download, once) and points the launcher at it with one bottle setting. If
+> `--verify` says that runtime is not in the bottle, **Fix my
+> installation.command** downloads it. The version-by-version evidence is in
+> `HANDOFF-rebornfut-launcher.md`.
+
+> [!CAUTION]
+> 🔴 The **RebornFUT** launcher's PLAY says FIFA 17 is running, but no game
+> window ever appears, and a minute later it says the game stopped. In
+> Activity Monitor (or `ps`) `FIFA17.exe` comes and goes with `/dbrv=4`,
+> `/dbrv=5`, ... on its command line.
+
+> [!TIP]
+> 🟢 The bottle's EA licence file is missing or wrong. Reborn starts
+> `FIFA17.exe` directly, like Aurora does, and without that file the game takes
+> its Origin activation path: it relaunches itself with no window (the number
+> after `/dbrv=` counts the relaunches) and quits about twenty seconds in.
+> Reborn only reports "running" while that goes on. Double-click **Fix my
+> installation.command**, or just **diagnostics/11 Re-seed the licence
+> file.command**; both have the game's own loader write the file afresh. Then
+> press PLAY in Reborn again. See [`0xFFFFFFFA` — no licence file](#0xfffffffa--no-licence-file).
 
 > [!CAUTION]
 > 🔴 An online match disconnects a few seconds after kick-off, every time. Menus, career and the servers are all fine.
@@ -586,7 +637,7 @@ grep 'exited with code' ~/Library/Application\ Support/CrossOver/Bottles/Aurora1
 
 > [!TIP]
 > 🟢 The bottle has no EA licence file (`C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf`). In order of least effort:
-> 1. **Press PLAY again.** The stand-in now seeds the file itself. You will see `Seeding the FIFA 17 licence file (first launch in this bottle)...`.
+> 1. **Press PLAY again.** The stand-in now seeds the file itself. You will see `Seeding the FIFA 17 licence file (first launch in this bottle)...`. (Starting from the RebornFUT launcher instead? It does not seed the file: double-click **Fix my installation.command**, or **diagnostics/11 Re-seed the licence file.command**.)
 > 2. If the launcher reports **code 24**, it could not find `_fifa17.exe` next to the game. Start FIFA 17 once yourself from CrossOver, quit, PLAY again.
 > 3. From Terminal: `AURORA_BOTTLE='Aurora17' ./setup.sh --bottle`. Then `./setup.sh --verify` should say `licence file present`.
 
@@ -742,23 +793,29 @@ Two folders matter: `x86_64-unix` and `x86_64-windows`.
 
 ### 2. Make backups
 
-Copy these seven files and add `.orig` to each copy. They are how you undo.
+Copy these nine files and add `.orig` to each copy. They are how you undo.
 
 ```
 x86_64-unix/ntdll.so              →  ntdll.so.orig
 x86_64-unix/winecoreaudio.so      →  winecoreaudio.so.orig
 x86_64-unix/crypt32.so            →  crypt32.so.orig
+x86_64-unix/win32u.so             →  win32u.so.orig
 x86_64-windows/version.dll        →  version.dll.orig
 x86_64-windows/crypt32.dll        →  crypt32.dll.orig
 x86_64-windows/secur32.dll        →  secur32.dll.orig
 x86_64-windows/gdiplus.dll        →  gdiplus.dll.orig
+x86_64-windows/ole32.dll          →  ole32.dll.orig
 ```
 
 ### 3. Copy the new files in
 
-From `fixes/`, copy each file over the one with the same name. The three in
-`x86_64-unix` go in `x86_64-unix`, the four in `x86_64-windows` go in
+From `fixes/`, copy each file over the one with the same name. The four in
+`x86_64-unix` go in `x86_64-unix`, the five in `x86_64-windows` go in
 `x86_64-windows`.
+
+**`ole32.dll` and `win32u.so` are only for the RebornFUT launcher** (3.1.45 and
+later, the WebView2 one). The game itself never needs either. Everything else in
+the list is needed to start the game at all.
 
 **`crypt32` is two files.** Both are needed. Replacing only `crypt32.dll` does
 nothing.
@@ -786,10 +843,12 @@ is unaffected.
 ```sh
 install_name_tool -add_rpath '@loader_path/../../../lib64' "$W/ntdll.so"
 install_name_tool -add_rpath '@loader_path/../../../lib64' "$W/crypt32.so"
+install_name_tool -add_rpath '@loader_path/../../../lib64' "$W/win32u.so"
 ```
 
 "Already there" is fine. **Do not skip this.** Without it the game hangs on the
-loading screen.
+loading screen, and `win32u.so` finds neither `libMoltenVK.dylib` nor
+`libfreetype.dylib`.
 
 ### 5. Sign the files
 
@@ -801,7 +860,7 @@ codesign -d --entitlements /tmp/cx.plist --xml "$APP"
   -c 'Add :com.apple.security.cs.disable-library-validation bool true' /tmp/cx.plist
 
 codesign --force --sign - "$W/ntdll.so" "$W/winecoreaudio.so" "$W/crypt32.so" \
-                          "$W/a17hosts.dylib" "$W/ws2_32.so"
+                          "$W/win32u.so" "$W/a17hosts.dylib" "$W/ws2_32.so"
 codesign --force --sign - -o runtime --entitlements /tmp/cx.plist "$APP"
 codesign --verify --deep --strict "$APP"       # must print nothing
 ```
@@ -810,7 +869,7 @@ Sign without the saved permissions and CrossOver loses microphone and camera
 access. Sign without the added one and the app crashes at launch naming
 `Sparkle.framework`. The Windows files need no signing.
 
-### 6. Add three settings to the bottle
+### 6. Add the settings to the bottle
 
 Open `~/Library/Application Support/CrossOver/Bottles/Aurora17/cxbottle.conf`.
 Under `[EnvironmentVariables]` (add the heading if missing) add:
@@ -819,6 +878,7 @@ Under `[EnvironmentVariables]` (add the heading if missing) add:
 "CX_GRAPHICS_BACKEND" = "d3dmetal"
 "CX_DR_TRAP" = "2"
 "WINE_SIMULATE_WRITECOPY" = "1"
+"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER" = "C:\webview2-fixed\99.0.1150.52"
 ```
 
 | setting | without it |
@@ -826,6 +886,11 @@ Under `[EnvironmentVariables]` (add the heading if missing) add:
 | `CX_GRAPHICS_BACKEND` | hangs on the loading screen |
 | `CX_DR_TRAP` | the game restarts itself forever |
 | `WINE_SIMULATE_WRITECOPY` | "servers have been shut down" |
+| `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` | the RebornFUT launcher's window is blank |
+
+Single backslashes in that last one, exactly as written. It only means
+anything once [step 9b](#9b-the-browser-runtime-the-launcher-needs) has put
+the folder there; leave both out together if you leave either out.
 
 ### 6a. Let the bottle load Aurora's shim
 
@@ -972,6 +1037,48 @@ C:\ProgramData\Electronic Arts\EA Services\License\1027460.dlf
 Without it the game takes the Origin activation path and quits about 20 seconds
 in. The file is made from your own copy of the game, so it is not shipped here.
 
+### 9b. The browser runtime the launcher needs
+
+From RebornFUT 3.1.45 the launcher is a Tauri app, and its window is Microsoft
+Edge WebView2. Every WebView2 runtime from version 100 on presents its frames
+through a DirectX and DirectComposition path Wine cannot drive, so the window
+opens and stays blank. Runtimes up to 99 draw through plain GDI, which
+CrossOver handles, and the launcher then renders completely.
+
+The installer downloads Microsoft's fixed-version runtime 99.0.1150.52 — a
+165 MB cabinet, once, so this one step needs internet — checks its SHA-256,
+unpacks it with Wine's own `cabarc.exe` into the bottle at
+`drive_c/webview2-fixed/99.0.1150.52` (365 MB there), and points the launcher
+at it with the setting from [step 6](#6-add-the-settings-to-the-bottle). The
+evergreen runtime the launcher installs for itself stays where it is and is
+simply not used, so every other WebView2 app on your Mac is unaffected.
+
+Two overrides, on any run that does the bottle:
+
+```sh
+WEBVIEW2_CAB=/path/to/Microsoft.WebView2.FixedVersionRuntime.99.0.1150.52.x64.cab ./setup.sh --bottle
+WEBVIEW2_RUNTIME=skip ./setup.sh --bottle
+```
+
+`WEBVIEW2_CAB` uses a copy already on this Mac — same checksum, nothing
+downloaded — for a machine with no internet. `WEBVIEW2_RUNTIME=skip` leaves
+the runtime and the bottle setting out altogether; the launcher's window is
+blank, and everything else is unchanged. A cabinet whose checksum does not
+match is deleted and the installer stops: nothing is unpacked from a file that
+is not the one Microsoft published.
+
+Doing it by hand is the same three moves: put the cabinet in the bottle as
+`drive_c/webview2-fixed/download.cab`, run
+
+```sh
+"/Applications/CrossOver-FIFA.app/Contents/SharedSupport/CrossOver/bin/wine" \
+    --bottle Aurora17 --cx-app cabarc.exe \
+    -p X 'C:\webview2-fixed\download.cab' 'C:\webview2-fixed\'
+```
+
+and rename the `Microsoft.WebView2.FixedVersionRuntime.99.0.1150.52.x64`
+folder it makes to `99.0.1150.52`, then delete the cabinet.
+
 ### 10. Offline menu entry (offline install only)
 
 `./setup.sh --offline-menu` adds the **FIFA 17 (offline)** entry to the bottle.
@@ -1085,7 +1192,7 @@ CodeWeavers' own signature. Reinstall CrossOver to have it exactly as shipped.
 | `Diagnostics.command` | collect the logs for a bug report into `diagnostics/` |
 | `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh` | what the .command files run |
-| `fixes/` | the eight files for the CrossOver copy, source and checksums |
+| `fixes/` | the ten files for the CrossOver copy, source and checksums |
 | `aurora17/` | the PowerShell stand-in, its source, the certificate, checksums |
 | `patches/` | the Wine source changes the fixes were built from |
 | `build.sh` | rebuilds `fixes/` from source |

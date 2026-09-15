@@ -59,12 +59,34 @@ If the FIFA 17 half is not finished, FIFA 15 is still set up, and the message
 at the end says what FIFA 17 is missing.
 For FIFA 17 offline plus FIFA 15, run `./setup-both.sh --offline`.
 
-Updating an install you already have (for example to pick up the C runtime
-fix that stops online matches disconnecting at kick-off): double-click
-**Stop.command** so CrossOver is fully quit, then in Terminal run
-`./setup.sh --bottle` for FIFA 17 and `./setup.sh --fifa15` for FIFA 15.
-Neither copies CrossOver again; they only bring the bottles up to date.
-`./setup.sh --verify` (or `--fifa15 --verify`) shows the result.
+Updating an install you already have, or fixing one that stopped working:
+double-click **Fix my installation.command**. It quits CrossOver cleanly,
+replaces any fix file in the CrossOver-FIFA copy that is missing or out of
+date and re-signs it, sets the Aurora17 bottle up again (settings, overrides,
+hosts, menu entries, and the WebView2 runtime the RebornFUT launcher needs if
+it is not there yet), has the game's own loader write a fresh licence file,
+and checks the lot. CrossOver is not copied again, so it takes a minute or
+two. From Terminal it is `./setup.sh --repair`; for FIFA 15, `./setup.sh
+--fifa15` brings that bottle up to date.
+
+The **RebornFUT** launcher needs two more fixes from version 3.1.45 on, the
+point where it became a WebView2 app. Both are CrossOver bugs its browser
+window walks into, and both are now fixed here: `ole32.dll`, because
+`RevokeDragDrop` followed a drop target into the browser process and crashed
+the launcher as it opened, and `win32u.so`, because CrossOver's cross-process
+window flush sent a message while holding the USER lock and killed the browser
+process a moment later. An install made before those files existed does not
+have them: double-click **Fix my installation.command**, which puts them into
+the CrossOver-FIFA copy and re-signs it without copying CrossOver again.
+The blank window that was left after those two is fixed as well, and not by a
+patch. Every Edge WebView2 runtime from version 100 on draws through a
+DirectX and DirectComposition path Wine cannot drive; runtimes up to 99 draw
+through plain GDI, which CrossOver handles. So setup puts Microsoft's
+fixed-version runtime 99.0.1150.52 in the bottle (a 165 MB download, once) and
+points the launcher at it with one bottle setting. The evergreen runtime the
+launcher installs for itself is left alone and simply not used, and every
+other WebView2 app on your Mac is unaffected. `HANDOFF-rebornfut-launcher.md`
+has the version-by-version evidence.
 
 Custom bottle names: `FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh`.
 Use distinct bottles. Unset `AURORA_BOTTLE` before running the combined installer.
@@ -95,7 +117,7 @@ player's in the last bit and the match disconnects at kick-off. FIFA 17 has
 Microsoft's copies in its game folder already; FIFA 15 has none, so the
 installer puts a pair beside `fifa15.exe` — taken from your FIFA 17 folder, or
 installed from the VS2012 redistributable in FIFA 15's own `_Redist` folder.
-Nothing is downloaded, and no file of the game's own is changed.
+Nothing is downloaded for that, and no file of the game's own is changed.
 
 ## Stop
 
@@ -161,6 +183,7 @@ game folder, which Uninstall never touches.
 | `PLAY FIFA 17 offline.command` | play offline without opening CrossOver |
 | `Stop.command` | quit game, Aurora and CrossOver cleanly |
 | `Diagnostics.command` | collect the logs for a bug report |
+| `Fix my installation.command` | repair or update an install without copying CrossOver again |
 | `Uninstall.command` | undo everything |
 | `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh`, `setup-both.sh` | what the .command files run |

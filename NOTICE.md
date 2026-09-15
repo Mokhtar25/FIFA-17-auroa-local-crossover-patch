@@ -1,7 +1,7 @@
 # What is under which licence, and how to rebuild it
 
 Short version: **the installer, the scripts, the docs and `a17hosts.dylib` are MIT.
-The seven patched Wine binaries and the patches are LGPL-2.1-or-later, because they
+The nine patched Wine binaries and the patches are LGPL-2.1-or-later, because they
 are not ours to relicense.** `./build.sh` rebuilds all of it from source.
 
 ---
@@ -17,11 +17,13 @@ are not ours to relicense.** `./build.sh` rebuilds all of it from source.
 | `aurora17/aurora-pwsh.c`, `aurora17/powershell.exe` | ours | MIT |
 | `fixes/x86_64-unix/ntdll.so` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-unix/crypt32.so` | Wine, modified by us | **LGPL-2.1-or-later** |
+| `fixes/x86_64-unix/win32u.so` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-unix/winecoreaudio.so` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-windows/version.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-windows/crypt32.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-windows/secur32.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-windows/gdiplus.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
+| `fixes/x86_64-windows/ole32.dll` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `patches/*.patch` | modifications to the above | **LGPL-2.1-or-later** |
 
 Full LGPL text: `fixes/LICENSE.LGPL`, copied verbatim from `COPYING.LIB` in the
@@ -37,16 +39,30 @@ CrossOver itself, FIFA 17, Aurora17, and any certificate or key belonging to
 anyone else. You need your own copy of each. This package changes a **copy** of
 CrossOver that you make; it never touches the original.
 
+## Downloaded at setup time, not redistributed here
+
+The **Microsoft Edge WebView2 fixed-version runtime 99.0.1150.52** is
+Microsoft's, licensed by Microsoft on its own terms. Nothing of it is shipped
+in this package. `setup.sh` downloads Microsoft's own cabinet
+(`Microsoft.WebView2.FixedVersionRuntime.99.0.1150.52.x64.cab`) from a
+community archive of those cabinets, checks it against the SHA-256 recorded in
+the script, and unpacks it into your bottle, because the RebornFUT launcher's
+window will not draw on any runtime from version 100 on. The archive exists
+because Microsoft keeps only the last two fixed versions on its own download
+page; the file is Microsoft's, byte for byte, and the checksum is what says so.
+Using it is between you and Microsoft's terms. `WEBVIEW2_RUNTIME=skip` leaves
+it out entirely.
+
 ## Corresponding source — what the LGPL asks for, and where it is
 
-The seven binaries above are modified Wine. Anyone receiving them is entitled to
+The nine binaries above are modified Wine. Anyone receiving them is entitled to
 the source they were built from and the means to rebuild them. That is:
 
 1. **The upstream source**: `crossover-sources-26.3.0.tar.gz`, published by
    CodeWeavers with that release. Not redistributed here — it is 142 MB and
    unmodified — but it is the exact tarball these patches apply to, and nothing
    else will apply cleanly.
-2. **Our modifications**: `patches/`, six build patches plus investigation records against that tarball.
+2. **Our modifications**: `patches/`, eight build patches plus investigation records against that tarball.
 3. **The build**: `./build.sh`, which does all of it end to end.
 
 ```sh
@@ -54,10 +70,11 @@ the source they were built from and the means to rebuild them. That is:
 ./build.sh /path/to/crossover-sources-26.3.0.tar.gz
 ```
 
-It unpacks the tarball, applies the six build patches **in the order that works**
-(rosetta → online → audio → cng → topdown → gdiplus; alphabetical order produces a reject — see
-`patches/README`), configures, makes the SONAME_LIBGNUTLS edit that cannot
-travel in a patch, builds, and compares the result against `fixes/SHA256SUMS`.
+It unpacks the tarball, applies the eight build patches **in the order that works**
+(rosetta → online → audio → cng → topdown → gdiplus → ole32 → win32u; alphabetical order produces a reject — see
+`patches/README`), configures, makes the `config.h` edits that cannot
+travel in a patch (SONAME_LIBGNUTLS, and the freetype and Vulkan ones win32u
+needs), builds, and compares the result against `fixes/SHA256SUMS`.
 
 ## Honest limits of that comparison
 
@@ -74,11 +91,11 @@ Two things are known and worth stating rather than letting you find them:
 - `crypt32.dll` ships at ~4.4 MB against a stock ~830 KB. That is debugging
   information left in by the build settings, not extra code. It should be
   stripped before anyone calls this finished.
-- Of the four patches, only the **online** one has ever been confirmed to
-  rebuild byte-for-byte. The others are unverified in that specific sense,
-  which is exactly why `build.sh` compares and reports instead of asserting.
+- Of the eight patches, the **online** one and **win32u** have been confirmed to
+  rebuild byte-for-byte. The rest are unverified in that specific sense, which
+  is exactly why `build.sh` compares and reports instead of asserting.
 
-All four patches *are* confirmed to apply cleanly, in order, to a pristine
+All eight patches *are* confirmed to apply cleanly, in order, to a pristine
 `crossover-sources-26.3.0.tar.gz`.
 
 ## What this does to your machine
@@ -95,6 +112,11 @@ Not a legal clause — just what it actually does, so nothing is a surprise:
   file inside your bottle. `uninstall.sh` reverses it exactly.
 - It writes one file into your Aurora17 folder and one into the bottle, and
   records both so uninstall can undo them.
+- For FIFA 17 it downloads Microsoft's WebView2 runtime 99 once (165 MB) and
+  unpacks it into the bottle at `drive_c/webview2-fixed` (365 MB).
+  `uninstall.sh` deletes that folder and the one setting that names it.
+  `WEBVIEW2_RUNTIME=skip` skips the download; `WEBVIEW2_CAB=` uses a copy you
+  already have. That is the only thing this package ever downloads.
 - It is pinned to **CrossOver 26.3 exactly** and refuses to install on anything
   else.
 - **It never asks for a password and never writes outside those places.** No

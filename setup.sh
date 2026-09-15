@@ -6,7 +6,11 @@
 # other bottle you run in it are left exactly as they are.
 #
 # Everything it does can be undone by running ./uninstall.sh.
-# It never changes a file of the game's own, and it never downloads anything.
+# It never changes a file of the game's own. The one thing it downloads is
+# Microsoft's fixed-version Edge WebView2 runtime 99.0.1150.52 (165 MB, once,
+# FIFA 17 only), which is what makes the RebornFUT launcher's window draw;
+# WEBVIEW2_CAB=/path/to/the.cab uses a copy you already have and
+# WEBVIEW2_RUNTIME=skip leaves it out.
 # (For FIFA 15 it does add Microsoft's msvcr110/msvcp110 next to fifa15.exe,
 # copied from your FIFA 17 folder or out of the game's own _Redist installer:
 # without them an online match desyncs at kick-off.)
@@ -38,6 +42,14 @@
 #                                         EA licence file, replacing whatever is
 #                                         there. Every other check only asks whether
 #                                         that file exists, so a wrong one looks fine
+#   ./setup.sh --repair                   put an install that once worked right again
+#                                         without copying CrossOver: quit CrossOver
+#                                         cleanly, replace any fix file that is missing
+#                                         or stale in the copy and re-sign it, set the
+#                                         bottle up again (settings, overrides, hosts,
+#                                         menu entries, the WebView2 runtime), have the
+#                                         game's loader write a fresh licence file, then
+#                                         --verify. "Fix my installation.command" is this
 #   ./setup.sh --offline-menu             (re)add the FIFA 17 (offline) entry to the
 #                                         bottle, e.g. after moving the game folder
 #   ./setup.sh --offline                  install FIFA 17 with no Aurora17 at all:
@@ -104,6 +116,7 @@ case "${1:-}" in
     --play-log) MODE=play-log; shift ;;
     --reseed-licence|--reseed-license) MODE=reseed-licence; shift ;;
     --offline-menu) MODE=offline-menu; shift ;;
+    --repair) MODE=repair; shift ;;
     --ensure-licence|--ensure-license) MODE=ensure-licence; shift ;;
     --fifa15)
         # One command for FIFA 15. The same as AURORA_GAME=fifa15 with the
@@ -192,23 +205,31 @@ APP_MGMT_HINT='         Usually macOS refusing the write. To fix:
 
 # Both profiles install the complete shared Wine payload, so reinstalling
 # FIFA 17 cannot remove the gdiplus fix needed by Aurora15Connector.
+# ole32.dll is for the RebornFUT launcher (3.1.45 and later, a WebView2 app):
+# it revokes drag-and-drop on a window the browser process owns, and Wine's
+# RevokeDragDrop dereferenced that process's pointer. See patches/README.
 FILES=(
   x86_64-unix/ntdll.so
   x86_64-unix/winecoreaudio.so
   x86_64-unix/crypt32.so
+  # The RebornFUT launcher's second crash: CrossOver flushes a cross-process
+  # child window's surface while holding the USER lock, and the WebView2
+  # browser process aborts on "BUG: holding USER lock". See patches/README.
+  x86_64-unix/win32u.so
   x86_64-windows/version.dll
   x86_64-windows/crypt32.dll
   x86_64-windows/secur32.dll
   x86_64-windows/gdiplus.dll
+  x86_64-windows/ole32.dll
 )
 # One more file, added rather than replaced, so it is not in FILES: the thing
 # that makes name resolution work without touching /etc/hosts. See below.
 RESOLVER=x86_64-unix/a17hosts.dylib
 
 # The Mach-O files that have to be signed after we have touched them. The first
-# three are ours; a17hosts.dylib is new; ws2_32.so is CrossOver's own, edited in
+# four are ours; a17hosts.dylib is new; ws2_32.so is CrossOver's own, edited in
 # place by step 4 and therefore no longer covered by CodeWeavers' signature.
-MACHO=( ntdll.so winecoreaudio.so crypt32.so a17hosts.dylib ws2_32.so )
+MACHO=( ntdll.so winecoreaudio.so crypt32.so win32u.so a17hosts.dylib ws2_32.so )
 
 # FIFA 17 talks to EA's servers by name. Aurora17 answers those names locally, so
 # they have to resolve to this machine -- otherwise the game reaches the real EA
@@ -475,6 +496,33 @@ BOTTLE_DIR="${CX_BOTTLE_PATH:-$HOME/Library/Application Support/CrossOver/Bottle
 # its bottle profile does -- and differs only in the bottle settings and in
 # skipping the Aurora17-only steps. See SETUP.md, "FIFA 15".
 GAME="${AURORA_GAME:-fifa17}"
+
+# ------------------------------- the browser runtime the RebornFUT launcher needs
+# RebornFUT 3.1.45 and later are Tauri apps: the launcher's window is Microsoft
+# Edge WebView2. Every WebView2 runtime from version 100 on presents its frames
+# through a DirectX/DirectComposition path Wine cannot drive, so the window
+# opened and stayed blank. Runtimes up to 99 draw through plain GDI, which
+# CrossOver's cross-process window hack handles, and the launcher then renders
+# completely.
+#
+# So the bottle gets its own copy of Microsoft's fixed-version runtime
+# 99.0.1150.52, and WEBVIEW2_BROWSER_EXECUTABLE_FOLDER -- a variable the
+# official WebView2 loader honours -- points the launcher at it. The evergreen
+# runtime the launcher installs for itself is left exactly where it is and is
+# simply not used.
+#
+# The cabinet comes from a community archive of Microsoft's own fixed-version
+# cabinets, because Microsoft keeps only the last two versions on its own page.
+# It is checked against the hash below before anything is done with it.
+#   WEBVIEW2_CAB=/path/to/file.cab   use a copy already on this Mac
+#   WEBVIEW2_RUNTIME=skip            leave the runtime and the variable out
+WEBVIEW2_VERSION=99.0.1150.52
+WEBVIEW2_CAB_NAME="Microsoft.WebView2.FixedVersionRuntime.$WEBVIEW2_VERSION.x64"
+WEBVIEW2_URL="https://github.com/westinyang/WebView2RuntimeArchive/releases/download/$WEBVIEW2_VERSION/$WEBVIEW2_CAB_NAME.cab"
+WEBVIEW2_SHA256=b43a87ae6a039daaf96a8a3766a11c317a90c1ffe973bb19087374528d611544
+# Single quotes: this is a Windows path, and the backslashes are the path's own.
+WEBVIEW2_WIN_DIR='C:\webview2-fixed\99.0.1150.52'
+
 case "$GAME" in
     fifa17|fifa15) ;;
     *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17 or fifa15)"; exit $E_UNSUPPORTED ;;
@@ -487,7 +535,7 @@ if [ "$GAME" = fifa15 ]; then
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" "CX_TOPDOWN_LIMIT=0x1ffffffff" )
     GAME_LABEL="FIFA 15"
     case "$MODE" in
-        smoke|report|bundle|play-log|play-offline|offline-menu|ensure-licence|reseed-licence) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for FIFA 15 yet."
+        smoke|report|bundle|play-log|play-offline|offline-menu|ensure-licence|reseed-licence|repair) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for FIFA 15 yet."
                       print -r -- "Use  ./setup.sh --fifa15 --verify  instead."
                       exit $E_UNSUPPORTED ;;
     esac
@@ -495,6 +543,11 @@ if [ "$GAME" = fifa15 ]; then
 else
     BOTTLE="${AURORA_BOTTLE:-${FIFA17_BOTTLE:-Aurora17}}"
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
+    # FIFA 17 only -- FIFA 15 has no RebornFUT. Left out entirely when the
+    # runtime is skipped: a variable pointing at a folder that is not there
+    # leaves the launcher worse off than no variable at all.
+    [ "${WEBVIEW2_RUNTIME:-}" = skip ] \
+        || BOTTLE_SETTINGS+=( "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=$WEBVIEW2_WIN_DIR" )
     GAME_LABEL="FIFA 17"
 fi
 
@@ -2106,7 +2159,7 @@ verify_install() {
                 || { bad "${f:t} is not the fixed version"; problems=$((problems+1)); }
             ;;
         *.so)
-            # These three are modified after installation -- an rpath is added
+            # These four are modified after installation -- an rpath is added
             # and they are signed ad-hoc -- so their bytes no longer match the
             # shipped file. LC_UUID survives both, so it is what identifies them.
             if [ "$(macho_uuid "$wine/$f")" = "$(macho_uuid "$HERE/fixes/$f")" ]; then
@@ -2119,7 +2172,7 @@ verify_install() {
     done
 
     local so
-    for so in ntdll.so crypt32.so; do
+    for so in ntdll.so crypt32.so win32u.so; do
         has_lib64_rpath "$wine/x86_64-unix/$so" \
             && ok "$so search path" \
             || { bad "$so is missing its library search path"; problems=$((problems+1)); }
@@ -2154,7 +2207,10 @@ verify_install() {
     if [ -f "$conf" ]; then
         for kv in $BOTTLE_SETTINGS; do
             k="${kv%%=*}"; v="${kv#*=}"
-            grep -q "^\"$k\" = \"$v\"\$" "$conf" \
+            # -Fx, not a regexp: WEBVIEW2_BROWSER_EXECUTABLE_FOLDER's value is a
+            # Windows path, and "\9" in a regexp is a back-reference to a group
+            # that does not exist, which grep rejects outright.
+            grep -Fqx -- "\"$k\" = \"$v\"" "$conf" \
                 && ok "$k" \
                 || { bad "$k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1)); }
         done
@@ -2168,7 +2224,7 @@ verify_install() {
                           | sed -n 's/^"\([A-Za-z_][A-Za-z0-9_]*\)" = .*/\1/p')"}; do
             [ -n "$fk" ] || continue
             case "$fk" in
-                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|WINE_COREAUDIO_EXCLUDE|PROMPT) ;;
+                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|WINE_COREAUDIO_EXCLUDE|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|PROMPT) ;;
                 *) foreign+=( "$fk" ) ;;
             esac
         done
@@ -2181,6 +2237,20 @@ verify_install() {
     else
         bad "no bottle called '$BOTTLE' at $BOTTLE_DIR"
         problems=$((problems+1))
+    fi
+
+    # The folder the variable above points at. The variable on its own is worth
+    # nothing: the WebView2 loader falls back to the evergreen runtime, and the
+    # launcher's window is blank again.
+    if [ "$GAME" != fifa15 ] && [ "${WEBVIEW2_RUNTIME:-}" != skip ]; then
+        local wv="$BOTTLE_DIR/$BOTTLE/drive_c/webview2-fixed/$WEBVIEW2_VERSION"
+        if [ -f "$wv/msedgewebview2.exe" ] && [ -f "$wv/$WEBVIEW2_VERSION.manifest" ]; then
+            ok "WebView2 $WEBVIEW2_VERSION in the $BOTTLE bottle"
+        else
+            bad "the WebView2 $WEBVIEW2_VERSION runtime is not in the $BOTTLE bottle — the"
+            say "        RebornFUT launcher's window will be blank. Run ./setup.sh --bottle"
+            problems=$((problems+1))
+        fi
     fi
 
     # A live session means everything below is being read from a file Wine is
@@ -3330,6 +3400,98 @@ bundle_mode() {
     return 0
 }
 
+# ------------------------- the fixed-version WebView2 runtime, into the bottle
+# See the WEBVIEW2_* block near the top for why 99.0.1150.52 and not the
+# runtime the launcher installs for itself.
+#
+# Never a stop, except for a cabinet that does not match its hash. Without the
+# runtime the launcher's window is blank, which is exactly where it was before
+# this step existed, and nothing else in the bottle is affected.
+#
+# Extraction is Wine's own cabarc.exe: no Homebrew tool is needed, it takes
+# about two seconds, and the tree it produces is byte-identical to 7-Zip's. It
+# only reads Windows paths, so the cabinet is put inside the bottle first.
+# The CrossOver wine wrapper rewrites arguments that look like paths, so the
+# arguments below are the shape that survives it -- "-p X", never "-F:*".
+install_webview2_runtime() {
+    local app="$1"
+    local root="$BOTTLE_DIR/$BOTTLE/drive_c/webview2-fixed"
+    local dir="$root/$WEBVIEW2_VERSION"
+    local cab="$root/download.cab"
+    local extracted="$root/$WEBVIEW2_CAB_NAME"
+    local wine="$app/Contents/SharedSupport/CrossOver/bin/wine"
+    local got=""
+
+    if [ "${WEBVIEW2_RUNTIME:-}" = skip ]; then
+        note "skipped — WEBVIEW2_RUNTIME=skip was set"
+        say "        The RebornFUT launcher's window stays blank without it."
+        return 0
+    fi
+    # Idempotent: the download is 165 MB and the folder is 365 MB unpacked.
+    if [ -f "$dir/msedgewebview2.exe" ]; then
+        ok "WebView2 $WEBVIEW2_VERSION — already in the $BOTTLE bottle"
+        return 0
+    fi
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
+        note "no bottle called '$BOTTLE' yet, so there is nowhere to put it"
+        return 0
+    fi
+    if [ ! -x "$wine" ]; then
+        note "no wine in ${app:t} to unpack the cabinet with"
+        return 0
+    fi
+    mkdir -p "$root" || { note "could not make $root"; return 0; }
+
+    if [ -n "${WEBVIEW2_CAB:-}" ]; then
+        if [ ! -f "${WEBVIEW2_CAB:A}" ]; then
+            note "no cabinet at ${WEBVIEW2_CAB:A} (WEBVIEW2_CAB)"
+            say "        Unset WEBVIEW2_CAB to download it instead."
+            return 0
+        fi
+        cp "${WEBVIEW2_CAB:A}" "$cab" || { note "could not copy ${WEBVIEW2_CAB:A} into the bottle"; return 0; }
+        say "        from ${WEBVIEW2_CAB:A} — nothing downloaded"
+    else
+        say "        downloading 165 MB, once — this takes a minute"
+        if ! curl -fL --retry 2 -o "$cab" "$WEBVIEW2_URL"; then
+            rm -f "$cab"
+            note "could not download the runtime from"
+            say "        $WEBVIEW2_URL"
+            say "        The launcher's window stays blank until this succeeds. With no"
+            say "        internet here, fetch that file elsewhere and run:"
+            say "          WEBVIEW2_CAB=/path/to/the.cab ./setup.sh --bottle"
+            return 0
+        fi
+    fi
+
+    got="$(shasum -a 256 "$cab" | cut -d' ' -f1)"
+    if [ "$got" != "$WEBVIEW2_SHA256" ]; then
+        rm -f "$cab"
+        die $E_PAYLOAD "The WebView2 runtime cabinet is not the file it should be.
+             expected  $WEBVIEW2_SHA256
+             got       $got
+         It has been deleted, and nothing was unpacked from it. Either the
+         download was cut short, or that file is not Microsoft's. Run this
+         again to fetch it afresh."
+    fi
+
+    rm -rf "$extracted"
+    if ! "$wine" --bottle "$BOTTLE" --cx-app cabarc.exe \
+                 -p X 'C:\webview2-fixed\download.cab' 'C:\webview2-fixed\' >/dev/null 2>&1; then
+        note "cabarc could not unpack the cabinet in the $BOTTLE bottle"
+    fi
+    rm -f "$cab"
+    if [ ! -f "$extracted/msedgewebview2.exe" ]; then
+        rm -rf "$extracted"
+        note "the cabinet unpacked to nothing usable — the launcher's window stays blank"
+        say "        Quit CrossOver completely and run ./setup.sh --bottle again."
+        return 0
+    fi
+    mv -f "$extracted" "$dir" || { note "could not put the runtime at $dir"; return 0; }
+    ok "WebView2 $WEBVIEW2_VERSION unpacked into the $BOTTLE bottle"
+    say "        this is what makes the RebornFUT launcher's window draw at all"
+    return 0
+}
+
 # ------------------------------------------- the bottle, on its own
 # Steps 7 to 9 are everything that lives in the bottle rather than in the
 # CrossOver copy: the settings, the version override, the shortcuts, the
@@ -3362,7 +3524,9 @@ configure_bottle() {
         add_setting() {
             # A key that is present with the wrong value is not "already set". Left
             # alone it silently keeps the wrong graphics backend and the game hangs.
-            if grep -q "^\"$1\" = \"$2\"\$" "$CONF"; then
+            # -Fx, not a regexp: see the same grep in verify_install. A value
+            # with a backslash in it is a Windows path, not a pattern.
+            if grep -Fqx -- "\"$1\" = \"$2\"" "$CONF"; then
                 ok "$1 — already set"
             elif grep -q "^\"$1\" = " "$CONF"; then
                 die $E_INCOMPLETE "$1 is set to something else in
@@ -3551,6 +3715,9 @@ configure_bottle() {
             say "        for you. Start FIFA 17 once from CrossOver, let it reach the"
             say "        menu, then run this again to check."
         fi
+        say ""
+        say "9b. Installing the browser runtime the RebornFUT launcher needs"
+        install_webview2_runtime "$APP"
         install_offline_menu "$APP" || true
         return 0
     fi
@@ -3670,6 +3837,14 @@ configure_bottle() {
     else
         note "without it the first PLAY seeds it, which takes a few seconds longer"
     fi
+
+    # ------------------------------------------- 9b. the launcher's browser
+    # See install_webview2_runtime. Last, because it is the only step here that
+    # can want the internet, and everything the game itself needs is already in
+    # by the time it runs.
+    say ""
+    say "9b. Installing the browser runtime the RebornFUT launcher needs"
+    install_webview2_runtime "$APP"
 }
 
 # ------------------------------------------------- the launch that is watched
@@ -4050,6 +4225,27 @@ end_own_wine_session() {
         shutdown_wineservers
         ok "ended the Wine session this script started, so CrossOver opens the bottle fresh"
     fi
+}
+
+# What has to be true of the Mac itself before anything is written into a
+# CrossOver copy. Said once, here, so the install and --repair cannot disagree.
+# Sets OSVER for the messages that quote it.
+require_supported_mac() {
+    case "$(uname -s)" in
+        Darwin) ;;
+        *) die $E_UNSUPPORTED "These fixes are for macOS. There is nothing to run here." ;;
+    esac
+    [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ] \
+        || die $E_UNSUPPORTED "These fixes are for Apple silicon Macs (M1 or newer).
+         The replacement files are built for that and nothing else, so there
+         is nothing to do on this Mac."
+    OSVER="$(sw_vers -productVersion)"
+    case "$OSVER" in
+        1[0-3].*|[0-9].*) die $E_UNSUPPORTED "These fixes need macOS 14 or newer. You have $OSVER.
+         Update macOS (System Settings > General > Software Update), then
+         run this again." ;;
+    esac
+    ok "macOS $OSVER on Apple silicon"
 }
 
 # One installer at a time. Two at once -- a .command double-clicked twice --
@@ -4675,6 +4871,211 @@ if [ "$MODE" = verify ]; then
     exit 0
 fi
 
+# Replaces whatever in a CrossOver-FIFA copy is not the shipped fix, then
+# redoes the search path and the signature. The full installer does the same
+# three steps on a fresh 1 GB copy; this does them on the copy that is there,
+# which is what an update needs: the launcher fixes (ole32.dll, win32u.so)
+# were added in September 2026, and an install from before has neither, and
+# until now only the full re-copy could put them in. The order is the one
+# --resign refuses on purpose: files first, signature last, so the signature
+# can never bless the wrong file.
+refresh_fixes() {
+    local app="$1" wine="$1/Contents/SharedSupport/CrossOver/lib/wine" f so mode="" RPATH_ERR
+    local -a stale
+    stale=()
+    if ! ( cd "$HERE/fixes" && shasum -a 256 -c SHA256SUMS ) >/dev/null 2>&1; then
+        die $E_PAYLOAD "fixes/ does not match its own checksums.
+         This copy of the package is damaged, so there is nothing safe to
+         install from it. Download it again."
+    fi
+    # Missing, or not the shipped file. The .dll files are installed unchanged
+    # and compare byte for byte; the .so files are rpath-edited and signed after
+    # installation, so LC_UUID identifies them (see verify_install).
+    for f in $FILES; do
+        if [ ! -f "$wine/$f" ]; then stale+=( "$f" ); continue; fi
+        case "$f" in
+        *.dll) cmp -s "$HERE/fixes/$f" "$wine/$f" || stale+=( "$f" ) ;;
+        *.so)  [ "$(macho_uuid "$wine/$f")" = "$(macho_uuid "$HERE/fixes/$f")" ] || stale+=( "$f" ) ;;
+        esac
+    done
+    # An in-place install (AURORA_IN_PLACE=1) keeps CrossOver's own file as
+    # .orig so uninstall can put it back. A file replaced here for the first
+    # time needs that backup too, or uninstall would have nothing to restore.
+    [ -f "$RECEIPT" ] && mode="$(sed -n 's/^mode=//p' "$RECEIPT" 2>/dev/null | head -1)"
+    for f in $stale; do
+        if [ "$mode" = in-place ] && [ -f "$wine/$f" ] && [ ! -f "$wine/$f.orig" ]; then
+            cp "$wine/$f" "$wine/$f.orig" \
+                || die $E_PERMISSION "Could not back up $f.
+$APP_MGMT_HINT"
+        fi
+        cp -X "$HERE/fixes/$f" "$wine/$f" \
+            || die $E_PERMISSION "Could not install $f into $app.
+$APP_MGMT_HINT"
+        ok "${f:t} — replaced"
+    done
+    if [ "${#stale}" -eq 0 ]; then
+        ok "all ${#FILES} fix files are the shipped versions"
+    fi
+    # The resolver and the ws2_32.so edit, as the installer and --resign do them.
+    if [ ! -f "$wine/$RESOLVER" ] || ! cmp -s "$HERE/fixes/$RESOLVER" "$wine/$RESOLVER"; then
+        cp -X "$HERE/fixes/$RESOLVER" "$wine/$RESOLVER" \
+            || die $E_PERMISSION "Could not install ${RESOLVER:t} into $app.
+$APP_MGMT_HINT"
+        stale+=( "$RESOLVER" )
+        ok "${RESOLVER:t} — replaced"
+    else
+        ok "${RESOLVER:t}"
+    fi
+    if ws2_32_is_patched "$wine"; then
+        ok "ws2_32.so — reads the bottle's hosts file"
+    else
+        install_name_tool -change "$LIBSYSTEM" "$RESOLVER_PATH" "$wine/x86_64-unix/ws2_32.so" 2>/dev/null \
+            || die $E_PERMISSION "Could not point ws2_32.so at ${RESOLVER:t}.
+$APP_MGMT_HINT"
+        ws2_32_is_patched "$wine" \
+            || die $E_PAYLOAD "ws2_32.so did not take the change. Nothing will
+         resolve to Aurora17 and the game will not connect."
+        stale+=( x86_64-unix/ws2_32.so )
+        ok "ws2_32.so — now reads the bottle's hosts file"
+    fi
+    # The search path: a freshly copied .so has lost it (step 5 of the install).
+    for so in ntdll.so crypt32.so win32u.so; do
+        if has_lib64_rpath "$wine/x86_64-unix/$so"; then
+            ok "$so search path"
+        elif RPATH_ERR="$(install_name_tool -add_rpath "$RPATH_LIB64" "$wine/x86_64-unix/$so" 2>&1)"; then
+            stale+=( "x86_64-unix/$so" )
+            ok "$so search path — added"
+        elif print -r -- "$RPATH_ERR" | grep -q 'would duplicate path'; then
+            ok "$so search path"
+        else
+            print -r -- "$RPATH_ERR"
+            die $E_PERMISSION "Could not repair the search path in $so.
+$APP_MGMT_HINT"
+        fi
+    done
+    # Signing is redone when anything above changed, or when the signature does
+    # not verify as it is (macOS says the app is damaged). A copy that is right
+    # and signed is left alone: signing is the step that needs App Management.
+    if [ "${#stale}" -ne 0 ] || ! codesign --verify --deep --strict "$app" 2>/dev/null; then
+        sign_payload "$wine"
+        resign_app "$app"
+    else
+        ok "signature verifies, so it was left as it is"
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------- --repair
+# Puts an install that once worked right again, on this Mac or on one the
+# folder was carried to, without copying CrossOver again. It is the repairs
+# this script already has, in the order they depend on each other:
+#
+#   1. --shutdown     games and Aurora first, then every wineserver, then the
+#                     CrossOver GUI. A session that is still up keeps serving
+#                     the DLLs it loaded and writes the registry back on exit,
+#                     so nothing below is safe while one is running.
+#   2. the copy       refresh_fixes: every fix file that is missing from the
+#                     CrossOver-FIFA copy or is not the shipped one is replaced,
+#                     the search path and the signature are redone.
+#   3. --bottle       settings, the version and C runtime overrides, hosts, the
+#                     menu entries, the PowerShell stand-in, a licence file if
+#                     there is none, and the WebView2 runtime the RebornFUT
+#                     launcher's window needs (a 165 MB download, once).
+#   4. the licence    the game's own loader writes a fresh one over whatever
+#                     is there. A file that exists but is wrong passes every
+#                     other check while the game relaunches itself with no
+#                     window until it quits (SETUP.md, 0xFFFFFFFA) -- and the
+#                     RebornFUT launcher only says "running" while that happens.
+#                     Then --unstick, because the loader's session leaves
+#                     orphans in the bottle that would fail the check below.
+#   5. --verify       the same check as always, so the last word is the one
+#                     people already know how to read.
+#
+# Steps 1, 3 and 5 are this script run again with that flag, so their checks,
+# messages and exit codes are exactly the ones documented for each. This
+# process holds the installer lock only while it edits the copy itself.
+if [ "$MODE" = repair ]; then
+    if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
+       && [ -d "$HOME/Applications/${TARGET:t}" ]; then
+        TARGET="$HOME/Applications/${TARGET:t}"
+    fi
+    say ""
+    say "Fixing the FIFA 17 install"
+    say ""
+    require_supported_mac
+    [ -d "$TARGET" ] || die $E_PAYLOAD "No patched CrossOver at $TARGET, so there is nothing to fix yet.
+         Run ./setup.sh (or double-click 'START HERE.command') to install.
+         If the copy is somewhere else:
+             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --repair"
+    is_crossover_bundle "$TARGET" \
+        || die $E_PAYLOAD "$TARGET is not a CrossOver bundle. Refusing to touch it.
+         If the copy is somewhere else:
+             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --repair"
+    REPAIR_VER="$(crossover_version "$TARGET")"
+    [ "$REPAIR_VER" = "26.3" ] || die $E_PAYLOAD "These fixes are built for CrossOver 26.3 exactly; ${TARGET:t} is $REPAIR_VER.
+         Putting 26.3 files into it would not work. Install CrossOver 26.3 and
+         run ./setup.sh again, or rebuild the files: see patches/README."
+    require_clt
+    ok "CrossOver $REPAIR_VER at $TARGET"
+    # The steps run as their own ./setup.sh see the same copy and bottle.
+    export AURORA_TARGET="$TARGET" AURORA_BOTTLE="$BOTTLE"
+
+    say ""
+    say "1 of 5. Quitting CrossOver cleanly"
+    "$HERE/setup.sh" --shutdown || exit $?
+
+    say ""
+    say "2 of 5. The fix files in ${TARGET:t}"
+    take_setup_lock
+    refresh_fixes "$TARGET"
+    rm -rf "$SETUP_LOCK" 2>/dev/null || true
+    zshexit() { :; }
+
+    say ""
+    say "3 of 5. The $BOTTLE bottle"
+    REPAIR_HAD_LICENCE=0
+    [ -f "$(bottle_licence_file)" ] && REPAIR_HAD_LICENCE=1
+    "$HERE/setup.sh" --bottle || exit $?
+
+    say ""
+    say "4 of 5. The licence file"
+    if [ "$REPAIR_HAD_LICENCE" = 1 ]; then
+        if ! seed_bottle_licence "$TARGET" 1; then
+            note "the licence file could not be re-made; the check below says whether"
+            say "        the one that is there still counts"
+        fi
+    elif [ -f "$(bottle_licence_file)" ]; then
+        ok "written fresh by step 3, so there is nothing to replace"
+    else
+        note "step 3 could not write it (no FIFA 17 folder with _fifa17.exe was found)."
+        say "        The check below names it. AURORA_GAME_DIR='/path/to/FIFA 17'"
+        say "        tells this where the game is."
+    fi
+    # The loader run leaves a Wine session behind: its wineserver goes when
+    # asked, but services.exe, rpcss.exe, explorer.exe and friends outlive it
+    # as orphans inside the bottle, and --verify (rightly) calls a bottle with
+    # orphans in it BAD. --unstick is the documented cure, and with CrossOver
+    # already quit by step 1 it clears exactly those and nothing else.
+    say ""
+    say "        clearing the session the loader left behind"
+    "$HERE/setup.sh" --unstick >/dev/null 2>&1 || "$HERE/setup.sh" --unstick || exit $?
+
+    say ""
+    say "5 of 5. Checking"
+    if "$HERE/setup.sh" --verify; then
+        say ""
+        green "Fixed. Open ${TARGET:t:r}, then the $BOTTLE bottle, and press PLAY."
+        say ""
+        exit 0
+    fi
+    say ""
+    red "NOT FIXED — the check above names what is still wrong."
+    say "If it is something this cannot change (a game folder that moved, a"
+    say "bottle that does not exist), put that right and run this again."
+    say ""
+    exit $E_INCOMPLETE
+fi
+
 # ------------------------------------------------------- --resign, and stop
 # Repairs the signature on a CrossOver-FIFA that already exists. Signing is the
 # one step that can leave the app unable to open at all, and re-copying a
@@ -4774,21 +5175,7 @@ say ""
 say "1. Checking"
 take_setup_lock
 
-case "$(uname -s)" in
-    Darwin) ;;
-    *) die $E_UNSUPPORTED "These fixes are for macOS. There is nothing to run here." ;;
-esac
-[ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ] \
-    || die $E_UNSUPPORTED "These fixes are for Apple silicon Macs (M1 or newer).
-         The replacement files are built for that and nothing else, so there
-         is nothing to do on this Mac."
-OSVER="$(sw_vers -productVersion)"
-case "$OSVER" in
-    1[0-3].*|[0-9].*) die $E_UNSUPPORTED "These fixes need macOS 14 or newer. You have $OSVER.
-         Update macOS (System Settings > General > Software Update), then
-         run this again." ;;
-esac
-ok "macOS $OSVER on Apple silicon"
+require_supported_mac
 require_clt
 
 [ -d "$SRC" ] || die $E_PAYLOAD "No CrossOver at $SRC.
@@ -4821,7 +5208,7 @@ done
 ok "all ${#FILES} replacement files present in CrossOver, and the ws2_32.so we edit"
 
 # Keeping CrossOver's own permissions is the one step with nothing to fall back
-# on, and it runs at the very end -- after 2 GB has been copied and seven files
+# on, and it runs at the very end -- after 2 GB has been copied and nine files
 # replaced. Read them from the original now, while nothing has happened yet, so
 # a CrossOver that cannot supply them stops here instead of there.
 PRE_ENT="$(mktemp -t cxpre)"
@@ -4985,7 +5372,7 @@ say ""
 if [ "$IN_PLACE" = "1" ]; then
     say "2. Using your real CrossOver (AURORA_IN_PLACE=1)"
     say "        This changes every bottle you run in CrossOver, not just FIFA."
-    say "        ./uninstall.sh puts the seven files back, but it cannot restore"
+    say "        ./uninstall.sh puts the nine files back, but it cannot restore"
     say "        CodeWeavers' own signature -- only reinstalling CrossOver does."
 else
     say "2. Making a separate CrossOver for FIFA"
@@ -5029,8 +5416,8 @@ rm -f "$PROBE"
 
 # ------------------------------------------------------------- 3. backup
 # Only in-place installs can ever use these. The default install is undone by
-# deleting the whole copy, so writing .orig files into it would be six pointless
-# writes and six more things to go wrong.
+# deleting the whole copy, so writing .orig files into it would be nine pointless
+# writes and nine more things to go wrong.
 say ""
 if [ "$IN_PLACE" = "1" ]; then
     say "3. Backing up the files we replace"
@@ -5085,13 +5472,14 @@ $APP_MGMT_HINT"
 fi
 
 # ------------------------------------------------- 5. the search path fix
-# Both rebuilt .so files lose it, and both need it: ntdll.so to find its sibling
-# libraries, crypt32.so to find the gnutls CrossOver already ships in lib64.
+# All three rebuilt .so files lose it, and all three need it: ntdll.so to find
+# its sibling libraries, crypt32.so to find the gnutls CrossOver already ships
+# in lib64, win32u.so to find libMoltenVK.dylib and libfreetype.dylib there.
 # Without it CrossOver silently falls back to a graphics path that does not work
 # on macOS, and the game hangs on the loading screen forever.
 say ""
 say "5. Repairing the library search path"
-for so in ntdll.so crypt32.so; do
+for so in ntdll.so crypt32.so win32u.so; do
     if has_lib64_rpath "$WINE/x86_64-unix/$so"; then
         ok "$so — already present"
     else

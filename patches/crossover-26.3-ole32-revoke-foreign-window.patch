@@ -1,0 +1,31 @@
+--- a/dlls/ole32/ole2.c
++++ b/dlls/ole32/ole2.c
+@@ -618,6 +618,7 @@
+  */
+ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+ {
++  DWORD pid = 0;
+   HANDLE map;
+   IStream *stream;
+   IDropTarget *drop_target;
+@@ -631,6 +632,20 @@
+     return DRAGDROP_E_INVALIDHWND;
+   }
+ 
++  /* RegisterDragDrop above refuses another process's window. Refuse it here
++   * too: both props on such a window were written by that process, so the
++   * IDropTarget pointer is an address in its memory (dereferencing it is a
++   * page fault) and the map handle is a number in its handle table (closing
++   * it would close whatever we hold under that number). WebView2 hosts built
++   * on wry enumerate their child windows and revoke each one, which reaches
++   * the Chromium browser process's own registration. */
++  GetWindowThreadProcessId(hwnd, &pid);
++  if (pid != GetCurrentProcessId())
++  {
++    WARN("hwnd %p belongs to another process, not revoking\n", hwnd);
++    return DRAGDROP_E_INVALIDHWND;
++  }
++
+   /* no registration data */
+   if (!(map = get_droptarget_handle(hwnd)))
+     return DRAGDROP_E_NOTREGISTERED;

@@ -3,6 +3,7 @@
 Installer entry points are exercised only with arguments that must exit before
 side effects. Diagnostics run with stubbed reporting in a temporary directory.
 """
+import hashlib
 import os
 import json
 from pathlib import Path
@@ -32,6 +33,9 @@ class ScriptTests(unittest.TestCase):
             ("setup.sh", ["one.app", "two.app"], 2),
             ("setup.sh", ["--fifa15", "--unknown"], 2),
             ("setup.sh", ["--fifa15", "one.app", "two.app"], 2),
+            ("setup.sh", ["--repair", "--offline"], 2),
+            ("setup.sh", ["--fifa15", "--repair"], 2),
+            ("setup-both.sh", ["--repair", "extra"], 2),
             ("setup-both.sh", ["--help"], 0),
             ("setup-both.sh", ["--unknown"], 2),
             ("setup-both.sh", ["--verify", "--offline"], 2),
@@ -197,6 +201,14 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
                 self.assertIn(setting, lines)
                 self.assertFalse(any(line.startswith(excluded) for line in lines))
                 self.assertIn("x86_64-windows/gdiplus.dll", lines)
+                self.assertIn("x86_64-windows/ole32.dll", lines)
+                self.assertIn("x86_64-unix/win32u.so", lines)
+                # The WebView2 pin is FIFA 17's: FIFA 15 has no RebornFUT.
+                pin = r"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=C:\webview2-fixed\99.0.1150.52"
+                if game == "fifa17":
+                    self.assertIn(pin, lines)
+                else:
+                    self.assertFalse(any(line.startswith("WEBVIEW2_") for line in lines))
 
     def test_single_profile_refuses_other_games_bottle(self):
         for game, other, setting in [("fifa15", "Aurora17", "CX_DR_TRAP"),
@@ -216,13 +228,107 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
                     self.assertEqual(conf.read_text(), contents)
 
     def test_fifa15_refuses_fifa17_only_actions(self):
-        for action in ("--offline", "--play-offline", "--play-log", "--reseed-licence", "--bundle"):
+        for action in ("--offline", "--play-offline", "--play-log", "--reseed-licence", "--bundle",
+                       "--repair"):
             with self.subTest(action=action):
                 result = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), action],
                                         env={**self.env, "AURORA_GAME": "fifa15"},
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("FIFA 17", result.stdout)
+
+
+def function_source(name):
+    """One shell function out of setup.sh, for running against stubs."""
+    source = (ROOT / "setup.sh").read_text()
+    body = source.split(name + "() {", 1)[1].split("\n}\n", 1)[0]
+    return name + "() {" + body + "\n}\n"
+
+
+class RepairTests(unittest.TestCase):
+    """--repair is wired end to end, and refresh_fixes replaces exactly what is
+    stale and signs only when it has to. The repair itself is never run here:
+    it quits CrossOver and rewrites an app."""
+
+    def test_fix_my_installation_is_wired(self):
+        for command in ("Fix my installation.command",
+                        "diagnostics/15 Fix my installation.command"):
+            self.assertIn("_action.zsh --repair", (ROOT / command).read_text())
+        self.assertIn("--repair)", (ROOT / "diagnostics" / "_action.zsh").read_text())
+        setup = (ROOT / "setup.sh").read_text()
+        self.assertIn("--repair) MODE=repair", setup)
+        self.assertIn('if [ "$MODE" = repair ]; then', setup)
+        for doc in ("README.md", "SETUP.md", "diagnostics/README.md"):
+            self.assertIn("Fix my installation.command", (ROOT / doc).read_text(), doc)
+
+    def refresh(self, stale_dll, signature_ok):
+        with tempfile.TemporaryDirectory(prefix="a17-refresh-") as directory:
+            work = Path(directory)
+            fixes = work / "fixes"
+            (fixes / "x86_64-unix").mkdir(parents=True)
+            (fixes / "x86_64-windows").mkdir()
+            shipped = {
+                "x86_64-windows/version.dll": b"fixed version.dll",
+                "x86_64-unix/ntdll.so": b"fixed ntdll.so",
+                "x86_64-unix/a17hosts.dylib": b"resolver",
+            }
+            sums = []
+            for rel, data in shipped.items():
+                (fixes / rel).write_bytes(data)
+                sums.append(hashlib.sha256(data).hexdigest() + "  " + rel)
+            (fixes / "SHA256SUMS").write_text("\n".join(sums) + "\n")
+            wine = work / "App.app/Contents/SharedSupport/CrossOver/lib/wine"
+            (wine / "x86_64-unix").mkdir(parents=True)
+            (wine / "x86_64-windows").mkdir()
+            (wine / "x86_64-windows/version.dll").write_bytes(
+                b"stock version.dll" if stale_dll else shipped["x86_64-windows/version.dll"])
+            (wine / "x86_64-unix/ntdll.so").write_bytes(shipped["x86_64-unix/ntdll.so"])
+            (wine / "x86_64-unix/a17hosts.dylib").write_bytes(shipped["x86_64-unix/a17hosts.dylib"])
+            (wine / "x86_64-unix/ws2_32.so").write_bytes(b"ws2_32")
+            harness = r"""
+set -eu
+HERE="$PWD"
+FILES=( x86_64-windows/version.dll x86_64-unix/ntdll.so )
+RESOLVER=x86_64-unix/a17hosts.dylib
+RECEIPT="$PWD/no-receipt"
+E_PAYLOAD=4; E_PERMISSION=3
+APP_MGMT_HINT=hint
+LIBSYSTEM=/usr/lib/libSystem.B.dylib
+RESOLVER_PATH=@rpath/a17hosts.dylib
+RPATH_LIB64=@loader_path/../../../lib64
+ok() { print -r -- "ok $*"; }
+die() { print -r -- "die $*"; exit "$1"; }
+macho_uuid() { shasum "$1" | cut -c1-16; }
+ws2_32_is_patched() { return 0; }
+has_lib64_rpath() { return 0; }
+sign_payload() { print -r -- "SIGNED payload $1"; }
+resign_app() { print -r -- "SIGNED app $1"; }
+"""
+            harness += "codesign() { return %d; }\n" % (0 if signature_ok else 1)
+            harness += function_source("refresh_fixes")
+            harness += '\nrefresh_fixes "$PWD/App.app"\n'
+            result = subprocess.run(["/bin/zsh", "-c", harness], cwd=work,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            installed = (wine / "x86_64-windows/version.dll").read_bytes()
+            return result.stdout, installed
+
+    def test_refresh_replaces_a_stale_file_and_signs(self):
+        out, installed = self.refresh(stale_dll=True, signature_ok=True)
+        self.assertEqual(installed, b"fixed version.dll")
+        self.assertIn("version.dll — replaced", out)
+        self.assertIn("SIGNED app", out)
+
+    def test_refresh_leaves_a_right_signed_copy_alone(self):
+        out, installed = self.refresh(stale_dll=False, signature_ok=True)
+        self.assertEqual(installed, b"fixed version.dll")
+        self.assertNotIn("SIGNED", out)
+        self.assertIn("left as it is", out)
+
+    def test_refresh_resigns_a_copy_macos_calls_damaged(self):
+        out, _ = self.refresh(stale_dll=False, signature_ok=False)
+        self.assertIn("all 2 fix files are the shipped versions", out)
+        self.assertIn("SIGNED app", out)
 
 
 class ProcessScopeTests(unittest.TestCase):
@@ -635,6 +741,306 @@ class CrtOverrideTests(unittest.TestCase):
         source = self.source()
         self.assertIn('if [ "$GAME" = fifa15 ]; then\n            f15_ensure_crt_dlls "$APP"',
                       source)
+
+
+class WebView2RuntimeTests(unittest.TestCase):
+    """The RebornFUT launcher is a WebView2 app from 3.1.45 on, and every
+    WebView2 runtime from version 100 presents its frames through a
+    DirectComposition path Wine cannot drive: the window opened and stayed
+    blank. setup.sh puts Microsoft's fixed-version runtime 99.0.1150.52 in the
+    bottle -- runtime 99 still draws through plain GDI -- and points the
+    launcher at it with one bottle setting."""
+
+    VERSION = "99.0.1150.52"
+    CAB_NAME = "Microsoft.WebView2.FixedVersionRuntime.99.0.1150.52.x64"
+    URL = ("https://github.com/westinyang/WebView2RuntimeArchive/releases/download/"
+           "99.0.1150.52/Microsoft.WebView2.FixedVersionRuntime.99.0.1150.52.x64.cab")
+    SHA256 = "b43a87ae6a039daaf96a8a3766a11c317a90c1ffe973bb19087374528d611544"
+    SETTING = "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+    WIN_DIR = r"C:\webview2-fixed\99.0.1150.52"
+
+    STUBS = ('problems=0\nE_PAYLOAD=4\n'
+             'ok() { print -r -- "OK $*"; }\n'
+             'bad() { print -r -- "BAD $*"; }\n'
+             'note() { print -r -- "NOTE $*"; }\n'
+             'say() { print -r -- "SAY $*"; }\n'
+             'die() { local code="$1"; shift; print -r -- "DIE $code $*"; exit "$code"; }\n')
+
+    @staticmethod
+    def source(script="setup.sh"):
+        return (ROOT / script).read_text()
+
+    @classmethod
+    def function(cls, name):
+        body = cls.source().split(name + "() {", 1)[1].split("\n}\n", 1)[0]
+        return name + "() {" + body + "\n}\n"
+
+    @classmethod
+    def add_setting(cls):
+        """The writer itself, lifted out of configure_bottle."""
+        body = cls.source().split("        add_setting() {", 1)[1].split("\n        }\n", 1)[0]
+        return "add_setting() {" + body + "\n}\n"
+
+    @classmethod
+    def block(cls, head, script="setup.sh"):
+        """One indented if-block, ending at its own `fi`."""
+        return head + cls.source(script).split(head, 1)[1].split("\n    fi\n", 1)[0] + "\n    fi\n"
+
+    def run_zsh(self, script, env=None):
+        return subprocess.run(["/bin/zsh", "-c", script], capture_output=True, text=True,
+                              timeout=30, env=env)
+
+    # ---------------------------------------------------------- what it fetches
+
+    def test_the_download_is_one_named_file_checked_against_one_hash(self):
+        source = self.source()
+        self.assertIn(self.URL.rsplit("/", 2)[0], source)
+        self.assertIn("WEBVIEW2_SHA256=" + self.SHA256, source)
+        self.assertIn('WEBVIEW2_CAB_NAME="Microsoft.WebView2.FixedVersionRuntime.'
+                      '$WEBVIEW2_VERSION.x64"', source)
+        self.assertIn("WEBVIEW2_VERSION=" + self.VERSION, source)
+        # The URL is assembled from the version, so it can never name one
+        # version and check another's hash.
+        self.assertIn("releases/download/$WEBVIEW2_VERSION/$WEBVIEW2_CAB_NAME.cab", source)
+        installer = self.function("install_webview2_runtime")
+        self.assertIn('curl -fL --retry 2 -o "$cab" "$WEBVIEW2_URL"', installer)
+        self.assertIn('shasum -a 256 "$cab"', installer)
+        # A cabinet that is not the published one is deleted, never unpacked.
+        before = installer.split('got="$(shasum', 1)[0]
+        self.assertNotIn("cabarc", before)
+        self.assertIn('rm -f "$cab"\n        die $E_PAYLOAD', installer)
+
+    def test_it_unpacks_with_wines_own_cabarc_in_the_shape_the_wrapper_survives(self):
+        installer = self.function("install_webview2_runtime")
+        self.assertIn("--cx-app cabarc.exe", installer)
+        self.assertIn(r"-p X 'C:\webview2-fixed\download.cab' 'C:\webview2-fixed\'", installer)
+        # -F:* is the argument the CrossOver wine wrapper mangles.
+        self.assertNotIn("-F:", installer)
+        # No Homebrew tool is needed, and none is reached for.
+        for tool in ("cabextract", "7z", "brew"):
+            self.assertNotIn(tool, installer)
+
+    # ------------------------------------------------------- the bottle setting
+
+    def test_the_setting_is_fifa_17s_and_skip_leaves_both_of_them_out(self):
+        source = self.source().split(
+            "# --------------------------------------------------------- safety guards", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            probe = Path(directory) / "profile.sh"
+            probe.write_text(source + '\nprint -rl -- $BOTTLE_SETTINGS\n')
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("AURORA_", "FIFA15_", "FIFA17_", "CX_", "WEBVIEW2_"))}
+            env["CX_BOTTLE_PATH"] = str(Path(directory) / "bottles")
+
+            on = self.run_zsh(f"/bin/zsh {shlex_quote(str(probe))} --verify", env=env)
+            self.assertEqual(on.returncode, 0, on.stdout + on.stderr)
+            self.assertIn(f"{self.SETTING}={self.WIN_DIR}", on.stdout.splitlines())
+
+            off = self.run_zsh(f"/bin/zsh {shlex_quote(str(probe))} --verify",
+                               env={**env, "WEBVIEW2_RUNTIME": "skip"})
+            self.assertEqual(off.returncode, 0, off.stdout + off.stderr)
+            self.assertFalse(any(line.startswith("WEBVIEW2_") for line in off.stdout.splitlines()))
+
+    def test_the_setting_is_written_with_the_backslashes_the_bottle_needs(self):
+        """The value is a Windows path. Written as a regexp, "\\9" in it is a
+        back-reference to a group that does not exist, and the check for "already
+        set" then failed every time -- appending the line again on every run."""
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            conf = Path(directory) / "cxbottle.conf"
+            conf.write_text("[EnvironmentVariables]\n")
+            harness = ("set -eu\nCONF=" + shlex_quote(str(conf)) + "\n" + self.STUBS
+                       + self.add_setting()
+                       + f"\nadd_setting {self.SETTING} '{self.WIN_DIR}'\n"
+                       + f"add_setting {self.SETTING} '{self.WIN_DIR}'\n")
+            result = self.run_zsh(harness)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(conf.read_text(),
+                             "[EnvironmentVariables]\n"
+                             f'"{self.SETTING}" = "{self.WIN_DIR}"\n')
+            self.assertIn("already set", result.stdout)
+
+    # ------------------------------------------------------ installing it
+
+    def bottle_tree(self, work):
+        bottles = work / "bottles"
+        (bottles / "Aurora17" / "drive_c").mkdir(parents=True, exist_ok=True)
+        return bottles
+
+    def fake_wine(self, work, root):
+        """A wine that does what cabarc does, and records what it was given."""
+        wine = work / "CrossOver-FIFA.app/Contents/SharedSupport/CrossOver/bin/wine"
+        wine.parent.mkdir(parents=True, exist_ok=True)
+        out = root / self.CAB_NAME
+        wine.write_text("#!/bin/zsh\n"
+                        f"print -rl -- \"$@\" > {shlex_quote(str(work / 'wine-args'))}\n"
+                        f"mkdir -p {shlex_quote(str(out))}\n"
+                        f"print -r -- MZ > {shlex_quote(str(out / 'msedgewebview2.exe'))}\n"
+                        f"print -r -- v > {shlex_quote(str(out / (self.VERSION + '.manifest')))}\n")
+        wine.chmod(0o755)
+        return work / "CrossOver-FIFA.app"
+
+    def installer_harness(self, bottles, sha, extra=""):
+        return ("set -eu\n"
+                "BOTTLE_DIR=" + shlex_quote(str(bottles)) + "\nBOTTLE=Aurora17\n"
+                f"WEBVIEW2_VERSION={self.VERSION}\n"
+                f"WEBVIEW2_CAB_NAME={self.CAB_NAME}\n"
+                "WEBVIEW2_URL=https://127.0.0.1:9/never-reached\n"
+                f"WEBVIEW2_SHA256={sha}\n"
+                + extra + self.STUBS + self.function("install_webview2_runtime"))
+
+    def test_it_unpacks_the_cabinet_and_leaves_the_folder_named_by_its_version(self):
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            work = Path(directory)
+            bottles = self.bottle_tree(work)
+            root = bottles / "Aurora17" / "drive_c" / "webview2-fixed"
+            app = self.fake_wine(work, root)
+            cab = work / "runtime.cab"
+            cab.write_bytes(b"MSCF not really a cabinet")
+            sha = hashlib.sha256(cab.read_bytes()).hexdigest()
+            result = self.run_zsh(self.installer_harness(bottles, sha)
+                                  + f"install_webview2_runtime {shlex_quote(str(app))}\n",
+                                  env={**os.environ, "WEBVIEW2_CAB": str(cab)})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"OK WebView2 {self.VERSION} unpacked", result.stdout)
+            self.assertTrue((root / self.VERSION / "msedgewebview2.exe").is_file())
+            self.assertTrue((root / self.VERSION / f"{self.VERSION}.manifest").is_file())
+            # The cabinet and the name it unpacked under are both gone.
+            self.assertEqual(sorted(p.name for p in root.iterdir()), [self.VERSION])
+            self.assertTrue(cab.is_file(), "the copy named by WEBVIEW2_CAB was moved, not copied")
+            args = (work / "wine-args").read_text().splitlines()
+            self.assertEqual(args, ["--bottle", "Aurora17", "--cx-app", "cabarc.exe", "-p", "X",
+                                    r"C:\webview2-fixed\download.cab", "C:" + "\\webview2-fixed" + "\\"])
+
+    def test_a_cabinet_that_is_not_the_published_one_is_deleted_and_stops_the_install(self):
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            work = Path(directory)
+            bottles = self.bottle_tree(work)
+            root = bottles / "Aurora17" / "drive_c" / "webview2-fixed"
+            app = self.fake_wine(work, root)
+            cab = work / "runtime.cab"
+            cab.write_bytes(b"somebody else's file")
+            result = self.run_zsh(self.installer_harness(bottles, self.SHA256)
+                                  + f"install_webview2_runtime {shlex_quote(str(app))}\n",
+                                  env={**os.environ, "WEBVIEW2_CAB": str(cab)})
+            self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+            self.assertIn("DIE 4", result.stdout)
+            self.assertIn(self.SHA256, result.stdout)
+            self.assertFalse((root / "download.cab").exists())
+            self.assertFalse((work / "wine-args").exists(), "it unpacked a cabinet it had rejected")
+            self.assertFalse((root / self.VERSION).exists())
+
+    def test_a_runtime_already_there_is_left_alone_and_nothing_is_downloaded(self):
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            work = Path(directory)
+            bottles = self.bottle_tree(work)
+            root = bottles / "Aurora17" / "drive_c" / "webview2-fixed"
+            app = self.fake_wine(work, root)
+            (root / self.VERSION).mkdir(parents=True)
+            (root / self.VERSION / "msedgewebview2.exe").write_bytes(b"MZ")
+            loud = 'curl() { print -r -- "DOWNLOADED"; return 1; }\n'
+            result = self.run_zsh(self.installer_harness(bottles, self.SHA256, extra=loud)
+                                  + f"install_webview2_runtime {shlex_quote(str(app))}\n")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("already in the Aurora17 bottle", result.stdout)
+            self.assertNotIn("DOWNLOADED", result.stdout)
+            self.assertFalse((work / "wine-args").exists())
+
+    def test_skip_does_nothing_at_all_and_says_what_it_costs(self):
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            work = Path(directory)
+            bottles = self.bottle_tree(work)
+            root = bottles / "Aurora17" / "drive_c" / "webview2-fixed"
+            app = self.fake_wine(work, root)
+            result = self.run_zsh(self.installer_harness(bottles, self.SHA256)
+                                  + f"install_webview2_runtime {shlex_quote(str(app))}\n",
+                                  env={**os.environ, "WEBVIEW2_RUNTIME": "skip"})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("NOTE skipped", result.stdout)
+            self.assertIn("blank", result.stdout)
+            self.assertFalse(root.exists())
+
+    # ------------------------------------------------------------- the doctor
+
+    def test_the_doctor_checks_the_folder_as_well_as_the_setting(self):
+        block = self.block('    if [ "$GAME" != fifa15 ] && [ "${WEBVIEW2_RUNTIME:-}" != skip ]; then')
+        report = '\nprint -r -- "problems=$problems"\n'
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            work = Path(directory)
+            bottles = self.bottle_tree(work)
+            runtime = bottles / "Aurora17" / "drive_c" / "webview2-fixed" / self.VERSION
+            harness = ("set -u\nGAME=fifa17\nBOTTLE=Aurora17\n"
+                       f"WEBVIEW2_VERSION={self.VERSION}\n"
+                       "BOTTLE_DIR=" + shlex_quote(str(bottles)) + "\n" + self.STUBS)
+
+            missing = self.run_zsh(harness + block + report)
+            self.assertEqual(missing.returncode, 0, missing.stdout + missing.stderr)
+            self.assertIn("BAD the WebView2 99.0.1150.52 runtime is not in the Aurora17 bottle",
+                          missing.stdout)
+            self.assertIn("blank", missing.stdout)
+            self.assertIn("problems=1", missing.stdout)
+
+            # The executable alone is not enough: an unpacking that stopped
+            # half way leaves one without the other.
+            runtime.mkdir(parents=True)
+            (runtime / "msedgewebview2.exe").write_bytes(b"MZ")
+            half = self.run_zsh(harness + block + report)
+            self.assertIn("problems=1", half.stdout)
+
+            (runtime / f"{self.VERSION}.manifest").write_text("99.0.1150.52")
+            whole = self.run_zsh(harness + block + report)
+            self.assertIn("OK WebView2 99.0.1150.52 in the Aurora17 bottle", whole.stdout)
+            self.assertIn("problems=0", whole.stdout)
+
+            # FIFA 15 has no RebornFUT, and skip means it was never installed.
+            for skipped in ("GAME=fifa15\n", "WEBVIEW2_RUNTIME=skip\n"):
+                quiet = self.run_zsh(harness + skipped + block + report)
+                self.assertIn("problems=0", quiet.stdout)
+                self.assertNotIn("WebView2", quiet.stdout)
+
+    def test_the_doctor_does_not_call_the_setting_a_stranger(self):
+        source = self.source()
+        allowed = [line for line in source.splitlines()
+                   if "WINE_COREAUDIO_EXCLUDE|" in line and "PROMPT)" in line][0]
+        self.assertIn(self.SETTING, allowed)
+
+    # --------------------------------------------------------------- undoing it
+
+    def test_uninstall_takes_the_setting_and_the_folder_out_and_nothing_else(self):
+        source = self.source("uninstall.sh")
+        block = source.split("# ------------------------------------ the launcher's browser runtime",
+                             1)[1].split("\n# ---", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
+            work = Path(directory)
+            bottles = self.bottle_tree(work)
+            conf = bottles / "Aurora17" / "cxbottle.conf"
+            kept = ('[EnvironmentVariables]\n'
+                    '"CX_GRAPHICS_BACKEND" = "d3dmetal"\n'
+                    '"CX_DR_TRAP" = "2"\n'
+                    '"WINE_SIMULATE_WRITECOPY" = "1"\n')
+            conf.write_text(kept + f'"{self.SETTING}" = "{self.WIN_DIR}"\n')
+            runtime = bottles / "Aurora17" / "drive_c" / "webview2-fixed" / self.VERSION
+            runtime.mkdir(parents=True)
+            (runtime / "msedgewebview2.exe").write_bytes(b"MZ")
+            other = bottles / "Aurora17" / "drive_c" / "windows"
+            other.mkdir(parents=True)
+
+            harness = ("set -eu\nundone=0\n"
+                       "BOTTLE_DIR=" + shlex_quote(str(bottles)) + "\nBOTTLE=Aurora17\n"
+                       + self.STUBS + block + '\nprint -r -- "undone=$undone"\n')
+            result = self.run_zsh(harness)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(self.SETTING, result.stdout)
+            self.assertEqual(conf.read_text(), kept)
+            self.assertFalse((bottles / "Aurora17" / "drive_c" / "webview2-fixed").exists())
+            self.assertTrue(other.is_dir(), "it deleted more of drive_c than its own folder")
+            self.assertIn("undone=2", result.stdout)
+            self.assertFalse(list((bottles / "Aurora17").glob("*.tmp-aurora17")))
+
+            # A bottle that never had either is left exactly as it is.
+            again = self.run_zsh(harness)
+            self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertEqual(conf.read_text(), kept)
+            self.assertIn("undone=0", again.stdout)
 
 
 if __name__ == "__main__":

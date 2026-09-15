@@ -5,11 +5,13 @@
 #   ./setup-both.sh --verify                   check both, change nothing
 #   ./setup-both.sh --offline [CrossOver.app]  FIFA 17 offline, plus FIFA 15
 #   ./setup-both.sh --unstick                  free the bottles (same as setup.sh --unstick)
+#   ./setup-both.sh --repair                   fix the FIFA 17 install (same as setup.sh --repair)
 #   ./setup-both.sh --shutdown                 quit CrossOver cleanly, then free
 #   ./setup-both.sh --agent                    remove the old background cleanup agent
 #
-# It is setup.sh twice: the FIFA 17 install first (the copy, the eight files,
-# the Aurora17 bottle, the stand-in, the EA names, the licence), then
+# It is setup.sh twice: the FIFA 17 install first (the copy, the nine files,
+# the Aurora17 bottle, the stand-in, the EA names, the licence, the WebView2
+# runtime the RebornFUT launcher needs), then
 # setup.sh --fifa15 (the Aurora15 bottle, its settings, the game-folder check).
 # The FIFA 15 half needs only the copy, so it runs when the FIFA 17 half
 # finished (exit 0) and also when it stopped "not finished" (exit 5: the copy
@@ -42,7 +44,7 @@ ACTION=install
 OFFLINE=0
 case "${1:-}" in
     --help|-h) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    --unstick|--shutdown|--agent|--verify) ACTION="${1#--}"; shift ;;
+    --unstick|--shutdown|--agent|--verify|--repair) ACTION="${1#--}"; shift ;;
     --offline) OFFLINE=1; shift ;;
     -*) print -r -- "Unknown option: $1 (try: ./setup-both.sh --help)"; exit 2 ;;
 esac
@@ -70,7 +72,7 @@ run17() { env AURORA_GAME=fifa17 AURORA_BOTTLE="$F17" ./setup.sh "$@"; }
 run15() { env AURORA_GAME=fifa15 AURORA_BOTTLE="$F15" ./setup.sh --fifa15 "$@"; }
 
 case "$ACTION" in
-    unstick|shutdown|agent) run17 "--$ACTION"; exit $? ;;
+    unstick|shutdown|agent|repair) run17 "--$ACTION"; exit $? ;;
     verify)
         print -r -- ""
         print -r -- "==== FIFA 17 ===="
