@@ -123,6 +123,14 @@ TARGETS=(
 [ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] \
     && TARGETS+=( dlls/win32u/all )
 
+# The compiler for the unix half. The architecture is named here, not left to
+# "arch -x86_64" (see check_deps for why that stopped being enough).
+UNIX_CC="clang -arch x86_64 -m64"
+# The oldest macOS the unix-half files may load on. 15.0 is what the shipped
+# files in fixes/ declare; a newer SDK otherwise stamps its own version in
+# (26.5 with Xcode 26), and dyld refuses the file on anything older.
+MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+
 # ---------------------------------------------------------------- the tools
 check_deps() {
     local missing=0 b g
@@ -137,6 +145,52 @@ check_deps() {
         || { bad "no clang. Install the Xcode command line tools:"
              say "            xcode-select --install"; missing=1 }
     [ "$missing" = 1 ] || ok "clang"
+
+    # The unix half must come out x86_64, and "arch -x86_64 make" no longer
+    # guarantees that: Xcode 26's clang is an arm64-only binary, so it cannot
+    # run under Rosetta, runs natively, and targets arm64 unless told otherwise.
+    # The linker then skips every x86_64 object and writes a 16 KB arm64
+    # ntdll.so with nothing in it. So the architecture is named explicitly.
+    #
+    # The SDK has to be one the active linker can read. The macOS 27 SDK lists
+    # an architecture (arm64e.x1) that Xcode 26's linker rejects as "malformed
+    # file ... unknown architecture", and xcrun can hand out that SDK even while
+    # xcode-select points at Xcode 26. Prefer the SDK inside the active
+    # developer directory, which always matches its own linker.
+    #   BUILD_SDKROOT=/path/to/MacOSX.sdk   use that one instead
+    if [ -n "${BUILD_SDKROOT:-}" ]; then
+        SDK="$BUILD_SDKROOT"
+    else
+        SDK="$(xcode-select -p 2>/dev/null)/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+        [ -d "$SDK" ] || SDK="$(xcrun --show-sdk-path 2>/dev/null || true)"
+    fi
+    if [ -n "$SDK" ] && [ -d "$SDK" ]; then
+        ok "SDK $SDK"
+    else
+        bad "no macOS SDK found. Set BUILD_SDKROOT to one, for example"
+        say "            BUILD_SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+        missing=1
+    fi
+
+    # Prove the pair works before an hour of building says otherwise: link a
+    # one-line x86_64 library with exactly the settings the build will use.
+    if [ "$missing" = 0 ]; then
+        local probe
+        probe="$(mktemp -d -t f17probe)"
+        print -r -- 'int probe(void) { return 1; }' > "$probe/probe.c"
+        if SDKROOT="$SDK" MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS" \
+               $=UNIX_CC -dynamiclib -o "$probe/probe.dylib" "$probe/probe.c" >"$probe/log" 2>&1 \
+           && [ "$(lipo -archs "$probe/probe.dylib" 2>/dev/null)" = x86_64 ]; then
+            ok "clang links x86_64 against that SDK (macOS $MIN_MACOS and newer)"
+        else
+            bad "clang cannot link an x86_64 library against that SDK:"
+            sed 's/^/            /' "$probe/log" | head -5
+            say "        Point BUILD_SDKROOT at an SDK this linker can read -- the one"
+            say "        inside the Xcode that xcode-select -p names is the usual answer."
+            missing=1
+        fi
+        rm -rf "$probe"
+    fi
 
     if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
         ok "mingw-w64 (builds the .dll half)"
@@ -183,6 +237,10 @@ say "================================="
 say ""
 say "1. Checking the tools"
 check_deps
+# clang reads both from the environment, so configure, make and the
+# a17hosts.dylib step below all get the same SDK and minimum macOS. The
+# mingw compiler that builds the .dll half ignores them.
+export SDKROOT="$SDK" MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 
 if [ "${1:-}" = "--deps" ]; then
     say ""
@@ -251,7 +309,7 @@ else
     mkdir -p "$WINE/build64"
     ( cd "$WINE/build64" && arch -x86_64 ../configure \
         --cache-file=/dev/null --enable-win64 --with-mingw \
-        --without-freetype --disable-tests "BISON=$BISON" >/dev/null ) \
+        --without-freetype --disable-tests "BISON=$BISON" "CC=$UNIX_CC" >/dev/null ) \
         || fail "configure failed. Its output is in $WINE/build64/config.log."
     ok "configured"
 fi
@@ -323,12 +381,14 @@ JOBS="$(sysctl -n hw.ncpu 2>/dev/null || print 8)"
 # Take the flags configure actually chose out of the Makefile rather than
 # hardcoding them -- overriding CFLAGS on the make line replaces them wholesale,
 # and a guessed value silently changes how everything else is compiled.
-MAKE_ARGS=()
+# CC on the make line as well: a build64 configured before this script named
+# the architecture has "CC = gcc -m64" baked into its Makefile.
+MAKE_ARGS=( "CC=$UNIX_CC" )
 if [ -n "$FREETYPE_INC" ]; then
     MAKE_CFLAGS="$(sed -n 's/^CFLAGS *= *//p' "$WINE/build64/Makefile" | head -1)"
     [ -n "$MAKE_CFLAGS" ] \
         || fail "No CFLAGS line in $WINE/build64/Makefile. Delete $OUT and configure again."
-    MAKE_ARGS=( "CFLAGS=$MAKE_CFLAGS -I$FREETYPE_INC" )
+    MAKE_ARGS+=( "CFLAGS=$MAKE_CFLAGS -I$FREETYPE_INC" )
     ok "CFLAGS = $MAKE_CFLAGS -I$FREETYPE_INC"
 fi
 ( cd "$WINE/build64" && arch -x86_64 make -j"$JOBS" $MAKE_ARGS $TARGETS ) \
@@ -339,6 +399,21 @@ ok "built"
 say ""
 say "6. Collecting"
 mkdir -p "$OUT/x86_64-unix" "$OUT/x86_64-windows"
+autoload -Uz is-at-least
+# A unix-half file that exists is not yet a file that works. An arm64 one (the
+# linker quietly dropped every x86_64 object) or one stamped with a newer
+# minimum macOS than the package supports would both have passed as "ok".
+check_macho() {  # <file under OUT>
+    local f="$OUT/$1" archs minos
+    archs="$(lipo -archs "$f" 2>/dev/null || true)"
+    [ "$archs" = x86_64 ] || fail "$1 came out as '${archs:-not a Mac library}', not x86_64.
+         The linker left the x86_64 objects out. Check the SDK and compiler
+         lines in step 1, delete $OUT, and build again."
+    minos="$(otool -l "$f" 2>/dev/null | awk '/LC_BUILD_VERSION/ { b = 1 } b && $1 == "minos" { print $2; exit }')"
+    [ -n "$minos" ] || fail "$1 carries no minimum macOS version. Build it again from a clean $OUT."
+    is-at-least "$minos" "$MIN_MACOS" || fail "$1 needs macOS $minos or newer; the package supports $MIN_MACOS.
+         The deployment target did not reach the build. Delete $OUT and build again."
+}
 collect() {  # <built path> <destination under OUT>
     # The PE half lands in dlls/<name>/x86_64-windows/<file> in this tree (the
     # unix .so files stay in dlls/<name>/); accept either layout.
@@ -349,6 +424,7 @@ collect() {  # <built path> <destination under OUT>
     done
     [ -n "$src" ] || fail "$1 was not built. Look for it above."
     cp "$src" "$OUT/$2"
+    case "$2" in x86_64-unix/*) check_macho "$2" ;; esac
     ok "$2"
 }
 collect dlls/ntdll/ntdll.so                     x86_64-unix/ntdll.so
@@ -382,6 +458,7 @@ otool -L "$OUT/x86_64-unix/a17hosts.dylib" | grep -q 'reexport' \
     || fail "a17hosts.dylib built without the libSystem re-export. It would take
          malloc, strlen and dyld_stub_binder away from ws2_32.so, and nothing
          in the bottle would start."
+check_macho x86_64-unix/a17hosts.dylib
 ok "a17hosts.dylib"
 
 # --------------------------------------------------------- 8. the comparison

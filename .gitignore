@@ -9,3 +9,6 @@ dist/
 # private PvP capture runs (packets, endpoints, account names)
 diagnostics/online-kickoff/runs/
 diagnostics/online-kickoff/crt-native.*.previous
+
+# ./build.sh output when no outdir is given (a full Wine tree, ~1 GB)
+build-out/
