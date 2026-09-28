@@ -1,0 +1,25 @@
+PF_PAE_ENABLED is FALSE under Rosetta 2; 64-bit Windows always reports TRUE.
+
+Wine fills IsProcessorFeaturePresent(PF_PAE_ENABLED), and the ProcessorFeatures
+array in KUSER_SHARED_DATA, from CPUID leaf 1 EDX bit 6. Rosetta's leaf 1 leaves
+that bit clear, but long mode runs on PAE paging, so no x64 Windows has ever
+returned FALSE. On x86_64 the feature is now always TRUE.
+
+Not in build.sh's PATCHES list and not in fixes/: it is unconditional, so it
+would change FIFA 17's ntdll, and it has not been tested with FIFA 17.
+Independent of every other patch (dlls/ntdll/unix/system.c only).
+
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -490,6 +490,11 @@
+     do_cpuid( 0x00000001, 0, regs ); /* get cpu features */
+     features[PF_RDTSC_INSTRUCTION_AVAILABLE]   = !!(regs[3] & (1 << 4));
+     features[PF_PAE_ENABLED]                   = !!(regs[3] & (1 << 6));
++#ifdef __x86_64__
++    /* long mode runs on PAE paging, and 64-bit Windows always reports it;
++     * Rosetta 2's CPUID leaf 1 leaves the bit clear */
++    features[PF_PAE_ENABLED]                   = TRUE;
++#endif
+     features[PF_MMX_INSTRUCTIONS_AVAILABLE]    = !!(regs[3] & (1 << 23));
+     features[PF_XMMI_INSTRUCTIONS_AVAILABLE]   = (regs[3] & (1 << 24)) && (regs[3] & (1 << 25));
+     features[PF_XMMI64_INSTRUCTIONS_AVAILABLE] = !!(regs[3] & (1 << 26));

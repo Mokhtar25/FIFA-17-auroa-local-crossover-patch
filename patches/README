@@ -28,6 +28,13 @@ Wine upstream never sends a message from a surface flush, so this is
 CrossOver-only. It touches dlls/win32u (sysparams.c, win32u_private.h, dce.c)
 and nothing else, so it is independent too and applies last.
 
+Two more are documentation only: not in build.sh's PATCHES list, not built
+into fixes/. crossover-26.3-debug-register-emulation.patch is CX_DR_TRAP=3,
+which emulates user-mode hardware debug registers under Rosetta.
+crossover-26.3-pf-pae-enabled.patch makes PF_PAE_ENABLED TRUE on x86_64.
+Both apply after the eight above and are covered in
+README-debug-register-emulation.md, with tests in ../tests/drbp.
+
 APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
 
     1. crossover-26.3-fifa17-rosetta.patch

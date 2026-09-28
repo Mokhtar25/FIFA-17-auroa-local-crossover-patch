@@ -1,0 +1,1474 @@
+CX_DR_TRAP=3: user-mode hardware debug registers under Rosetta 2.
+
+Not in build.sh's PATCHES list and not in fixes/. Applies after the eight
+shipped patches (it builds on the CX_DR_TRAP / CX_DR_PERSIST / drcache code
+in the rosetta patch). Nothing changes unless a bottle sets CX_DR_TRAP=3;
+modes 0-2 run the same code as before. See README-debug-register-emulation.md
+for each bug, the tests, and the results.
+
+Rosetta refuses debug registers outright (CW HACK 22131), and stock Wine drops
+them without a word: a thread that arms Dr0-3 through SetThreadContext never
+sees a breakpoint, and GetThreadContext reads zeros back. Mode 2 (shipped)
+covers one pattern only, an execute breakpoint armed by another thread.
+Mode 3 emulates the documented x86-64 semantics with page protection:
+
+  execute bp        page loses execute; delivered before the instruction, RF skips it
+  write watchpoint  page loses write; the access is stepped over under TF and
+                    the #DB is delivered after the instruction
+  rw=11 watchpoint  page loses all access. Reads of KUSER_SHARED_DATA are
+                    completed inside the fault handler out of a read-only alias
+                    of the page, so no protection window ever opens
+  Dr6               per event: 0xffff0ff0 | B bits of this hit, BS with a TF step
+  Dr7               global-enable bits stripped, as Windows does
+
+and keeps the page games invisible: VirtualQuery reports the page's own
+protection, a guest VirtualProtect on a watched page replaces that protection
+and is re-stripped underneath, accesses the page itself would deny stay the
+guest's access violation, and unix-side reads inside a syscall never raise a
+#DB. State lives in a process-wide table (1024 breakpoints, 256 threads, ERR
+when full) and is dropped at thread exit so a reused TID inherits nothing.
+
+Files: dlls/ntdll/unix/signal_x86_64.c (the emulation), virtual.c (the
+KUSER alias, the query/protect hooks), thread.c (thread-exit cleanup).
+Tests: tests/drbp (drrf_test 7/7, drbp_test 7/8; case 3 fails in control too).
+
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -535,13 +535,20 @@
+ }
+ #endif
+ 
++/* The KUSER_SHARED_DATA fields the syscall dispatcher reads on every call,
++ * copied at startup.  CX_DR_TRAP=3 can take read access to that page away
++ * while a read watchpoint is armed on it, and the dispatcher must not fault. */
++BYTE    usd_xsave_enabled;      /* ProcessorFeatures[PF_XSAVE_ENABLED] */
++ULONG64 usd_xstate_features;    /* XState.EnabledFeatures */
++ULONG   usd_xstate_flags;       /* XState.ControlFlags */
++
+ extern void __wine_syscall_dispatcher_instrumentation(void);
+ static void *instrumentation_callback;
+ static pthread_mutex_t instrumentation_callback_mutex = PTHREAD_MUTEX_INITIALIZER;
+ 
+ void set_process_instrumentation_callback( void *callback )
+ {
+-    void *ptr = (char *)user_shared_data + page_size;
++    void *ptr = (char *)0x7ffe0000 + page_size;  /* user_shared_data may be a private view */
+     sigset_t sigset;
+     void *old;
+ 
+@@ -954,6 +961,11 @@
+ }
+ 
+ 
++static int drbp_mode(void);
++static DWORD64 xbp_mask_dr7( DWORD64 dr7 );
++static BOOL drcache_get( ULONG_PTR tid, DWORD64 *dr0, DWORD64 *dr1,
++                         DWORD64 *dr2, DWORD64 *dr3, DWORD64 *dr6, DWORD64 *dr7 );
++
+ /***********************************************************************
+  *           save_context
+  *
+@@ -994,6 +1006,13 @@
+     context->Dr3    = amd64_thread_data()->dr3;
+     context->Dr6    = amd64_thread_data()->dr6;
+     context->Dr7    = amd64_thread_data()->dr7;
++    /* CX_DR_TRAP=3: a thread armed by another thread has its debug
++     * registers in the cache alone.  The exception context carries them
++     * as Windows does, so a handler that continues keeps them armed
++     * instead of writing back zeros. */
++    if (drbp_mode() == 3)
++        drcache_get( (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread, &context->Dr0, &context->Dr1,
++                     &context->Dr2, &context->Dr3, &context->Dr6, &context->Dr7 );
+     if (FPU_sig(sigcontext))
+     {
+         XSAVE_AREA_HEADER *xs;
+@@ -1069,7 +1088,7 @@
+     amd64_thread_data()->dr2 = context->Dr2;
+     amd64_thread_data()->dr3 = context->Dr3;
+     amd64_thread_data()->dr6 = context->Dr6;
+-    amd64_thread_data()->dr7 = context->Dr7;
++    amd64_thread_data()->dr7 = xbp_mask_dr7( context->Dr7 );
+     set_sigcontext( context, sigcontext );
+     if (FPU_sig(sigcontext)) memcpy( FPU_sig(sigcontext), &context->FltSave, sizeof(context->FltSave) );
+     leave_handler( sigcontext );
+@@ -1370,7 +1389,18 @@
+     else flags &= ~CONTEXT_XSTATE;
+ 
+     /* debug registers require a server call */
+-    if (self && (flags & CONTEXT_DEBUG_REGISTERS))
++    if (self && (flags & CONTEXT_DEBUG_REGISTERS) && drbp_mode() == 3)
++    {
++        /* Rosetta refuses them anyway (CW HACK 22131); CX_DR_TRAP=3 emulates
++         * them from this thread-local copy, so keep it and stay local. */
++        amd64_thread_data()->dr0 = context->Dr0;
++        amd64_thread_data()->dr1 = context->Dr1;
++        amd64_thread_data()->dr2 = context->Dr2;
++        amd64_thread_data()->dr3 = context->Dr3;
++        amd64_thread_data()->dr6 = context->Dr6;
++        amd64_thread_data()->dr7 = xbp_mask_dr7( context->Dr7 );
++    }
++    else if (self && (flags & CONTEXT_DEBUG_REGISTERS))
+         self = (amd64_thread_data()->dr0 == context->Dr0 &&
+                 amd64_thread_data()->dr1 == context->Dr1 &&
+                 amd64_thread_data()->dr2 == context->Dr2 &&
+@@ -1470,7 +1500,7 @@
+  * never the constant, or every AMD64 context matches.
+  */
+ 
+-#define DRCACHE_MAX 64
++#define DRCACHE_MAX 256
+ #define DRCACHE_BIT 0x10
+ 
+ static int drcache_enabled = -1;
+@@ -1485,6 +1515,7 @@
+ static int drbp_mode(void);
+ static void drcache_put( ULONG_PTR tid, DWORD64 dr0, DWORD64 dr1, DWORD64 dr2,
+                          DWORD64 dr3, DWORD64 dr6, DWORD64 dr7 );
++static void drcache_forget( ULONG_PTR tid );
+ 
+ static BOOL drcache_on(void)
+ {
+@@ -1496,7 +1527,7 @@
+     /* Emulated breakpoints need a coherent virtual DR state: the guest's
+      * handler queries its own Dr0/Dr6/Dr7 after the trap and must not see the
+      * empty hardware state. */
+-    return drcache_enabled != 0 || drbp_mode() == 2;
++    return drcache_enabled != 0 || drbp_mode() >= 2;
+ }
+ 
+ static void drcache_acquire(void)
+@@ -1567,7 +1598,7 @@
+     {
+         const char *val = getenv( "CX_DR_TRAP" );
+         drbp_enabled = val ? val[0] - '0' : 0;
+-        if (drbp_enabled < 0 || drbp_enabled > 2) drbp_enabled = 0;
++        if (drbp_enabled < 0 || drbp_enabled > 3) drbp_enabled = 0;
+     }
+     return drbp_enabled;
+ }
+@@ -1577,6 +1608,16 @@
+     return drbp_mode() != 0;
+ }
+ 
++/* Windows strips the global-enable bits from any Dr7 a context write
++ * carries: GetThreadContext never reports them back.  Mode 3 mirrors that
++ * wherever a Dr7 enters its state, so the arming decisions and the echo
++ * agree with the platform. */
++static DWORD64 xbp_mask_dr7( DWORD64 dr7 )
++{
++    if (drbp_mode() == 3) dr7 &= ~(DWORD64)0xAA;
++    return dr7;
++}
++
+ static void drbp_log( const char *tag, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c )
+ {
+     struct ctxlog_buf buf;
+@@ -1662,6 +1703,950 @@
+     return deliver ? 2 : 1;
+ }
+ 
++/* CX_DR_TRAP=3: per-thread execute breakpoints, however they were armed.
++ *
++ * Modes 1 and 2 follow one breakpoint that another thread arms with
++ * NtSetContextThread.  Some protectors arm them from their own vectored
++ * handler instead: the handler edits Dr0-Dr3/Dr7 in the exception context
++ * and continues, so the breakpoint reaches us through NtContinue as a
++ * NtSetContextThread on the current thread.  Some third-party debug-register
++ * users do exactly that, and a breakpoint that never fires sends the
++ * protected code down its failure path, which crashes a few seconds in.
++ *
++ * Every enabled execute breakpoint (R/W bits 00) is recorded against the
++ * thread it belongs to, and the page holding it loses execute permission.
++ * An instruction fetch from such a page is then one of three things:
++ *  - the owning thread reaching the address: delivered as the hardware
++ *    would, EXCEPTION_SINGLE_STEP before the instruction, B<n> set in Dr6;
++ *  - the same, but resuming with RF set (the guest's "step past it"): the
++ *    instruction runs once without a trap, as RF means on real hardware;
++ *  - anything else: execute is restored for one instruction under TF and
++ *    taken away again from the trap handler.
++ * Data watchpoints (R/W 01 and 11) are emulated the same way, on the page
++ * holding the watched range: an access the arming thread watches delivers
++ * a #DB after the triggering instruction has run -- reads of the user
++ * shared data page, which the unix side keeps an alias mapping of, are
++ * completed in the fault handler itself out of that alias, so no protection
++ * window opens that a concurrent read on another thread could pass through
++ * silently, while any other watched access is stepped over once under TF
++ * and delivered at the trap; an access the page's own protection already
++ * denied stays the guest's access violation, exactly as the hardware would
++ * leave it. */
++
++/* Breakpoint entries process-wide: a protector arms three or four on
++ * every one of its threads, which easily passes a hundred. */
++#define XBP_MAX 1024
++
++static struct
++{
++    ULONG_PTR tid;
++    ULONG_PTR addr;
++    unsigned int index;
++    unsigned int rw;   /* DR7 R/W encoding: 0 execute, 1 write, 3 read + write */
++    unsigned int len;  /* watched length in bytes: 1, 2, 4 or 8 */
++} xbp[XBP_MAX];
++static unsigned int xbp_count;
++
++static struct
++{
++    ULONG_PTR page;
++    ULONG oldprot;
++    ULONG stripped_prot;  /* what oldprot was reduced to while armed */
++    unsigned int rw;      /* the DR7 R/W encoding the page was stripped for */
++    unsigned int refs;
++} xbp_page[XBP_MAX];
++static unsigned int xbp_page_count;
++
++/* Threads between a step-over and its trap, and threads resuming with RF. */
++static struct
++{
++    ULONG_PTR tid;
++    ULONG_PTR step_page;
++    ULONG_PTR skip_addr;
++    int step_tf;
++    unsigned int deliver_bmask;   /* B bits to deliver at the step trap, 0 none */
++} xbp_thread[DRCACHE_MAX];
++static unsigned int xbp_thread_count;
++
++static volatile int xbp_lock;
++
++/* Nonzero while this thread holds the lock or changes a page's protection
++ * for the emulation itself: the query and protect hooks then stay out (the
++ * access is the emulation's own, and the lock is not recursive). */
++static __thread int xbp_internal;
++
++static void xbp_acquire(void)
++{
++    while (__atomic_exchange_n( &xbp_lock, 1, __ATOMIC_ACQUIRE )) continue;
++    xbp_internal++;
++}
++
++static void xbp_release(void)
++{
++    xbp_internal--;
++    __atomic_store_n( &xbp_lock, 0, __ATOMIC_RELEASE );
++}
++
++static ULONG_PTR xbp_self(void)
++{
++    return (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread;
++}
++
++static int xbp_find_page( ULONG_PTR page )
++{
++    unsigned int i;
++    for (i = 0; i < xbp_page_count; i++) if (xbp_page[i].refs && xbp_page[i].page == page) return i;
++    return -1;
++}
++
++static void xbp_set_prot( ULONG_PTR page, ULONG prot )
++{
++    void *base = (void *)page;
++    SIZE_T size = 0x1000;
++    ULONG old;
++
++    xbp_internal++;
++    NtProtectVirtualMemory( GetCurrentProcess(), &base, &size, prot, &old );
++    xbp_internal--;
++}
++
++/* The protection a watched page is reduced to while the watchpoint is
++ * armed: execute watchpoints lose execute, write watchpoints lose write,
++ * read-and-write watchpoints lose every access.  A page that already blocks
++ * writes cannot host a write watchpoint (its writes already fault, and the
++ * reads a read watchpoint needs cannot be observed without breaking every
++ * access to the page). */
++static ULONG xbp_watch_prot( ULONG prot, unsigned int rw )
++{
++    switch (rw)
++    {
++    case 0:
++        return drbp_strip_exec( prot );
++    case 1:
++        switch (prot & 0xff)
++        {
++        case PAGE_EXECUTE_READWRITE: return PAGE_EXECUTE_READ;
++        case PAGE_READWRITE:         return PAGE_READONLY;
++        case PAGE_WRITECOPY:         return PAGE_READONLY;
++        case PAGE_EXECUTE_WRITECOPY: return PAGE_EXECUTE_READ;
++        }
++        return 0;
++    default:
++        /* read + write watchpoints must also trap reads, so the page loses
++         * every access while one is armed.  Reads are then served out of
++         * the unix side's alias of the page (the user shared data page) by
++         * completing the faulting load in the fault handler, which opens
++         * no protection window another thread's read could pass silently
++         * through, or by the one-instruction step-over below.  A page that
++         * already blocks reads cannot host one: its read faults are its
++         * own and there is nothing left to observe. */
++        switch (prot & 0xff)
++        {
++        case PAGE_READONLY:          return PAGE_NOACCESS;
++        case PAGE_READWRITE:         return PAGE_NOACCESS;
++        case PAGE_WRITECOPY:         return PAGE_NOACCESS;
++        case PAGE_EXECUTE_READ:      return PAGE_NOACCESS;
++        case PAGE_EXECUTE_READWRITE: return PAGE_NOACCESS;
++        case PAGE_EXECUTE_WRITECOPY: return PAGE_NOACCESS;
++        }
++        return 0;
++    }
++}
++
++/* Whether the page's own protection, as it was before any watchpoint was
++ * armed, allowed this access.  A fault against a protection the page
++ * already denied is the guest's access violation -- a write to a read-only
++ * page faults as itself even while a read watchpoint is armed on it, and
++ * the #DB the hardware would have raised never happens because the write
++ * never happens. */
++static int xbp_prot_allows( ULONG prot, BOOL write )
++{
++    prot &= 0xff;
++    if (write)
++        return prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
++               prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY;
++    return prot == PAGE_READONLY || prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
++           prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE ||
++           prot == PAGE_EXECUTE_WRITECOPY;
++}
++
++/* Called with the lock held. */
++static BOOL xbp_page_ref( ULONG_PTR page, unsigned int rw )
++{
++    MEMORY_BASIC_INFORMATION mbi;
++    ULONG prot;
++    int i = xbp_find_page( page );
++
++    if (i >= 0)
++    {
++        xbp_page[i].refs++;
++        return TRUE;
++    }
++    if (NtQueryVirtualMemory( GetCurrentProcess(), (void *)page, MemoryBasicInformation,
++                              &mbi, sizeof(mbi), NULL ))
++        return FALSE;
++    if (!(prot = xbp_watch_prot( mbi.Protect, rw )) || prot == (mbi.Protect & 0xff)) return FALSE;
++    for (i = 0; i < xbp_page_count; i++) if (!xbp_page[i].refs) break;
++    if (i == xbp_page_count)
++    {
++        if (xbp_page_count == XBP_MAX) return FALSE;
++        xbp_page_count++;
++    }
++    xbp_page[i].page = page;
++    xbp_page[i].oldprot = mbi.Protect;
++    xbp_page[i].stripped_prot = prot;
++    xbp_page[i].rw = rw;
++    xbp_page[i].refs = 1;
++    xbp_set_prot( page, prot );
++    return TRUE;
++}
++
++/* Called with the lock held. */
++static void xbp_page_unref( ULONG_PTR page )
++{
++    int i = xbp_find_page( page );
++
++    if (i < 0) return;
++    if (--xbp_page[i].refs) return;
++    xbp_set_prot( page, xbp_page[i].oldprot );
++}
++
++/* Hardware debug registers never touch page protection, so the emulation's
++ * stripping must not show: a watched page reports its own protection to
++ * NtQueryVirtualMemory, and a guest NtProtectVirtualMemory on it replaces
++ * that own protection (reporting the previous one as the old value) and is
++ * stripped again on top.  Both run outside the virtual mutex. */
++ULONG drbp_query_hook( const void *base, ULONG prot )
++{
++    int p;
++
++    if (drbp_mode() != 3 || xbp_internal) return prot;
++    xbp_acquire();
++    if ((p = xbp_find_page( (ULONG_PTR)base & ~(ULONG_PTR)0xfff )) >= 0 &&
++        (prot & 0xff) == xbp_page[p].stripped_prot)
++        prot = (prot & ~0xff) | (xbp_page[p].oldprot & 0xff);
++    xbp_release();
++    return prot;
++}
++
++void drbp_protect_hook( void *base, SIZE_T size, ULONG new_prot, ULONG *old_prot )
++{
++    ULONG_PTR page, start = (ULONG_PTR)base & ~(ULONG_PTR)0xfff, end = (ULONG_PTR)base + size;
++    int p;
++
++    if (drbp_mode() != 3 || xbp_internal) return;
++    xbp_acquire();
++    for (page = start; page < end; page += 0x1000)
++    {
++        ULONG strip;
++
++        if ((p = xbp_find_page( page )) < 0) continue;
++        if (page == start) *old_prot = xbp_page[p].oldprot;
++        xbp_page[p].oldprot = new_prot;
++        strip = xbp_watch_prot( new_prot, xbp_page[p].rw );
++        if (!strip || strip == (new_prot & 0xff)) strip = new_prot;   /* nothing left to observe */
++        xbp_page[p].stripped_prot = strip;
++        if (strip != new_prot) xbp_set_prot( page, strip );
++    }
++    xbp_release();
++}
++
++/* Called with the lock held.  A fault against a page whose last watchpoint
++ * was disarmed after the access faulted but before its handler took the
++ * lock: the page already has its own protection back, and when that allows
++ * the access, the access only needs to run again. */
++static BOOL xbp_fault_is_stale( ULONG_PTR page, unsigned int err )
++{
++    MEMORY_BASIC_INFORMATION mbi;
++    unsigned int i;
++
++    for (i = 0; i < xbp_page_count; i++) if (!xbp_page[i].refs && xbp_page[i].page == page) break;
++    if (i == xbp_page_count) return FALSE;
++    if (NtQueryVirtualMemory( GetCurrentProcess(), (void *)page, MemoryBasicInformation,
++                              &mbi, sizeof(mbi), NULL ))
++        return FALSE;
++    if (err & 0x10) return (mbi.Protect & 0xf0) != 0;
++    return xbp_prot_allows( mbi.Protect, !!(err & 2) );
++}
++
++/* Called with the lock held. */
++static int xbp_thread_slot( ULONG_PTR tid, BOOL create )
++{
++    unsigned int i;
++
++    for (i = 0; i < xbp_thread_count; i++) if (xbp_thread[i].tid == tid) return i;
++    if (!create) return -1;
++    for (i = 0; i < xbp_thread_count; i++) if (!xbp_thread[i].tid) break;
++    if (i == xbp_thread_count)
++    {
++        if (xbp_thread_count == DRCACHE_MAX) return -1;
++        xbp_thread_count++;
++    }
++    xbp_thread[i].tid = tid;
++    xbp_thread[i].step_page = 0;
++    xbp_thread[i].skip_addr = 0;
++    xbp_thread[i].step_tf = 0;
++    xbp_thread[i].deliver_bmask = 0;
++    return i;
++}
++
++/* Bounded x86-64 decoder for the reads of the user shared data page,
++ * completed inside the fault handler itself.  Reads of that page are what
++ * read watchpoints exist for, and completing the faulting read right there
++ * -- out of the unix side's alias of the page -- needs no protection window
++ * and no single-step, so a watchpoint another thread armed on the same page
++ * cannot silently miss its fire through a window this thread opened.
++ * Decoded: plain loads into a general register (mov 8A/8B/63/A0/A1, movzx
++ * 0F B6/B7, movsx 0F BE/BF), the flags-only reads (test 84/85/F6 /0/F7 /0,
++ * cmp 38/39/3A/3B/80 /7/81 /7/83 /7 -- ntdll's syscall thunks test the page
++ * on every system call) and the register-destination ALU reads (add, or,
++ * adc, sbb, and, sub, xor r, r/m -- what protection code accumulates the
++ * page into), at any REX, any addressing mode.  The effective
++ * address is computed from the instruction, not taken from the fault.
++ * The common writes and read-modify-writes (mov, ALU, inc/dec, xchg,
++ * shifts, with operand-size and lock prefixes) decode as XBP_LOAD_OTHER:
++ * never completed here, but their exact address and width decide which
++ * watchpoints an access overlaps.  Anything else (address-size and rep
++ * prefixes, fs/gs, SSE) is not decoded at all. */
++enum xbp_load_kind
++{
++    XBP_LOAD_MOV,     /* mov r, m: a 32-bit load zero-extends */
++    XBP_LOAD_ZX,      /* movzx */
++    XBP_LOAD_SX,      /* movsx, movsxd */
++    XBP_LOAD_MOV8,    /* mov r8, m8: merges into the low (or AH-style high) byte */
++    XBP_LOAD_TEST,    /* test m, r/imm: flags only */
++    XBP_LOAD_CMP_MR,  /* cmp m, r/imm: flags of m - other */
++    XBP_LOAD_CMP_RM,  /* cmp r, m: flags of r - m */
++    XBP_LOAD_ALU_RM,  /* add/or/adc/sbb/and/sub/xor r, m: r = r op m, flags */
++    XBP_LOAD_OTHER,   /* any other access: address and width only */
++};
++
++struct xbp_load
++{
++    unsigned int len;    /* total instruction length in bytes */
++    unsigned int reg;    /* ModRM reg field with REX.R: destination or register operand */
++    unsigned int width;  /* bytes read from memory: 1, 2, 4 or 8 */
++    enum xbp_load_kind kind;
++    unsigned int rex;    /* the REX prefix byte, 0 if none */
++    unsigned int alu;    /* XBP_LOAD_ALU_RM: 0 add, 1 or, 2 adc, 3 sbb, 4 and, 5 sub, 6 xor */
++    unsigned int has_imm;
++    DWORD64 imm;         /* the immediate operand, sign-extended */
++    ULONG_PTR ea;        /* the memory operand's effective address */
++};
++
++static DWORD64 xbp_get_gpr( ucontext_t *ucontext, unsigned int reg );
++
++static int xbp_decode_load( ucontext_t *ucontext, ULONG_PTR rip, struct xbp_load *out )
++{
++    unsigned char code[15];
++    unsigned int n = 0x1000 - (rip & 0xfff), i = 0, rex = 0, modrm, mod, rm, op;
++    unsigned int disp_len = 0, imm_len = 0, imm_z, ext;
++    int need_ext = -1;   /* the ModRM reg field a group opcode must carry, -1 none */
++    BOOL rip_rel = FALSE, opsize16 = FALSE, lock = FALSE;
++    ULONG_PTR ea = 0;
++
++    /* stay inside the faulting instruction's own page: the page is
++     * executing, so it is mapped and readable from here */
++    if (n > sizeof(code)) n = sizeof(code);
++    memcpy( code, (const void *)rip, n );
++
++    for (;;)
++    {
++        if (i >= n) return 0;
++        op = code[i];
++        if (op == 0x67 || op == 0xf2 || op == 0xf3 || op == 0x64 || op == 0x65)
++            return 0;   /* address size, rep, fs/gs: not decoded */
++        if (op == 0x66) opsize16 = TRUE;
++        else if (op == 0xf0) lock = TRUE;
++        else if (op != 0x26 && op != 0x2e && op != 0x36 && op != 0x3e) break;
++        /* operand size, lock, and segment overrides with no effect in
++         * 64-bit mode or branch hints */
++        if (++i > 4) return 0;
++    }
++    if (code[i] >= 0x40 && code[i] <= 0x4f) rex = code[i++];
++    if (i >= n) return 0;
++    op = code[i++];
++
++    memset( out, 0, sizeof(*out) );
++    out->rex = rex;
++
++    /* the full operand size, and the size of a full-size immediate */
++    out->width = (rex & 8) ? 8 : opsize16 ? 2 : 4;
++    imm_z = opsize16 ? 2 : 4;
++
++    if (op >= 0xa0 && op <= 0xa3)   /* mov between al/eax/rax and moffs: always a 64-bit address here */
++    {
++        if (i + 8 > n) return 0;
++        if (!(op & 1)) out->width = 1;
++        out->kind = op == 0xa0 ? XBP_LOAD_MOV8 : op == 0xa1 ? XBP_LOAD_MOV : XBP_LOAD_OTHER;
++        if (opsize16 || lock) out->kind = XBP_LOAD_OTHER;
++        memcpy( &out->ea, code + i, 8 );
++        out->len = i + 8;
++        return 1;
++    }
++
++    switch (op)
++    {
++    case 0x8a: out->width = 1; out->kind = XBP_LOAD_MOV8; break;     /* mov r8, r/m8 */
++    case 0x8b: out->kind = XBP_LOAD_MOV; break;                      /* mov r, r/m */
++    case 0x63:                                                       /* movsxd r64, r/m32 */
++        if (!(rex & 8)) return 0;
++        out->width = 4; out->kind = XBP_LOAD_SX; break;
++    case 0x84: out->width = 1; out->kind = XBP_LOAD_TEST; break;     /* test r/m8, r8 */
++    case 0x85: out->kind = XBP_LOAD_TEST; break;                     /* test r/m, r */
++    case 0x38: out->width = 1; out->kind = XBP_LOAD_CMP_MR; break;   /* cmp r/m8, r8 */
++    case 0x39: out->kind = XBP_LOAD_CMP_MR; break;                   /* cmp r/m, r */
++    case 0x3a: out->width = 1; out->kind = XBP_LOAD_CMP_RM; break;   /* cmp r8, r/m8 */
++    case 0x3b: out->kind = XBP_LOAD_CMP_RM; break;                   /* cmp r, r/m */
++    case 0x80: out->width = 1; out->kind = XBP_LOAD_CMP_MR; need_ext = 7; imm_len = 1; break;   /* cmp r/m8, imm8 */
++    case 0x81: out->kind = XBP_LOAD_CMP_MR; need_ext = 7; imm_len = 4; break;                   /* cmp r/m, imm32 */
++    case 0x83: out->kind = XBP_LOAD_CMP_MR; need_ext = 7; imm_len = 1; break;                   /* cmp r/m, imm8 */
++    case 0xf6: out->width = 1; out->kind = XBP_LOAD_TEST; need_ext = 0; imm_len = 1; break;     /* test r/m8, imm8 */
++    case 0xf7: out->kind = XBP_LOAD_TEST; need_ext = 0; imm_len = 4; break;                     /* test r/m, imm32 */
++    case 0x88: case 0xc6: case 0xfe: case 0x86: case 0xd0: case 0xd2: case 0xc0:
++        /* mov r/m8, r8 / imm8; inc/dec r/m8; xchg; shifts of r/m8 */
++        out->width = 1; out->kind = XBP_LOAD_OTHER;
++        if (op == 0xc6 || op == 0xc0) imm_len = 1;
++        break;
++    case 0x89: case 0xc7: case 0xff: case 0x87: case 0xd1: case 0xd3: case 0xc1:
++        /* the same at full operand size */
++        out->kind = XBP_LOAD_OTHER;
++        if (op == 0xc7) imm_len = imm_z;
++        else if (op == 0xc1) imm_len = 1;
++        break;
++    case 0x0f:
++        if (i >= n) return 0;
++        switch (code[i++])
++        {
++        case 0xb6: out->width = 1; out->kind = XBP_LOAD_ZX; break;   /* movzx r, r/m8 */
++        case 0xb7: out->width = 2; out->kind = XBP_LOAD_ZX; break;   /* movzx r, r/m16 */
++        case 0xbe: out->width = 1; out->kind = XBP_LOAD_SX; break;   /* movsx r, r/m8 */
++        case 0xbf: out->width = 2; out->kind = XBP_LOAD_SX; break;   /* movsx r, r/m16 */
++        default: return 0;
++        }
++        break;
++    default:
++        if (op < 0x40 && (op & 7) < 4)   /* add/or/adc/sbb/and/sub/xor r/m <-> r */
++        {
++            if (!(op & 1)) out->width = 1;
++            /* the register is the destination with the direction bit set;
++             * otherwise the memory operand is, and that is a write */
++            out->kind = (op & 2) ? XBP_LOAD_ALU_RM : XBP_LOAD_OTHER;
++            out->alu = op >> 3;
++            break;
++        }
++        return 0;
++    }
++
++    /* the memory operand: ModRM, optional SIB, displacement */
++    if (i >= n) return 0;
++    modrm = code[i++];
++    mod = modrm >> 6;
++    rm = modrm & 7;
++    ext = (modrm >> 3) & 7;
++    if (mod == 3) return 0;   /* register operand: not this fault */
++    if (need_ext >= 0 && ext != need_ext)
++    {
++        /* the group's other members read-modify-write the operand, or
++         * (F6/F7 /2-/7: not, neg, mul, div) take no immediate */
++        if (op == 0xf6 || op == 0xf7) imm_len = ext < 2 ? imm_len : 0;
++        out->kind = XBP_LOAD_OTHER;
++    }
++    if (op == 0x81 || op == 0xf7) imm_len = imm_len ? imm_z : 0;
++    if (op == 0xfe && ext > 1) return 0;               /* FE: only inc and dec */
++    if (op == 0xff && ext > 1) return 0;               /* FF: calls, jumps and push are not data accesses of ours */
++    if (op == 0xc6 || op == 0xc7) { if (ext) return 0; }   /* C6/C7 /0 only: mov */
++    if (opsize16 || lock) out->kind = XBP_LOAD_OTHER;  /* 16-bit or locked forms are not completed */
++    out->reg = (rex & 4 ? 8 : 0) | ((modrm >> 3) & 7);
++    if (rm == 4)
++    {
++        unsigned int sib, index;
++
++        if (i >= n) return 0;
++        sib = code[i++];
++        index = (rex & 2 ? 8 : 0) | ((sib >> 3) & 7);
++        if (index != 4) ea += xbp_get_gpr( ucontext, index ) << (sib >> 6);
++        if (mod == 0 && (sib & 7) == 5) disp_len = 4;   /* no base register: disp32 */
++        else ea += xbp_get_gpr( ucontext, (rex & 1 ? 8 : 0) | (sib & 7) );
++    }
++    else if (mod == 0 && rm == 5)   /* RIP-relative disp32 */
++    {
++        rip_rel = TRUE;
++        disp_len = 4;
++    }
++    else ea += xbp_get_gpr( ucontext, (rex & 1 ? 8 : 0) | rm );
++    if (mod == 1) disp_len = 1;
++    else if (mod == 2) disp_len = 4;
++    if (i + disp_len + imm_len > n) return 0;
++    if (disp_len == 1) ea += (INT64)(signed char)code[i];
++    else if (disp_len == 4)
++    {
++        INT32 disp;
++        memcpy( &disp, code + i, 4 );
++        ea += (INT64)disp;
++    }
++    i += disp_len;
++    if (imm_len == 1) out->imm = (INT64)(signed char)code[i];
++    else if (imm_len == 4)
++    {
++        INT32 imm;
++        memcpy( &imm, code + i, 4 );
++        out->imm = (INT64)imm;
++    }
++    out->has_imm = !!imm_len;
++    i += imm_len;
++    out->len = i;
++    if (rip_rel) ea += rip + i;   /* relative to the end of the instruction */
++    out->ea = ea;
++    return 1;
++}
++
++static DWORD64 xbp_get_gpr( ucontext_t *ucontext, unsigned int reg )
++{
++    switch (reg)
++    {
++    case 0:  return RAX_sig( ucontext );
++    case 1:  return RCX_sig( ucontext );
++    case 2:  return RDX_sig( ucontext );
++    case 3:  return RBX_sig( ucontext );
++    case 4:  return RSP_sig( ucontext );
++    case 5:  return RBP_sig( ucontext );
++    case 6:  return RSI_sig( ucontext );
++    case 7:  return RDI_sig( ucontext );
++    case 8:  return R8_sig( ucontext );
++    case 9:  return R9_sig( ucontext );
++    case 10: return R10_sig( ucontext );
++    case 11: return R11_sig( ucontext );
++    case 12: return R12_sig( ucontext );
++    case 13: return R13_sig( ucontext );
++    case 14: return R14_sig( ucontext );
++    default: return R15_sig( ucontext );
++    }
++}
++
++static void xbp_set_gpr( ucontext_t *ucontext, unsigned int reg, DWORD64 val )
++{
++    switch (reg)
++    {
++    case 0:  RAX_sig( ucontext ) = val; break;
++    case 1:  RCX_sig( ucontext ) = val; break;
++    case 2:  RDX_sig( ucontext ) = val; break;
++    case 3:  RBX_sig( ucontext ) = val; break;
++    case 4:  RSP_sig( ucontext ) = val; break;
++    case 5:  RBP_sig( ucontext ) = val; break;
++    case 6:  RSI_sig( ucontext ) = val; break;
++    case 7:  RDI_sig( ucontext ) = val; break;
++    case 8:  R8_sig( ucontext ) = val; break;
++    case 9:  R9_sig( ucontext ) = val; break;
++    case 10: R10_sig( ucontext ) = val; break;
++    case 11: R11_sig( ucontext ) = val; break;
++    case 12: R12_sig( ucontext ) = val; break;
++    case 13: R13_sig( ucontext ) = val; break;
++    case 14: R14_sig( ucontext ) = val; break;
++    default: R15_sig( ucontext ) = val; break;
++    }
++}
++
++/* The register operand of a test or cmp: without REX, byte registers 4-7
++ * are AH/CH/DH/BH. */
++static DWORD64 xbp_reg_operand( ucontext_t *ucontext, const struct xbp_load *ld )
++{
++    if (ld->width == 1 && !ld->rex && ld->reg >= 4)
++        return (xbp_get_gpr( ucontext, ld->reg - 4 ) >> 8) & 0xff;
++    return xbp_get_gpr( ucontext, ld->reg );
++}
++
++/* An ALU operation at the load's width: its result in *result and the
++ * EFLAGS after it -- CF, PF, AF, ZF, SF and OF, every other flag kept.
++ * alu: 0 add, 1 or, 2 adc, 3 sbb, 4 and (test), 5 sub, 6 xor, 7 cmp.  The
++ * logical operations clear CF and OF and leave AF undefined; it is
++ * cleared here. */
++static DWORD64 xbp_alu( unsigned int alu, unsigned int width, DWORD64 a, DWORD64 b,
++                        DWORD64 efl, DWORD64 *result )
++{
++    unsigned int bits = width * 8, p, cf = efl & 1;
++    DWORD64 mask = bits == 64 ? ~(DWORD64)0 : ((DWORD64)1 << bits) - 1;
++    DWORD64 sign = (DWORD64)1 << (bits - 1), res;
++
++    a &= mask;
++    b &= mask;
++    efl &= ~(DWORD64)0x8d5;
++    switch (alu)
++    {
++    case 0:   /* add */
++    case 2:   /* adc */
++    {
++        unsigned __int128 sum = (unsigned __int128)a + b + (alu == 2 ? cf : 0);
++
++        res = (DWORD64)sum & mask;
++        if ((DWORD64)(sum >> bits) & 1) efl |= 0x001;       /* CF: carry out */
++        if (~(a ^ b) & (a ^ res) & sign) efl |= 0x800;      /* OF */
++        if ((a ^ b ^ res) & 0x10) efl |= 0x010;             /* AF */
++        break;
++    }
++    case 3:   /* sbb */
++    case 5:   /* sub */
++    case 7:   /* cmp */
++    {
++        DWORD64 borrow = alu == 3 ? cf : 0;
++
++        res = (a - b - borrow) & mask;
++        if (a < b || (borrow && a == b)) efl |= 0x001;     /* CF: borrow */
++        if ((a ^ b) & (a ^ res) & sign) efl |= 0x800;      /* OF */
++        if ((a ^ b ^ res) & 0x10) efl |= 0x010;             /* AF */
++        break;
++    }
++    case 1:  res = a | b; break;
++    case 4:  res = a & b; break;
++    default: res = a ^ b; break;
++    }
++    if (!res) efl |= 0x040;                                 /* ZF */
++    if (res & sign) efl |= 0x080;                           /* SF */
++    p = res & 0xff;
++    p ^= p >> 4;
++    p ^= p >> 2;
++    p ^= p >> 1;
++    if (!(p & 1)) efl |= 0x004;                             /* PF: even parity of the low byte */
++    *result = res;
++    return efl;
++}
++
++/* Write a result to the decoded register: a 32-bit write zero-extends into
++ * the full register; a byte write merges into the low byte, or without REX
++ * for destinations 4-7 into AH/CH/DH/BH. */
++static void xbp_write_reg( ucontext_t *ucontext, const struct xbp_load *ld, DWORD64 val )
++{
++    DWORD64 old;
++
++    switch (ld->width)
++    {
++    case 8:
++        xbp_set_gpr( ucontext, ld->reg, val );
++        break;
++    case 4:
++        xbp_set_gpr( ucontext, ld->reg, (DWORD32)val );
++        break;
++    default:
++        if (!ld->rex && ld->reg >= 4)
++        {
++            old = xbp_get_gpr( ucontext, ld->reg - 4 );
++            xbp_set_gpr( ucontext, ld->reg - 4, (old & ~(DWORD64)0xff00) | ((val & 0xff) << 8) );
++        }
++        else
++        {
++            old = xbp_get_gpr( ucontext, ld->reg );
++            xbp_set_gpr( ucontext, ld->reg, (old & ~(DWORD64)0xff) | (val & 0xff) );
++        }
++        break;
++    }
++}
++
++/* Perform the decoded read's effect on the faulting context. */
++static void xbp_apply_load( ucontext_t *ucontext, const struct xbp_load *ld, unsigned long long val )
++{
++    DWORD64 other, res;
++
++    switch (ld->kind)
++    {
++    case XBP_LOAD_MOV:
++    case XBP_LOAD_MOV8:
++        xbp_write_reg( ucontext, ld, val );
++        break;
++    case XBP_LOAD_ZX:    /* the loaded bytes already are */
++        xbp_set_gpr( ucontext, ld->reg, val );
++        break;
++    case XBP_LOAD_SX:    /* sign-extended to the operand size, a 32-bit result zero-extends */
++        if (ld->width == 1) val = (INT64)(signed char)val;
++        else if (ld->width == 2) val = (INT64)(short)val;
++        else val = (INT64)(INT32)val;
++        if (!(ld->rex & 8)) val = (DWORD32)val;
++        xbp_set_gpr( ucontext, ld->reg, val );
++        break;
++    case XBP_LOAD_TEST:
++    case XBP_LOAD_CMP_MR:
++        other = ld->has_imm ? ld->imm : xbp_reg_operand( ucontext, ld );
++        EFL_sig(ucontext) = xbp_alu( ld->kind == XBP_LOAD_TEST ? 4 : 7, ld->width, val, other,
++                                     EFL_sig(ucontext), &res );
++        break;
++    case XBP_LOAD_CMP_RM:
++        EFL_sig(ucontext) = xbp_alu( 7, ld->width, xbp_reg_operand( ucontext, ld ), val,
++                                     EFL_sig(ucontext), &res );
++        break;
++    case XBP_LOAD_ALU_RM:
++        EFL_sig(ucontext) = xbp_alu( ld->alu, ld->width, xbp_reg_operand( ucontext, ld ), val,
++                                     EFL_sig(ucontext), &res );
++        xbp_write_reg( ucontext, ld, res );
++        break;
++    case XBP_LOAD_OTHER:   /* never completed here */
++        break;
++    }
++}
++
++/* A context write for thread tid carried debug registers: replace that
++ * thread's breakpoints with the ones now enabled in Dr7. */
++static void xbp_sync( ULONG_PTR tid, const CONTEXT *context, BOOL self )
++{
++    const DWORD64 dr[4] = { context->Dr0, context->Dr1, context->Dr2, context->Dr3 };
++    DWORD64 dr7 = xbp_mask_dr7( context->Dr7 );
++    unsigned int i, n;
++    int t;
++
++    if (!tid) return;
++    xbp_acquire();
++    for (i = 0; i < xbp_count; )
++    {
++        if (xbp[i].tid != tid) { i++; continue; }
++        xbp_page_unref( xbp[i].addr & ~(ULONG_PTR)0xfff );
++        xbp[i] = xbp[--xbp_count];
++    }
++    for (n = 0; n < 4; n++)
++    {
++        unsigned int rw, len;
++
++        if (!((dr7 >> (2 * n)) & 3) || !dr[n]) continue;
++        rw = (dr7 >> (16 + 4 * n)) & 3;
++        if (rw == 2) continue;                     /* I/O breakpoints are not emulated */
++        switch ((dr7 >> (18 + 4 * n)) & 3)
++        {
++        case 0: len = 1; break;
++        case 1: len = 2; break;
++        case 2: len = 8; break;
++        default: len = 4; break;
++        }
++        if (xbp_count == XBP_MAX)
++        {
++            ERR_(seh)( "breakpoint table full, Dr%u %#lx of thread %04lx not armed\n", n, (ULONG_PTR)dr[n], tid );
++            break;
++        }
++        if (!xbp_page_ref( dr[n] & ~(ULONG_PTR)0xfff, rw ))
++        {
++            WARN_(seh)( "Dr%u %#lx of thread %04lx not armed: page cannot host it\n", n, (ULONG_PTR)dr[n], tid );
++            continue;
++        }
++        xbp[xbp_count].tid = tid;
++        xbp[xbp_count].addr = dr[n];
++        xbp[xbp_count].index = n;
++        xbp[xbp_count].rw = rw;
++        xbp[xbp_count].len = len;
++        xbp_count++;
++    }
++    /* RF: the thread resumes at an armed address without trapping on it. */
++    if (self && (context->ContextFlags & CONTEXT_CONTROL & ~CONTEXT_AMD64) &&
++        (context->EFlags & 0x10000) && (t = xbp_thread_slot( tid, TRUE )) >= 0)
++        xbp_thread[t].skip_addr = context->Rip;
++    xbp_release();
++}
++
++/* Called from segv_handler for a page fault.
++ * 0 = not ours, 1 = ours, resume the guest, 2 = ours, raise a synthetic #DB
++ * with the hit's B bits in *bmask (execute breakpoints fault before the
++ * instruction; data watchpoints deliver after the triggering instruction
++ * has run -- immediately, out of the unix side's alias of the page, when the
++ * faulting load was completed in the handler, at the trap otherwise). */
++static int xbp_handle_fault( ucontext_t *ucontext, ULONG_PTR fault_addr, unsigned int *bmask )
++{
++    ULONG_PTR rip = RIP_sig(ucontext), tid, page;
++    unsigned int i;
++    int p, t, ret = 0;
++
++    page = fault_addr & ~(ULONG_PTR)0xfff;
++    tid = xbp_self();
++    xbp_acquire();
++    if ((p = xbp_find_page( page )) < 0)
++    {
++        if (xbp_fault_is_stale( page, ERROR_sig(ucontext) )) ret = 1;
++        goto done;
++    }
++    t = xbp_thread_slot( tid, TRUE );
++    if (!(ERROR_sig(ucontext) & 0x10))
++    {
++        /* a data access on a watched page.  Windows delivers a data
++         * watchpoint after the triggering instruction has run, so the
++         * access is completed and the #DB is raised after it. */
++        BOOL write = !!(ERROR_sig(ucontext) & 2);
++        /* an access from the unix side, inside a system call, is the
++         * kernel's: Windows never raises a user-mode #DB for it.  It is
++         * completed or stepped over like any other, and hits nothing. */
++        BOOL guest = !is_inside_syscall( RSP_sig(ucontext) );
++        ULONG_PTR efl = EFL_sig(ucontext), ea = fault_addr, width = 1;
++        struct xbp_load ld;
++        BOOL decoded = xbp_decode_load( ucontext, rip, &ld );
++
++        /* an access the page's own protection already denied is the guest's
++         * access violation, not a watchpoint of ours: a write to a
++         * read-only page faults as itself even while a read watchpoint is
++         * armed on the page, and no B bit is raised because the write
++         * never happens */
++        if (!xbp_prot_allows( xbp_page[p].oldprot, write )) goto done;
++
++        if (!write && page == 0x7ffe0000 && (ULONG_PTR)user_shared_data != 0x7ffe0000)
++        {
++            /* a read of the user shared data page, which the unix side
++             * keeps an alias mapping of: complete the load right here out
++             * of the alias and deliver now.  No protection is restored and
++             * no single-step is armed, so no window ever opens in which
++             * another thread's read of the page would pass silently. */
++            if (decoded && ld.kind != XBP_LOAD_OTHER &&
++                (ld.ea & ~(ULONG_PTR)0xfff) == 0x7ffe0000 && (ld.ea & 0xfff) + ld.width <= 0x1000)
++            {
++                unsigned long long val = 0;
++
++                memcpy( &val, (const unsigned char *)user_shared_data + (ld.ea & 0xfff), ld.width );
++                xbp_apply_load( ucontext, &ld, val );
++                RIP_sig(ucontext) = rip + ld.len;
++                if (t >= 0 && xbp_thread[t].skip_addr == rip)   /* RF: run it once, no trap */
++                {
++                    xbp_thread[t].skip_addr = 0;
++                    ret = 1;
++                    goto done;
++                }
++                for (i = 0; guest && i < xbp_count; i++)
++                {
++                    if (xbp[i].tid != tid || xbp[i].rw != 3) continue;
++                    if (xbp[i].addr + xbp[i].len <= ld.ea || ld.ea + ld.width <= xbp[i].addr)
++                        continue;   /* the access does not overlap the watched range */
++                    *bmask |= 1u << xbp[i].index;
++                }
++                if (*bmask)
++                {
++                    if (efl & 0x100) *bmask |= 0x4000;   /* TF pending on the same instruction */
++                    ret = 2;
++                }
++                else ret = 1;
++                goto done;
++            }
++            /* not a read we can complete here: fall through to the step-over */
++            WARN_(seh)( "read of the user shared data page at %#lx not decoded, stepping over it\n", rip );
++        }
++
++        /* the access's exact extent when the instruction decodes; otherwise
++         * the faulting byte alone -- a guessed width would fire watchpoints
++         * on neighbouring variables the access never touched */
++        if (decoded && ld.ea < page + 0x1000 && ld.ea + ld.width > page)
++        {
++            ea = ld.ea;
++            width = ld.width;
++        }
++        for (i = 0; guest && i < xbp_count; i++)
++        {
++            if (xbp[i].tid != tid || xbp[i].rw == 0) continue;
++            if (xbp[i].rw == 1 && !write) continue;
++            if (xbp[i].addr + xbp[i].len <= ea || ea + width <= xbp[i].addr)
++                continue;   /* the access does not overlap the watched range */
++            if (t >= 0 && xbp_thread[t].skip_addr == rip)   /* RF: run it once, no trap */
++            {
++                xbp_thread[t].skip_addr = 0;
++                *bmask = 0;
++                break;
++            }
++            if (t >= 0) *bmask |= 1u << xbp[i].index;
++        }
++        /* a watchpoint this thread owns: run the access once and deliver
++         * the #DB at the trap; an access the thread does not watch: run it
++         * and take the page away again at the trap */
++        if (t < 0) goto done;   /* no room to step: leave the fault to the guest */
++        xbp_thread[t].skip_addr = 0;
++        xbp_thread[t].step_page = page;
++        xbp_thread[t].step_tf = !!(efl & 0x100);
++        xbp_thread[t].deliver_bmask = *bmask;
++        xbp_set_prot( page, xbp_page[p].oldprot );
++        EFL_sig(ucontext) = efl | 0x100;
++        ret = 1;
++        goto done;
++    }
++    for (i = 0; i < xbp_count; i++)
++    {
++        if (xbp[i].tid != tid || xbp[i].rw != 0 || xbp[i].addr != rip) continue;
++        if (t >= 0 && xbp_thread[t].skip_addr == rip) break;
++        if (t >= 0) xbp_thread[t].skip_addr = 0;
++        *bmask = 1u << xbp[i].index;
++        ret = 2;
++        goto done;
++    }
++    if (t < 0) goto done;   /* no room to track a step: leave it to the guest */
++    xbp_thread[t].skip_addr = 0;
++    xbp_thread[t].step_page = page;
++    xbp_thread[t].step_tf = !!(EFL_sig(ucontext) & 0x100);
++    xbp_thread[t].deliver_bmask = 0;
++    xbp_set_prot( page, xbp_page[p].oldprot );
++    EFL_sig(ucontext) |= 0x100;
++    ret = 1;
++done:
++    xbp_release();
++    return ret;
++}
++
++/* Called from trap_handler for a single-step trap.  0 when the trap was the
++ * guest's own (deliver it as it stands), 1 when it was our own step-over and
++ * the guest must not see it, 2 when a watchpoint armed by this thread must
++ * now be delivered, with the hit's B bits in *bmask. */
++static int xbp_handle_step( ucontext_t *ucontext, unsigned int *bmask )
++{
++    ULONG_PTR tid = xbp_self();
++    int ret = 0;
++    int t, p;
++
++    xbp_acquire();
++    if ((t = xbp_thread_slot( tid, FALSE )) >= 0 && xbp_thread[t].step_page)
++    {
++        if ((p = xbp_find_page( xbp_thread[t].step_page )) >= 0)
++            xbp_set_prot( xbp_page[p].page, xbp_page[p].stripped_prot );
++        xbp_thread[t].step_page = 0;
++        if (xbp_thread[t].deliver_bmask)
++        {
++            *bmask = xbp_thread[t].deliver_bmask;
++            xbp_thread[t].deliver_bmask = 0;
++            if (xbp_thread[t].step_tf) *bmask |= 0x4000;   /* the guest's own TF was pending too */
++            else EFL_sig(ucontext) &= ~0x100;   /* ours alone: the delivered context must not keep it */
++            ret = 2;
++        }
++        else if (!xbp_thread[t].step_tf)
++        {
++            EFL_sig(ucontext) &= ~0x100;
++            ret = 1;
++        }
++    }
++    xbp_release();
++    return ret;
++}
++
++/* A thread is going away: drop its breakpoints, the page references they
++ * hold, any single-step state, and its cached debug registers, so the
++ * pages it armed do not stay protected and a reused TID inherits nothing.
++ * Runs on the exiting thread while it can still execute. */
++void drbp_thread_exit( ULONG_PTR tid )
++{
++    unsigned int i;
++    int t, p;
++
++    if (!tid || drbp_mode() != 3) return;
++    xbp_acquire();
++    for (i = 0; i < xbp_count; )
++    {
++        if (xbp[i].tid == tid)
++        {
++            xbp_page_unref( xbp[i].addr & ~(ULONG_PTR)0xfff );
++            xbp[i] = xbp[--xbp_count];
++        }
++        else i++;
++    }
++    if ((t = xbp_thread_slot( tid, FALSE )) >= 0)
++    {
++        /* a step-over may be in flight: put the page back under protection */
++        if (xbp_thread[t].step_page &&
++            (p = xbp_find_page( xbp_thread[t].step_page )) >= 0)
++            xbp_set_prot( xbp_thread[t].step_page, xbp_page[p].stripped_prot );
++        xbp_thread[t].tid = 0;
++        xbp_thread[t].step_page = 0;
++        xbp_thread[t].skip_addr = 0;
++        xbp_thread[t].step_tf = 0;
++        xbp_thread[t].deliver_bmask = 0;
++    }
++    xbp_release();
++    drcache_forget( tid );
++}
++
++
+ static void drcache_dump_target( unsigned int event, DWORD64 addr )
+ {
+     unsigned char code[32];
+@@ -1707,7 +2692,7 @@
+     drcache[i].dr2 = dr2;
+     drcache[i].dr3 = dr3;
+     drcache[i].dr6 = dr6;
+-    drcache[i].dr7 = dr7;
++    drcache[i].dr7 = xbp_mask_dr7( dr7 );
+     drcache_release();
+ }
+ 
+@@ -1734,7 +2719,7 @@
+     drcache[i].dr2 = context->Dr2;
+     drcache[i].dr3 = context->Dr3;
+     drcache[i].dr6 = context->Dr6;
+-    drcache[i].dr7 = context->Dr7;
++    drcache[i].dr7 = xbp_mask_dr7( context->Dr7 );
+     drcache_release();
+     drcache_log( "store", event, tid, context );
+ }
+@@ -1763,7 +2748,66 @@
+     if (found) drcache_log( "apply", event, tid, context );
+ }
+ 
++/* Read a thread's cached debug registers back.  TRUE when the thread has
++ * an entry. */
++static BOOL drcache_get( ULONG_PTR tid, DWORD64 *dr0, DWORD64 *dr1,
++                         DWORD64 *dr2, DWORD64 *dr3, DWORD64 *dr6, DWORD64 *dr7 )
++{
++    unsigned int i;
++    BOOL found = FALSE;
+ 
++    if (!tid) return FALSE;
++    drcache_acquire();
++    for (i = 0; i < drcache_count; i++)
++    {
++        if (drcache[i].tid != tid) continue;
++        if (dr0) *dr0 = drcache[i].dr0;
++        if (dr1) *dr1 = drcache[i].dr1;
++        if (dr2) *dr2 = drcache[i].dr2;
++        if (dr3) *dr3 = drcache[i].dr3;
++        if (dr6) *dr6 = drcache[i].dr6;
++        if (dr7) *dr7 = drcache[i].dr7;
++        found = TRUE;
++        break;
++    }
++    drcache_release();
++    return found;
++}
++
++/* Replace a thread's cached status register alone, when it has an entry. */
++static void drcache_set_dr6( ULONG_PTR tid, DWORD64 dr6 )
++{
++    unsigned int i;
++
++    if (!tid) return;
++    drcache_acquire();
++    for (i = 0; i < drcache_count; i++)
++    {
++        if (drcache[i].tid != tid) continue;
++        drcache[i].dr6 = dr6;
++        break;
++    }
++    drcache_release();
++}
++
++/* Drop a thread's cached debug registers; the thread is going away and a
++ * reused TID must inherit nothing. */
++static void drcache_forget( ULONG_PTR tid )
++{
++    unsigned int i;
++
++    if (!tid) return;
++    drcache_acquire();
++    for (i = 0; i < drcache_count; i++)
++    {
++        if (drcache[i].tid != tid) continue;
++        drcache[i] = drcache[--drcache_count];
++        break;
++    }
++    drcache_release();
++}
++
++
+ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
+ {
+     NTSTATUS ret;
+@@ -1785,7 +2829,7 @@
+         if (context->Dr7 & 0xff)
+         {
+             drcache_dump_target( event, context->Dr0 );
+-            if (drbp_on())
++            if (drbp_on() && drbp_mode() != 3)
+             {
+                 drbp_dr7 = (ULONG_PTR)context->Dr7;
+                 drbp_arm( context->Dr0 );
+@@ -1793,6 +2837,12 @@
+         }
+         if (drcache_on()) drcache_store( handle, event, context );
+     }
++    if (!ret && drbp_mode() == 3 && (requested & DRCACHE_BIT))
++    {
++        BOOL self = (handle == GetCurrentThread());
++        if (self) drcache_store( handle, event, context );
++        xbp_sync( drcache_tid( handle ), context, self );
++    }
+     if (top && !ret && handle != GetCurrentThread())
+     {
+         ctxlog_pending.handle = handle;
+@@ -1935,7 +2985,7 @@
+         amd64_thread_data()->dr2 = context->Dr2;
+         amd64_thread_data()->dr3 = context->Dr3;
+         amd64_thread_data()->dr6 = context->Dr6;
+-        amd64_thread_data()->dr7 = context->Dr7;
++        amd64_thread_data()->dr7 = xbp_mask_dr7( context->Dr7 );
+     }
+     set_context_exception_reporting_flags( &context->ContextFlags, CONTEXT_SERVICE_ACTIVE );
+     return STATUS_SUCCESS;
+@@ -3200,7 +4250,54 @@
+         }
+         break;
+     case TRAP_x86_PAGEFLT:  /* Page fault */
++        if (drbp_mode() == 3)
+         {
++            unsigned int bmask = 0;
++            int x = xbp_handle_fault( ucontext, (ULONG_PTR)siginfo->si_addr, &bmask );
++
++            if (x == 1)
++            {
++                leave_handler( ucontext );
++                return;
++            }
++            if (x == 2)
++            {
++                /* As the hardware delivers it: an execute breakpoint faults
++                 * before the instruction, a data watchpoint delivers after
++                 * the triggering instruction has run -- the emulated load was
++                 * already completed and RIP advanced past it -- with the
++                 * hit's B bits in Dr6.  The other debug registers are what
++                 * the arming context wrote: when another thread armed the
++                 * breakpoint, this thread's stored copies are zero, so read
++                 * the cache entry the arming write left, and only the status
++                 * register changes on a hit. */
++                DWORD64 dr0, dr1, dr2, dr3, dr7;
++                ULONG_PTR self = xbp_self();
++
++                save_context( &context, ucontext );   /* pick up the completed load */
++                rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
++                rec.ExceptionAddress = (void *)RIP_sig(ucontext);
++                rec.NumberParameters = 0;
++                amd64_thread_data()->dr6 = 0xffff0ff0 | bmask;
++                if (!drcache_get( self, &dr0, &dr1, &dr2, &dr3, NULL, &dr7 ))
++                {
++                    dr0 = amd64_thread_data()->dr0;
++                    dr1 = amd64_thread_data()->dr1;
++                    dr2 = amd64_thread_data()->dr2;
++                    dr3 = amd64_thread_data()->dr3;
++                    dr7 = amd64_thread_data()->dr7;
++                }
++                context.c.Dr0 = dr0;
++                context.c.Dr1 = dr1;
++                context.c.Dr2 = dr2;
++                context.c.Dr3 = dr3;
++                context.c.Dr6 = amd64_thread_data()->dr6;
++                context.c.Dr7 = dr7;
++                drcache_put( self, dr0, dr1, dr2, dr3, context.c.Dr6, dr7 );
++                break;
++            }
++        }
++        {
+             int drbp = drbp_handle_fault( (ULONG_PTR)siginfo->si_addr, RIP_sig(ucontext) );
+ 
+             if (drbp == 1)
+@@ -3290,6 +4387,53 @@
+     switch (TRAP_sig(ucontext))
+     {
+     case TRAP_x86_TRCTRAP:
++        if (drbp_mode() == 3)
++        {
++            unsigned int bmask = 0;
++            int s = xbp_handle_step( ucontext, &bmask );
++
++            if (s == 1)
++            {
++                leave_handler( ucontext );
++                return;
++            }
++            if (s == 2)
++            {
++                /* a watchpoint this thread armed: the #DB arrives after
++                 * the triggering instruction, its B bits in Dr6 */
++                DWORD64 dr0, dr1, dr2, dr3, dr7;
++                ULONG_PTR self = xbp_self();
++
++                save_context( &context, ucontext );   /* pick up the cleared TF */
++                rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
++                rec.NumberParameters = 0;
++                amd64_thread_data()->dr6 = 0xffff0ff0 | bmask;
++                if (!drcache_get( self, &dr0, &dr1, &dr2, &dr3, NULL, &dr7 ))
++                {
++                    dr0 = amd64_thread_data()->dr0;
++                    dr1 = amd64_thread_data()->dr1;
++                    dr2 = amd64_thread_data()->dr2;
++                    dr3 = amd64_thread_data()->dr3;
++                    dr7 = amd64_thread_data()->dr7;
++                }
++                context.c.Dr0 = dr0;
++                context.c.Dr1 = dr1;
++                context.c.Dr2 = dr2;
++                context.c.Dr3 = dr3;
++                context.c.Dr6 = amd64_thread_data()->dr6;
++                context.c.Dr7 = dr7;
++                drcache_put( self, dr0, dr1, dr2, dr3, context.c.Dr6, dr7 );
++                break;
++            }
++            /* s == 0: the guest's own single-step trap, delivered per event:
++             * BS set, no B bits left over from an earlier delivery.  The
++             * cache takes it too: setup_raise_exception reads the debug
++             * registers back through NtGetContextThread, which would
++             * otherwise hand the guest the previous delivery's Dr6. */
++            amd64_thread_data()->dr6 = 0xffff0ff0 | 0x4000;
++            context.c.Dr6 = amd64_thread_data()->dr6;
++            drcache_set_dr6( xbp_self(), context.c.Dr6 );
++        }
+         rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
+         break;
+     case TRAP_x86_BPTFLT:
+@@ -3666,11 +4810,14 @@
+     thread_data->syscall_frame = (struct syscall_frame *)(((ULONG_PTR)kernel_stack - frame_size) & ~(ULONG_PTR)63);
+ 
+     /* sneak in a syscall dispatcher pointer at a fixed address (7ffe1000) */
+-    ptr = (char *)user_shared_data + page_size;
++    ptr = (char *)0x7ffe0000 + page_size;  /* user_shared_data may be a private view */
+     anon_mmap_fixed( ptr, page_size, PROT_READ | PROT_WRITE, 0 );
+     *(void **)ptr = __wine_syscall_dispatcher;
+ 
+     xstate_extended_features = user_shared_data->XState.EnabledFeatures & ~(UINT64)3;
++    usd_xsave_enabled = user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED];
++    usd_xstate_features = user_shared_data->XState.EnabledFeatures;
++    usd_xstate_flags = user_shared_data->XState.ControlFlags;
+ 
+     if (wow_teb)
+     {
+@@ -3915,16 +5062,16 @@
+                    /* Legends of Runeterra hooks the first system call return instruction, and
+                     * depends on us returning to it. Adjust the return address accordingly. */
+                    "subq $0xb,0x70(%rcx)\n\t"
+-                   "cmpb $0,0x7ffe0285\n\t"        /* user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED] */
++                   "cmpb $0," __ASM_NAME("usd_xsave_enabled") "(%rip)\n\t" /* user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED] */
+                    "jz 2f\n\t"
+-                   "movl 0x7ffe03d8,%eax\n\t"      /* user_shared_data->XState.EnabledFeatures */
++                   "movl " __ASM_NAME("usd_xstate_features") "(%rip),%eax\n\t" /* user_shared_data->XState.EnabledFeatures */
+                    "xorl %edx,%edx\n\t"
+                    "andl $7,%eax\n\t"
+                    "xorq %rbp,%rbp\n\t"
+                    "movq %rbp,0x2c0(%rcx)\n\t"
+                    "movq %rbp,0x2c8(%rcx)\n\t"
+                    "movq %rbp,0x2d0(%rcx)\n\t"
+-                   "testl $2,0x7ffe03ec\n\t"       /* user_shared_data->XState.CompactionEnabled */
++                   "testl $2," __ASM_NAME("usd_xstate_flags") "(%rip)\n\t" /* user_shared_data->XState.CompactionEnabled */
+                    "jz 1f\n\t"
+                    "movq %rbp,0x2d8(%rcx)\n\t"
+                    "movq %rbp,0x2e0(%rcx)\n\t"
+@@ -4042,11 +5189,11 @@
+                    "movaps 0x240(%rcx),%xmm14\n\t"
+                    "movaps 0x250(%rcx),%xmm15\n\t"
+                    "jmp 4f\n"
+-                   "2:\tcmpb $0,0x7ffe0285\n\t"    /* user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED] */
++                   "2:\tcmpb $0," __ASM_NAME("usd_xsave_enabled") "(%rip)\n\t" /* user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED] */
+                    "jz 3f\n\t"
+                    "movq %rax,%r11\n\t"
+-                   "movl 0x7ffe03d8,%eax\n\t"      /* user_shared_data->XState.EnabledFeatures */
+-                   "movl 0x7ffe03dc,%edx\n\t"
++                   "movl " __ASM_NAME("usd_xstate_features") "(%rip),%eax\n\t" /* user_shared_data->XState.EnabledFeatures */
++                   "movl " __ASM_NAME("usd_xstate_features") "+4(%rip),%edx\n\t"
+                    "xrstor64 0xc0(%rcx)\n\t"
+                    "movq %r11,%rax\n\t"
+                    "movl 0xb4(%rcx),%edx\n\t"      /* frame->restore_flags */
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4422,6 +4422,19 @@
+     {
+         ERR( "failed to remap the process USD: %d\n", res );
+         exit(1);
++    }
++    /* CX_DR_TRAP=3 emulates read watchpoints on this page by taking read
++     * access to it away from the process while one is armed.  The unix side
++     * keeps reading it (time, xstate layout, processor features), so it reads
++     * a second view of the same pages that no guest protection change
++     * touches. */
++    {
++        const char *val = getenv( "CX_DR_TRAP" );
++        void *alias;
++
++        if (val && val[0] == '3' &&
++            (alias = mmap( NULL, page_size, PROT_READ, MAP_SHARED, fd, 0 )) != MAP_FAILED)
++            user_shared_data = alias;
+     }
+     if (needs_close) close( fd );
+     NtClose( section );
+@@ -5586,6 +5599,13 @@
+  *             NtProtectVirtualMemory   (NTDLL.@)
+  *             ZwProtectVirtualMemory   (NTDLL.@)
+  */
++#ifdef __x86_64__
++/* CX_DR_TRAP=3 (signal_x86_64.c): pages carrying emulated watchpoints keep
++ * their own protection visible to the guest. */
++extern void drbp_protect_hook( void *base, SIZE_T size, ULONG new_prot, ULONG *old_prot );
++extern ULONG drbp_query_hook( const void *base, ULONG prot );
++#endif
++
+ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr,
+                                         ULONG new_prot, ULONG *old_prot )
+ {
+@@ -5665,6 +5685,9 @@
+         *addr_ptr = base;
+         *size_ptr = size;
+         *old_prot = old;
++#ifdef __x86_64__
++        drbp_protect_hook( base, size, new_prot, old_prot );
++#endif
+     }
+     else *old_prot = PAGE_NOACCESS;
+     return status;
+@@ -5862,6 +5885,9 @@
+     }
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+ 
++#ifdef __x86_64__
++    if (info->State == MEM_COMMIT) info->Protect = drbp_query_hook( base, info->Protect );
++#endif
+     return STATUS_SUCCESS;
+ }
+ 
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -92,6 +92,13 @@
+     if (status && !(status & 0xff)) return 1;
+     return status;
+ }
++
++#ifdef __x86_64__
++/* Debug-register emulation holds per-thread state (armed breakpoint pages,
++ * single-step slots, cached registers); release it before the thread dies,
++ * in signal_x86_64.c. */
++extern void drbp_thread_exit( ULONG_PTR tid );
++#endif
+ 
+ 
+ /***********************************************************************
+@@ -1109,6 +1116,9 @@
+     close( ntdll_get_thread_data()->wait_fd[1] );
+     close( ntdll_get_thread_data()->reply_fd );
+     close( ntdll_get_thread_data()->request_fd );
++#ifdef __x86_64__
++    drbp_thread_exit( (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread );
++#endif
+ 
+ #if defined(__APPLE__) && defined(__x86_64__)
+     /* Remove the PEB from the localtime field in %gs, or MacOS might try
