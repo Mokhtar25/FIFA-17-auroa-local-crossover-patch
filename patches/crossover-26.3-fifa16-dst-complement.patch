@@ -1,0 +1,79 @@
+FIFA 16 endless loading after the language screen: the RUNE protector's VM
+hands msvcr110!memmove the sign-extended complement (0xffffffffde50bd6d) of
+its real buffer pointer (0x21af4292, in the committed RW private region
+0x21700000-0x22b00000).  The first movsb at msvcr110+0xecd9 takes an access
+violation and the game's own VEH resumes the same instruction forever.
+
+This patch adds fifa16_dstfix_patch() to setup_raise_exception(): on an access
+violation whose write target is 0xffffffffde50bd6d, the context handed to the
+guest gets rcx = rdi = ~target before the guest handler runs, so the retried
+movsb writes to the real buffer and the copy completes.
+
+Gated by CX_FIFA16_DSTFIX: unset = off (behaviour unchanged), 0 = auto
+(complement of the fault address), <hex> = explicit candidate value.
+
+Documentation-only: not in build.sh's PATCHES list.  It is specific to the
+FIFA 16 bottle and does nothing unless the bottle sets the variable.  See
+../FIX-fifa16-loading-loop.md and ../HANDOFF-fifa16-loading-loop.md.
+--- a/dlls/ntdll/unix/signal_x86_64.c	2026-09-29 11:42:03
++++ b/dlls/ntdll/unix/signal_x86_64.c	2026-09-29 11:42:03
+@@ -3247,6 +3247,50 @@
+ /***********************************************************************
+  *           setup_raise_exception
+  */
++static int fifa16_dstfix = -1;
++static ULONG_PTR fifa16_dstfix_val;
++
++static void fifa16_dstfix_config(void)
++{
++    const char *val;
++
++    if (fifa16_dstfix >= 0) return;
++    fifa16_dstfix = 0;
++    if ((val = getenv( "CX_FIFA16_DSTFIX" )))
++    {
++        fifa16_dstfix_val = strtoull( val, NULL, 16 );
++        fifa16_dstfix = 1;
++    }
++}
++
++/* Experiment for the FIFA 16 loading loop: the protector hands msvcr110's
++ * memmove a sign-extended complement (0xffffffffde50bd6d) of the real buffer
++ * pointer.  When CX_FIFA16_DSTFIX is set, the faulting context's rcx/rdi are
++ * rewritten to the given value (0 = complement of the fault address) before
++ * the guest handler runs. */
++static void fifa16_dstfix_patch( EXCEPTION_RECORD *rec, CONTEXT *context )
++{
++    ULONG_PTR newdst;
++    struct ctxlog_buf buf;
++
++    fifa16_dstfix_config();
++    if (!fifa16_dstfix) return;
++    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return;
++    if (rec->NumberParameters < 2) return;
++    if (rec->ExceptionInformation[1] != (ULONG_PTR)0xffffffffde50bd6dULL) return;
++
++    newdst = fifa16_dstfix_val ? fifa16_dstfix_val : ~(ULONG_PTR)0xffffffffde50bd6dULL;
++    buf.len = 0;
++    ctxlog_str( &buf, "CTXBP dstfix" );
++    ctxlog_field( &buf, "a", rec->ExceptionInformation[1], 16 );
++    ctxlog_field( &buf, "b", newdst, 16 );
++    ctxlog_field( &buf, "c", context->Rip, 16 );
++    ctxlog_char( &buf, '\n' );
++    ctxlog_emit( buf.data, buf.len );
++    context->Rcx = newdst;
++    context->Rdi = newdst;
++}
++
+ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec, struct xcontext *xcontext )
+ {
+     ULONG_PTR rsp;
+@@ -3283,6 +3327,8 @@
+ 
+     /* fix up instruction pointer in context for EXCEPTION_BREAKPOINT */
+     if (rec->ExceptionCode == EXCEPTION_BREAKPOINT) context->Rip--;
++
++    fifa16_dstfix_patch( rec, context );
+ 
+     rsp = is_16bit(sigcontext) ? get_wow_teb( NtCurrentTeb() )->SystemReserved1[0] : RSP_sig(sigcontext);
+     rsp &= ~(ULONG_PTR)15;
