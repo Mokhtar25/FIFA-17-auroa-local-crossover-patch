@@ -92,14 +92,16 @@ Two things are known and worth stating rather than letting you find them:
 - `crypt32.dll` ships at ~4.4 MB against a stock ~830 KB. That is debugging
   information left in by the build settings, not extra code. It should be
   stripped before anyone calls this finished.
-- Of the twelve patches, the **online** one and **win32u** have been confirmed to
-  rebuild byte-for-byte. The rest are unverified in that specific sense, which
-  is exactly why `build.sh` compares and reports instead of asserting.
+- Of the twelve patches, the **online** one and **win32u**'s shm-flush fix have
+  been confirmed to rebuild byte-for-byte. The `ntdll.so` and `win32u.so` in
+  `fixes/` are now `build.sh`'s own output from 2026-09-30 and have not been
+  rebuilt elsewhere to compare. The rest are unverified in that specific sense,
+  which is exactly why `build.sh` compares and reports instead of asserting.
 
 The first eight *are* confirmed to apply cleanly, in order, to a pristine
 `crossover-sources-26.3.0.tar.gz`. FIFA 16's four were applied by `build.sh`,
-in order, on top of those eight in an existing build tree; they have not yet
-been applied starting from a pristine tarball.
+in order, on top of those eight starting from a pristine tarball on
+2026-09-30; the `ntdll.so` and `win32u.so` in `fixes/` are that build.
 
 ## What this does to your machine
 

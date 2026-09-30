@@ -3,76 +3,104 @@ KUSER_SHARED_DATA.
 
 Mode 3 emulates a read+write watchpoint by taking every access away from the
 watched page. Runtime protection systems keep such watchpoints armed on
-KUSER_SHARED_DATA+0x270 for the whole session, and every syscall stub in
-Wine's ntdll reads that page (testb $1,0x7ffe0308, the Windows form). So every
-system call from every thread took a fault, and under Rosetta a fault costs
-about 16 us whatever the handler does (a plain x86_64 SIGSEGV round trip
-measures the same). FIFA 16 made ~70,000 of them a second and stuttered.
+KUSER_SHARED_DATA+0x270 for the whole session, and two things on the system
+call path read that page: every syscall stub in Wine's ntdll and win32u
+(testb $1,0x7ffe0308, the Windows form), and win32u's unix side, which reads
+the tick count straight off 0x7ffe0000 -- three loads -- for the "hung queue"
+check on every PeekMessage and GetAsyncKeyState. So every system call from
+every thread took one fault or more (PeekMessageW took seven), and under
+Rosetta a fault costs about 16 us whatever the handler does (a plain x86_64
+SIGSEGV round trip measures the same). FIFA 16 made ~70,000 of them a second
+and stuttered.
 
-The first time a stub inside ntdll faults on that read, its displacement is
-pointed at a copy of SystemCall at 0x7ffe1008, on the page Wine already keeps
-the dispatcher pointer on, which no watchpoint covers. One byte changes; the
-instruction's length and result do not. Stubs outside ntdll are never
-touched, nor is a code page that carries a watchpoint of its own.
+The first time a stub inside one of Wine's own builtin images (ntdll or
+win32u: a MEM_IMAGE mapping whose DOS header carries "Wine builtin DLL")
+faults on that read, its displacement is pointed at a copy of SystemCall at
+0x7ffe1008, on the page Wine already keeps the dispatcher pointer on, which no
+watchpoint covers. One byte changes; the instruction's length and result do
+not. Stubs anywhere else are never touched, nor is a code page that carries a
+watchpoint of its own. win32u's queue check takes the tick count from
+NtGetTickCount instead, which reads ntdll's own unprotected view of the page:
+the same value in every bottle, compared in 32-bit arithmetic, which wraps
+correctly.
 
-tests/drbp/kuser_perf.exe, armed vs unarmed, FIFA16-dev bottle:
-  QueryPerformanceCounter   17378 ns -> 72 ns   (unarmed 61 ns)
-  GetSystemTimeAsFileTime   17045 ns -> 78 ns   (unarmed 78 ns)
-In the game: ~70,000 faults/s -> 1,000-4,000/s. GetTickCount and direct reads
-of the time fields still fault (they read the page itself); the game does ~300/s.
+A thread that already ran a stub's old bytes can take its fault after another
+thread has redirected that stub. Decoded as it now reads, the instruction
+misses the page, and the handler used to step over it -- which makes the page
+readable for an instruction and lets every other thread's watched reads
+through unseen. drrf_test phase 6 lost up to a third of its fires in 4 runs
+of 6 that way, when its 16 threads left through NtTerminateThread together.
+Such a fault is now completed as the SystemCall read it was: 10 runs of 10
+clean.
 
-Applies after crossover-26.3-fifa16-dst-complement.patch. Nothing changes
-unless a bottle sets CX_DR_TRAP=3.
+tests/drbp/kuser_perf.exe, FIFA16-dev bottle, ns per call:
+                            unarmed   armed, no patch   ntdll stubs only   this patch
+  QueryPerformanceCounter        60            17,378                 74           74
+  GetSystemTimeAsFileTime        80            16,959                 78           81
+  GetAsyncKeyState              113                 -             71,708          103
+  PeekMessageW                  302                 -            122,798          268
+In the game, at the start screen (dev-only fault counters, not in this
+patch): 1,140 faults a second with the ntdll-only first version of this
+patch, 490 with this one. What is left is kernelbase's GetTickCount and
+GetTickCount64, which read the page themselves, as on Windows (~120 calls a
+second each, 4 faults per game loop). Without the patch the game took
+~70,000 a second.
+
+Applies after crossover-26.3-fifa16-dst-complement.patch. The ntdll half
+changes nothing unless a bottle sets CX_DR_TRAP=3; the win32u half reads the
+same tick count in every bottle, one function call instead of three loads.
+The WARN line's "in a Wine builtin" is what setup.sh --fifa16 looks for to
+tell this build from the ntdll-only one.
 --- a/dlls/ntdll/unix/signal_x86_64.c
 +++ b/dlls/ntdll/unix/signal_x86_64.c
-@@ -2435,6 +2435,60 @@
+@@ -2435,8 +2435,62 @@
          (context->EFlags & 0x10000) && (t = xbp_thread_slot( tid, TRUE )) >= 0)
          xbp_thread[t].skip_addr = context->Rip;
      xbp_release();
 +}
 +
-+/* Every syscall stub in Wine's ntdll has the Windows form
++/* Every syscall stub in Wine's ntdll and win32u has the Windows form
 + *     4c 8b d1         movq %rcx,%r10
 + *     b8 <id>          movl $id,%eax
 + *     f6 04 25 08 03 fe 7f 01   testb $1,0x7ffe0308   (SystemCall)
 + * so while a read watchpoint keeps the user shared data page inaccessible,
 + * every system call takes a fault, and under Rosetta each costs ~16us: tens
-+ * of thousands a second in a game, which is a stutter.  The first time a stub
-+ * inside ntdll faults there, its testb is pointed at a copy of SystemCall at
-+ * 0x7ffe1008, beside the dispatcher pointer on Wine's own page, which no
-+ * watchpoint ever covers.  One byte of the address changes; the length and
-+ * the result do not.  Stubs outside ntdll are never touched. */
-+static ULONG_PTR xbp_ntdll_start, xbp_ntdll_end;
++ * of thousands a second in a game, which is a stutter.  win32u's are the
++ * NtUser and NtGdi calls a game makes every frame (PeekMessage,
++ * GetAsyncKeyState), several per call.  The first time a stub inside one of
++ * Wine's own builtin images faults there, its testb is pointed at a copy of
++ * SystemCall at 0x7ffe1008, beside the dispatcher pointer on Wine's own page,
++ * which no watchpoint ever covers.  One byte of the address changes; the
++ * length and the result do not.  Stubs anywhere else are never touched. */
++static BOOL xbp_in_builtin( ULONG_PTR start, ULONG_PTR end )
++{
++    static const char builtin_signature[] = "Wine builtin DLL";
++    MEMORY_BASIC_INFORMATION mbi;
++    const IMAGE_DOS_HEADER *dos;
++    const IMAGE_NT_HEADERS *nt;
++    ULONG_PTR base;
 +
++    if (NtQueryVirtualMemory( GetCurrentProcess(), (void *)start, MemoryBasicInformation,
++                              &mbi, sizeof(mbi), NULL ))
++        return FALSE;
++    if (mbi.Type != MEM_IMAGE || !mbi.AllocationBase) return FALSE;
++    base = (ULONG_PTR)mbi.AllocationBase;
++    dos = (const IMAGE_DOS_HEADER *)base;
++    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
++    if (dos->e_lfanew < sizeof(*dos) + sizeof(builtin_signature)) return FALSE;
++    if (memcmp( dos + 1, builtin_signature, sizeof(builtin_signature) )) return FALSE;
++    nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
++    if (nt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
++    return start >= base && end <= base + nt->OptionalHeader.SizeOfImage;
+ }
+ 
 +static BOOL xbp_stub_redirect( ULONG_PTR rip )
 +{
 +    static const BYTE testb[8] = { 0xf6, 0x04, 0x25, 0x08, 0x03, 0xfe, 0x7f, 0x01 };
 +    BYTE *p = (BYTE *)rip;
 +    ULONG_PTR page;
 +
-+    if (!xbp_ntdll_start)
-+    {
-+        /* images are 64k aligned, and everything from the base up to any
-+         * code address inside the image is mapped */
-+        ULONG_PTR b = (ULONG_PTR)pKiUserExceptionDispatcher & ~(ULONG_PTR)0xffff;
-+        const IMAGE_DOS_HEADER *dos;
-+        const IMAGE_NT_HEADERS *nt;
-+        int i;
-+
-+        if (!b) return FALSE;
-+        for (i = 0; i < 256; i++, b -= 0x10000)
-+        {
-+            dos = (const IMAGE_DOS_HEADER *)b;
-+            if (dos->e_magic != IMAGE_DOS_SIGNATURE) continue;
-+            nt = (const IMAGE_NT_HEADERS *)(b + dos->e_lfanew);
-+            if (nt->Signature != IMAGE_NT_SIGNATURE) continue;
-+            xbp_ntdll_end = b + nt->OptionalHeader.SizeOfImage;
-+            xbp_ntdll_start = b;
-+            break;
-+        }
-+        if (!xbp_ntdll_start) return FALSE;
-+    }
-+    if (rip < xbp_ntdll_start + 8 || rip + 8 > xbp_ntdll_end) return FALSE;
++    if (!xbp_in_builtin( rip - 8, rip + 8 )) return FALSE;
 +    if (memcmp( p, testb, sizeof(testb) )) return FALSE;
 +    if (p[-8] != 0x4c || p[-7] != 0x8b || p[-6] != 0xd1 || p[-5] != 0xb8) return FALSE;
 +    page = (ULONG_PTR)(p + 4) & ~(ULONG_PTR)0xfff;
@@ -83,15 +111,97 @@ unless a bottle sets CX_DR_TRAP=3.
 +    p[4] = 0x10;   /* 0x7ffe0308 -> 0x7ffe1008 */
 +    mprotect( (void *)page, 0x1000, PROT_READ | PROT_EXEC );
 +    return TRUE;
- }
- 
++}
++
  /* Called from segv_handler for a page fault.
-@@ -2492,6 +2546,8 @@
+  * 0 = not ours, 1 = ours, resume the guest, 2 = ours, raise a synthetic #DB
+  * with the hit's B bits in *bmask (execute breakpoints fault before the
+@@ -2486,12 +2540,22 @@
+              * of the alias and deliver now.  No protection is restored and
+              * no single-step is armed, so no window ever opens in which
+              * another thread's read of the page would pass silently. */
++            /* a syscall stub another thread pointed at 0x7ffe1008 after
++             * this one had already run its old bytes: the read that faulted
++             * is still SystemCall's.  Decoded as it now reads it would miss
++             * the page and be stepped over, which opens the page to every
++             * thread for an instruction. */
++            if (decoded && ld.kind == XBP_LOAD_TEST && ld.ea == 0x7ffe1008 &&
++                fault_addr == 0x7ffe0308)
++                ld.ea = 0x7ffe0308;
+             if (decoded && ld.kind != XBP_LOAD_OTHER &&
+                 (ld.ea & ~(ULONG_PTR)0xfff) == 0x7ffe0000 && (ld.ea & 0xfff) + ld.width <= 0x1000)
+             {
                  unsigned long long val = 0;
  
                  memcpy( &val, (const unsigned char *)user_shared_data + (ld.ea & 0xfff), ld.width );
 +                if (guest && (ld.ea & 0xfff) == 0x308 && xbp_stub_redirect( rip ))
-+                    WARN_(seh)( "syscall stub at %#lx now reads SystemCall at 0x7ffe1008\n", rip );
++                    WARN_(seh)( "syscall stub at %#lx in a Wine builtin now reads SystemCall at 0x7ffe1008\n", rip );
                  xbp_apply_load( ucontext, &ld, val );
                  RIP_sig(ucontext) = rip + ld.len;
                  if (t >= 0 && xbp_thread[t].skip_addr == rip)   /* RF: run it once, no trap */
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -46,38 +46,14 @@
+ #define QS_HARDWARE     0x40000000
+ #define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
+-
+-static LONG atomic_load_long( const volatile LONG *ptr )
+-{
+-#if defined(__i386__) || defined(__x86_64__)
+-    return *ptr;
+-#else
+-    return __atomic_load_n( ptr, __ATOMIC_SEQ_CST );
+-#endif
+-}
+-
+-static ULONG atomic_load_ulong( const volatile ULONG *ptr )
+-{
+-#if defined(__i386__) || defined(__x86_64__)
+-    return *ptr;
+-#else
+-    return __atomic_load_n( ptr, __ATOMIC_SEQ_CST );
+-#endif
+-}
+-
+-static UINT64 get_tick_count(void)
++/* whether the queue was accessed less than 3 seconds ago.  The tick count
++ * comes from ntdll rather than straight off 0x7ffe0000: while a debug-register
++ * watchpoint is emulated on that page (CX_DR_TRAP=3) every read of it faults,
++ * three per call here, on every PeekMessage and GetAsyncKeyState, and ntdll
++ * reads its own unprotected view.  32-bit tick arithmetic wraps correctly. */
++static BOOL queue_accessed_recently( const queue_shm_t *queue_shm )
+ {
+-    ULONG high, low;
+-
+-    do
+-    {
+-        high = atomic_load_long( &user_shared_data->TickCount.High1Time );
+-        low = atomic_load_ulong( &user_shared_data->TickCount.LowPart );
+-    }
+-    while (high != atomic_load_long( &user_shared_data->TickCount.High2Time ));
+-    /* note: we ignore TickCountMultiplier */
+-    return (UINT64)high << 32 | low;
++    return (ULONG)(NtGetTickCount() - (ULONG)(queue_shm->access_time / 10000)) < 3000; /* avoid hung queue */
+ }
+ 
+ #define MAX_WINPROC_RECURSION  64
+@@ -2919,7 +2895,7 @@
+         {
+             *wake_bits = queue_shm->wake_bits;
+             *changed_bits = queue_shm->changed_bits;
+-            skip = get_tick_count() - (UINT64)queue_shm->access_time / 10000 < 3000; /* avoid hung queue */
++            skip = queue_accessed_recently( queue_shm );
+         }
+     }
+ 
+@@ -3313,7 +3289,7 @@
+     while ((status = get_shared_queue( &lock, &queue_shm )) == STATUS_PENDING)
+     {
+         if (queue_shm->wake_mask != wake_mask || queue_shm->changed_mask != changed_mask) skip = FALSE;
+-        else skip = get_tick_count() - (UINT64)queue_shm->access_time / 10000 < 3000; /* avoid hung queue */
++        else skip = queue_accessed_recently( queue_shm );
+     }
+ 
+     if (status) return FALSE;

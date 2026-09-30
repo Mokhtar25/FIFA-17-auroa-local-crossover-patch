@@ -30,9 +30,11 @@ CrossOver-only. It touches dlls/win32u (sysparams.c, win32u_private.h, dce.c)
 and nothing else, so it is independent too and applies last.
 
 The ninth to twelfth are FIFA 16's, in build.sh's PATCHES list and built
-into fixes/x86_64-unix/ntdll.so, the one ntdll every profile shares. None of
-them changes anything for FIFA 15 or 17, because each is gated by a bottle
-setting only the FIFA 16 profile (AURORA_GAME=fifa16) writes.
+into fixes/x86_64-unix/ntdll.so, the one ntdll every profile shares; the
+twelfth is also in fixes/x86_64-unix/win32u.so. None of them changes what
+FIFA 15 or 17 does: each is gated by a bottle setting only the FIFA 16
+profile (AURORA_GAME=fifa16) writes, except the twelfth's win32u half, which
+runs in every bottle and reads the same tick count by another route.
 crossover-26.3-debug-register-emulation.patch is CX_DR_TRAP=3, which emulates
 user-mode hardware debug registers under Rosetta; FIFA 17's bottle keeps
 CX_DR_TRAP=2 and runs the same code as before. crossover-26.3-pf-pae-enabled.patch
@@ -47,18 +49,24 @@ matched one exact address and only worked on runs where it landed there, and
 the current version covers all of them. The game passed the training-field
 load that used to loop 770,595 times at 0xffffffffde42bd6d, and
 ../tests/drbp/tools/dstfix_test.c exercises the mechanism directly.
-crossover-26.3-drtrap-syscall-stub.patch is FIFA 16's
-stutter, also only under CX_DR_TRAP=3: mode 3 makes the whole
-KUSER_SHARED_DATA page fault while the protector's watchpoint on +0x270 is
-armed, and every ntdll syscall stub reads 0x7ffe0308, so every system call
-took a ~16 us fault under Rosetta (~70,000 a second in game). On the first
-fault it retargets that stub's read to a copy of SystemCall at 0x7ffe1008;
-the game drops to 1,000-4,000 faults a second. All four apply after the eight
-above, in this order -- the dst fix was made against a tree carrying the other
-two, and the stub fix against one carrying all three -- and are covered in
-README-debug-register-emulation.md and ../FIX-fifa16-loading-loop.md, with
-tests in ../tests/drbp (the tracer's logs are sliced with
-../tests/drbp/tools/slice.py).
+crossover-26.3-drtrap-syscall-stub.patch is FIFA 16's stutter: mode 3
+makes the whole KUSER_SHARED_DATA page fault while the protector's
+watchpoint on +0x270 is armed, and every syscall stub in Wine's ntdll (259)
+and win32u (1,542, the NtUser and NtGdi calls) reads 0x7ffe0308, so every
+system call took a ~16 us fault under Rosetta (~70,000 a second in game).
+Under CX_DR_TRAP=3, a stub's first fault retargets its read to a copy of
+SystemCall at 0x7ffe1008; only stubs inside Wine's own builtin images are
+touched. Its win32u half (dlls/win32u/message.c, every bottle) makes the
+message queue's hung-queue check take the tick count from NtGetTickCount
+instead of three loads off the page. The first version redirected ntdll's
+stubs only, and the game still stuttered in play (1,140 faults a second at
+the start screen); now it takes 490, all from kernelbase's GetTickCount and
+GetTickCount64 reading the page themselves, as on Windows. All four apply
+after the eight above, in this order -- the dst fix was made against a tree
+carrying the other two, and the stub fix against one carrying all three --
+and are covered in README-debug-register-emulation.md and
+../FIX-fifa16-loading-loop.md, with tests in ../tests/drbp (the tracer's logs
+are sliced with ../tests/drbp/tools/slice.py).
 
 APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
 
@@ -73,7 +81,8 @@ APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
     9. crossover-26.3-debug-register-emulation.patch  (ntdll; needs rosetta's drcache)
    10. crossover-26.3-pf-pae-enabled.patch        (ntdll/unix/system.c; independent)
    11. crossover-26.3-fifa16-dst-complement.patch  (ntdll/unix/signal_x86_64.c)
-   12. crossover-26.3-drtrap-syscall-stub.patch  (ntdll/unix/signal_x86_64.c; last)
+   12. crossover-26.3-drtrap-syscall-stub.patch  (ntdll/unix/signal_x86_64.c,
+                                                  win32u/message.c; last)
 
 cng must go last of the four: it builds on online, and both touch dlls/crypt32/pfx.c.
 Applying them in directory order -- the obvious thing to do with a folder of
@@ -113,9 +122,11 @@ WHAT EACH ONE COVERS
                           ../FIX-fifa16-loading-loop.md. Matches one heap
                           address, so it only works on some runs
     drtrap-syscall-stub
-              FIFA 16     the stutter: ntdll syscall stubs stop faulting on
-                          the watched KUSER_SHARED_DATA page under
-                          CX_DR_TRAP=3; ntdll/unix/signal_x86_64.c;
+              FIFA 16     the stutter: ntdll and win32u syscall stubs stop
+                          faulting on the watched KUSER_SHARED_DATA page
+                          under CX_DR_TRAP=3, and win32u's message queue
+                          takes the tick count from NtGetTickCount;
+                          ntdll/unix/signal_x86_64.c, win32u/message.c;
                           ../tests/drbp/kuser_perf.c
 
 Each patch carries its own header explaining what it changes and why, including

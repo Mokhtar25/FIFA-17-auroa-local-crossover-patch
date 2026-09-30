@@ -344,6 +344,76 @@ resign_app() { print -r -- "SIGNED app $1"; }
         self.assertIn("SIGNED app", out)
 
 
+class Fifa16UpdateTests(unittest.TestCase):
+    """./setup.sh --fifa16 on an existing copy brings both halves of the
+    stutter fix: the ntdll.so its marker names, and win32u.so by LC_UUID."""
+
+    def test_shipped_ntdll_carries_the_fifa16_marker(self):
+        source = (ROOT / "setup.sh").read_text().split(
+            "# --------------------------------------------------------- safety guards", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="a17-marker-") as directory:
+            probe = Path(directory) / "marker.sh"
+            probe.write_text(source + '\nprint -r -- "$NTDLL_MARKER"\n')
+            result = subprocess.run(["/bin/zsh", str(probe), "--verify"],
+                                    env={**os.environ, "AURORA_GAME": "fifa16", "NO_COLOR": "1"},
+                                    capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        marker = result.stdout.splitlines()[-1]
+        self.assertIn("Wine builtin", marker)
+        self.assertIn(marker.encode(), (ROOT / "fixes/x86_64-unix/ntdll.so").read_bytes())
+        setup = (ROOT / "setup.sh").read_text()
+        self.assertIn('add_game_ntdll "$TARGET"\n        f16_add_win32u "$TARGET"', setup)
+
+    def add_win32u(self, installed):
+        with tempfile.TemporaryDirectory(prefix="a17-win32u-") as directory:
+            work = Path(directory)
+            (work / "fixes/x86_64-unix").mkdir(parents=True)
+            (work / "fixes/x86_64-unix/win32u.so").write_bytes(b"fixed win32u.so")
+            wine = work / "App.app/Contents/SharedSupport/CrossOver/lib/wine"
+            (wine / "x86_64-unix").mkdir(parents=True)
+            (wine / "x86_64-unix/win32u.so").write_bytes(installed)
+            harness = r"""
+set -eu
+HERE="$PWD"
+E_PAYLOAD=4; E_PERMISSION=3
+APP_MGMT_HINT=hint
+RPATH_LIB64=@loader_path/../../../lib64
+ok() { print -r -- "ok $*"; }
+say() { print -r -- "say $*"; }
+note() { print -r -- "note $*"; }
+die() { print -r -- "die $*"; exit "$1"; }
+macho_uuid() { shasum "$1" | cut -c1-16; }
+require_app_closed() { :; }
+require_clt() { :; }
+has_lib64_rpath() { return 1; }
+install_name_tool() { print -r -- "RPATH $*"; }
+sign_payload() { print -r -- "SIGNED payload"; }
+resign_app() { print -r -- "SIGNED app"; }
+"""
+            harness += function_source("f16_add_win32u")
+            harness += '\nf16_add_win32u "$PWD/App.app"\n'
+            result = subprocess.run(["/bin/zsh", "-c", harness], cwd=work,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            orig = wine / "x86_64-unix/win32u.so.orig"
+            return (result.stdout, (wine / "x86_64-unix/win32u.so").read_bytes(),
+                    orig.read_bytes() if orig.exists() else None)
+
+    def test_an_older_win32u_is_replaced_and_signed(self):
+        out, installed, orig = self.add_win32u(b"older win32u.so")
+        self.assertEqual(installed, b"fixed win32u.so")
+        self.assertEqual(orig, b"older win32u.so")
+        self.assertIn("win32u.so search path -- added", out)
+        self.assertIn("SIGNED app", out)
+
+    def test_the_shipped_win32u_is_left_alone(self):
+        out, installed, orig = self.add_win32u(b"fixed win32u.so")
+        self.assertEqual(installed, b"fixed win32u.so")
+        self.assertIsNone(orig)
+        self.assertIn("already the shipped build", out)
+        self.assertNotIn("SIGNED", out)
+
+
 class ProcessScopeTests(unittest.TestCase):
     """The process helpers, run against a stubbed ps so nothing real is touched."""
 

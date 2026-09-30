@@ -120,9 +120,11 @@ PATCHES=(
     && PATCHES+=( crossover-26.3-pf-pae-enabled.patch )
 [ -f "$HERE/patches/crossover-26.3-fifa16-dst-complement.patch" ] \
     && PATCHES+=( crossover-26.3-fifa16-dst-complement.patch )
-# And one on top of the emulation, also mode 3 only: syscall stubs stop taking
-# a fault on every call while a watchpoint covers KUSER_SHARED_DATA, which is
-# what made FIFA 16 stutter. Made against the tree with all three above.
+# And one on top of the emulation: system calls stop taking a fault on every
+# call while a watchpoint covers KUSER_SHARED_DATA, which is what made FIFA 16
+# stutter -- the syscall stubs in ntdll and win32u (mode 3 only), and win32u's
+# message queue, which read the tick count off that page (now through ntdll, in
+# every bottle, same value). Made against the tree with all three above.
 [ -f "$HERE/patches/crossover-26.3-drtrap-syscall-stub.patch" ] \
     && PATCHES+=( crossover-26.3-drtrap-syscall-stub.patch )
 
@@ -138,8 +140,13 @@ TARGETS=(
     && TARGETS+=( dlls/gdiplus/all )
 [ -f "$HERE/patches/crossover-26.3-ole32-revoke-foreign-window.patch" ] \
     && TARGETS+=( dlls/ole32/all )
-[ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] \
-    && TARGETS+=( dlls/win32u/all )
+# win32u is built when a patch touches it: the shm-flush fix, and the
+# syscall-stub fix, whose win32u half stops the message queue reading the tick
+# count off the watched page.
+BUILD_WIN32U=""
+[ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] && BUILD_WIN32U=1
+[ -f "$HERE/patches/crossover-26.3-drtrap-syscall-stub.patch" ] && BUILD_WIN32U=1
+[ -n "$BUILD_WIN32U" ] && TARGETS+=( dlls/win32u/all )
 
 # The compiler for the unix half. The architecture is named here, not left to
 # "arch -x86_64" (see check_deps for why that stopped being enough).
@@ -350,15 +357,16 @@ fi
     || ln -s "$GNUTLS_INC/gnutls" "$WINE/build64/include/gnutls"
 ok "gnutls headers linked"
 
-# Three more configure results, for exactly the same reason, and only when the
-# win32u patch is here. configure above runs --without-freetype, so config.h
-# leaves all three undefined -- and win32u then builds with no font code and no
-# Vulkan loader, dlopens neither library, and CrossOver drops to a graphics path
-# that does not work on macOS. The two SONAMEs are dylibs CrossOver already
-# ships in lib64 and win32u opens by name at runtime, so only the freetype
-# *headers* are needed, and the tarball carries those beside wine/.
+# Three more configure results, for exactly the same reason, and only when
+# win32u is built (BUILD_WIN32U above). configure above runs
+# --without-freetype, so config.h leaves all three undefined -- and win32u
+# then builds with no font code and no Vulkan loader, dlopens neither library,
+# and CrossOver drops to a graphics path that does not work on macOS. The two
+# SONAMEs are dylibs CrossOver already ships in lib64 and win32u opens by name
+# at runtime, so only the freetype *headers* are needed, and the tarball
+# carries those beside wine/.
 FREETYPE_INC=""
-if [ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ]; then
+if [ -n "$BUILD_WIN32U" ]; then
     define_config() {  # <name> <the text that follows it in the #define>
         local name="$1" value="$2" cfg="$WINE/build64/include/config.h"
         if grep -q "^#define $name" "$cfg" 2>/dev/null; then
@@ -455,7 +463,7 @@ collect dlls/secur32/secur32.dll                x86_64-windows/secur32.dll
     && collect dlls/gdiplus/gdiplus.dll             x86_64-windows/gdiplus.dll
 [ -f "$HERE/patches/crossover-26.3-ole32-revoke-foreign-window.patch" ] \
     && collect dlls/ole32/ole32.dll                 x86_64-windows/ole32.dll
-[ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] \
+[ -n "$BUILD_WIN32U" ] \
     && collect dlls/win32u/win32u.so                x86_64-unix/win32u.so
 
 # a17hosts.dylib is ours outright, not a patched Wine component, so it needs
@@ -532,8 +540,10 @@ say ""
 # * win32u.so was built exactly the way this script now builds it: the three
 #   config.h defines above (HAVE_FT2BUILD_H, SONAME_LIBFREETYPE,
 #   SONAME_LIBVULKAN) plus the freetype headers from the tarball on CFLAGS. The
-#   shipped fixes/x86_64-unix/win32u.so matched a build from this tree on
-#   2026-09-15, which is as close to proof as this comparison gets.
+#   shm-flush-only win32u.so matched a build from this tree on 2026-09-15,
+#   which is as close to proof as this comparison gets; the one that ships
+#   now, which also carries the syscall-stub fix, is this script's output of
+#   2026-09-30 (next point) and has not been rebuilt elsewhere.
 #
 # * A rebuilt ntdll.so, crypt32.so and win32u.so lose their rpath. setup.sh
 #   puts it back
@@ -542,10 +552,10 @@ say ""
 #   graphics path that does not work on macOS and the game hangs on the loading
 #   screen with no clue why.
 #
-# * FIFA 16's four patches were applied by this script on 2026-09-29, in
-#   order, on top of a tree that already carried the other eight -- not yet
-#   starting from a pristine tarball. The fixes/x86_64-unix/ntdll.so that
-#   ships is that build. Rerunning on that same tree fails at the rosetta
-#   patch: once the emulation patch has edited its lines, the "already
-#   applied" test cannot recognise it. Reverse the four (last first) or start
+# * The fixes/x86_64-unix/ntdll.so and win32u.so that ship were built by this
+#   script on 2026-09-30 from a pristine crossover-sources-26.3.0 tarball, all
+#   twelve patches applied in order. The other files in fixes/ are older
+#   builds and were not replaced. Rerunning on a tree that already carries
+#   the patches fails at the rosetta patch: once the emulation patch has
+#   edited its lines, the "already applied" test cannot recognise it. Start
 #   from a fresh tree.

@@ -13,10 +13,12 @@
  *
  * Build: x86_64-w64-mingw32-gcc -O2 -Wall -o kuser_perf.exe kuser_perf.c
  * Output: ns per call for each query, unarmed / armed, and the ratio.
- * Exit 1 = armed is more than 5x slower than unarmed for a query that goes
- * through a syscall stub (QueryPerformanceCounter, GetSystemTimeAsFileTime):
- * those stubs read 0x7ffe0308, and crossover-26.3-drtrap-syscall-stub.patch
- * stops them faulting.  GetTickCount and the direct read load the time field
+ * Exit 1 = armed is more than 5x slower than unarmed for a call that goes
+ * through a syscall stub (QueryPerformanceCounter, GetSystemTimeAsFileTime in
+ * ntdll; GetAsyncKeyState, PeekMessageW in win32u, which a game calls every
+ * frame): those stubs read 0x7ffe0308, win32u's message queue read the tick
+ * count off the page on top, and crossover-26.3-drtrap-syscall-stub.patch
+ * stops both faulting.  GetTickCount and the direct read load the time field
  * off the page itself; they still fault and are reported, not judged.
  */
 
@@ -27,6 +29,7 @@
 
 #define WATCH 0x7ffe0270ULL
 #define N     200000
+#define NQ    6
 
 static HANDLE armed_evt, done_evt;
 
@@ -74,13 +77,15 @@ static double ns_per( int which )
         case 1: sink += GetTickCount(); break;
         case 2: GetSystemTimeAsFileTime( &ft ); sink += ft.dwLowDateTime; break;
         case 3: sink += *(volatile ULONG *)0x7ffe0320; break; /* TickCountLow */
+        case 4: sink += GetAsyncKeyState( VK_SPACE ); break;
+        case 5: { MSG m; sink += PeekMessageW( &m, NULL, 0, 0, PM_NOREMOVE ); } break;
         }
     }
     QueryPerformanceCounter( &t1 );
     return (double)(t1.QuadPart - t0.QuadPart) * 1e9 / f.QuadPart / N;
 }
 
-static void run( int armed, double out[4] )
+static void run( int armed, double out[NQ] )
 {
     HANDLE t;
     int w;
@@ -89,7 +94,7 @@ static void run( int armed, double out[4] )
     done_evt = CreateEventW( NULL, TRUE, FALSE, NULL );
     t = CreateThread( NULL, 0, worker, (void *)(intptr_t)armed, 0, NULL );
     WaitForSingleObject( armed_evt, INFINITE );
-    for (w = 0; w < 4; w++) out[w] = ns_per( w );
+    for (w = 0; w < NQ; w++) out[w] = ns_per( w );
     SetEvent( done_evt );
     WaitForSingleObject( t, INFINITE );
     CloseHandle( t ); CloseHandle( armed_evt ); CloseHandle( done_evt );
@@ -97,21 +102,23 @@ static void run( int armed, double out[4] )
 
 int main( void )
 {
-    static const char *name[4] = { "QueryPerformanceCounter", "GetTickCount",
-                                   "GetSystemTimeAsFileTime", "direct read 0x7ffe0320" };
-    double off[4], on[4];
+    static const char *name[NQ] = { "QueryPerformanceCounter", "GetTickCount",
+                                    "GetSystemTimeAsFileTime", "direct read 0x7ffe0320",
+                                    "GetAsyncKeyState (win32u)", "PeekMessageW (win32u)" };
+    double off[NQ], on[NQ];
     int w, bad = 0;
 
     setvbuf( stdout, NULL, _IONBF, 0 );
+    GetAsyncKeyState( VK_SPACE );   /* bring up user32 and this thread's queue unarmed */
     AddVectoredExceptionHandler( 1, veh );
     run( 0, off );
     run( 1, on );
     printf( "%-26s %12s %12s %8s\n", "query", "unarmed ns", "armed ns", "ratio" );
-    for (w = 0; w < 4; w++)
+    for (w = 0; w < NQ; w++)
     {
         double r = on[w] / (off[w] > 0 ? off[w] : 1);
         printf( "%-26s %12.1f %12.1f %7.1fx\n", name[w], off[w], on[w], r );
-        if ((w == 0 || w == 2) && r > 5) bad = 1;
+        if (w != 1 && w != 3 && r > 5) bad = 1;
     }
     printf( "%s\n", bad ? "RED: syscalls fault while a KUSER watchpoint is armed" : "GREEN" );
     return bad;

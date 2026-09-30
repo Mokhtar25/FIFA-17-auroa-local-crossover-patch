@@ -577,10 +577,11 @@ elif [ "$GAME" = fifa16 ]; then
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1"
                       "CX_DR_TRAP=3" "CX_FIFA16_DSTFIX=0" )
     GAME_LABEL="FIFA 16"
-    # The marker is the generic loop fix's log line: a build with only the
-    # one-address version of the fix has the syscall stub but still loops
-    # whenever the heap buffer lands elsewhere.
-    NTDLL_MARKER="CTXBP dstfix generic"
+    # The marker is the syscall-stub fix's log line in its second form. The
+    # build before it has the generic loop fix but patches only ntdll's stubs,
+    # and every win32u call still faults on the watched page: the stutter in
+    # play. Every build that has this line has the generic loop fix too.
+    NTDLL_MARKER="in a Wine builtin now reads SystemCall"
     NTDLL_OLD="an older"
     NTDLL_WHY="FIFA 16 stops before its start screen, loops after the language pick, or stutters, with it"
 else
@@ -1082,6 +1083,55 @@ require_app_closed() {
          run this again. Nothing has been changed."
 }
 
+# FIFA 16's win32u.so: the half of the syscall-stub fix that stops the message
+# queue reading the tick count off the watched KUSER page, three faults on
+# every PeekMessage and GetAsyncKeyState. A copy made before it has the older
+# file and FIFA 16 stutters in play. win32u.so carries no marker, so it is
+# compared by LC_UUID with the shipped one, as refresh_fixes does: installing
+# rewrites the rpath and the signature, which change the bytes, not the UUID.
+f16_add_win32u() {
+    local app="$1" wine="$1/Contents/SharedSupport/CrossOver/lib/wine" f=x86_64-unix/win32u.so
+    local want RPATH_ERR
+    [ -f "$HERE/fixes/$f" ] \
+        || die $E_PAYLOAD "fixes/${f:t} is missing from this package. Download it again."
+    want="$(macho_uuid "$HERE/fixes/$f")"
+    if [ -z "$want" ]; then
+        note "could not read the build of ${f:t} (Apple's command line tools are missing),"
+        say "        so it was left as it is. If FIFA 16 stutters in play, install them"
+        say "        (xcode-select --install) and run this again."
+        return 0
+    fi
+    if [ -f "$wine/$f" ] && [ "$(macho_uuid "$wine/$f")" = "$want" ]; then
+        ok "${f:t} -- already the shipped build"
+        return 0
+    fi
+    say "        ${app:t} has an older ${f:t}; FIFA 16 stutters in play with it"
+    require_app_closed "$app"
+    require_clt
+    if [ -f "$wine/$f" ] && [ ! -f "$wine/$f.orig" ]; then
+        cp -X "$wine/$f" "$wine/$f.orig" 2>/dev/null \
+            || die $E_PERMISSION "Could not back up ${f:t} in ${app:t}.
+$APP_MGMT_HINT"
+    fi
+    cp -X "$HERE/fixes/$f" "$wine/$f" \
+        || die $E_PERMISSION "Could not install ${f:t} into ${app:t}.
+$APP_MGMT_HINT"
+    ok "${f:t} -- installed"
+    if has_lib64_rpath "$wine/$f"; then
+        ok "${f:t} search path -- already present"
+    elif RPATH_ERR="$(install_name_tool -add_rpath "$RPATH_LIB64" "$wine/$f" 2>&1)"; then
+        ok "${f:t} search path -- added"
+    elif print -r -- "$RPATH_ERR" | grep -q 'would duplicate path'; then
+        ok "${f:t} search path -- already present"
+    else
+        print -r -- "$RPATH_ERR"
+        die $E_PERMISSION "Could not repair the search path in ${f:t}.
+$APP_MGMT_HINT"
+    fi
+    sign_payload "$wine"
+    resign_app "$app"
+}
+
 # The ntdll.so that fixes/ ships carries FIFA 17's five patches plus the
 # top-down allocation limit FIFA 15 needs (inert until CX_TOPDOWN_LIMIT is set,
 # which only the FIFA 15 bottle does). A copy made before that build has the
@@ -1090,12 +1140,12 @@ require_app_closed() {
 # environment variable's name in the file, so that is what is looked for.
 # FIFA 16 is the same story two builds later: its four patches (the
 # debug-register emulation, PF_PAE, the loading-loop fix and the syscall-stub
-# fix) came after, and its marker is the generic loop fix's log line, since a
-# build with the one-address version has the syscall stub but still loops
-# whenever the heap buffer lands elsewhere. Without them the crack's
-# protector exits before the start screen, and without the loop fix the game
-# loops forever after the language pick. NTDLL_MARKER says which one this
-# game needs.
+# fix) came after, and its marker is the syscall-stub fix's log line as it
+# reads since that fix covers win32u too; the builds before it loop whenever
+# the heap buffer lands elsewhere, or stutter. Without the patches the
+# crack's protector exits before the start screen, and without the loop fix
+# the game loops forever after the language pick. NTDLL_MARKER says which one
+# this game needs; f16_add_win32u above brings the win32u half.
 # Installing it is the full install's steps 4 to 6 for one file: copy, the
 # lib64 search path, sign the file, sign the app. This one IS a stop when it
 # fails: the bottle is useless without it.
@@ -4751,6 +4801,7 @@ if [ "$MODE" = bottle ]; then
     elif [ "$F16_ONE" = 1 ]; then
         # No gdiplus.dll: that is Aurora15Connector's, and FIFA 16 has none.
         add_game_ntdll "$TARGET"
+        f16_add_win32u "$TARGET"
         [ -d "$BOTTLE_DIR/$BOTTLE" ] || make_bottle "$TARGET"
     fi
     [ -d "$BOTTLE_DIR/$BOTTLE" ] \

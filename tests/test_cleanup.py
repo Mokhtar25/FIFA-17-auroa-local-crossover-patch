@@ -118,7 +118,7 @@ class InstallPathTests(unittest.TestCase):
 MODE=bottle; TARGET_EXPLICIT=1; F15_ONE=1; F16_ONE=0; BOTTLE=Aurora15; GAME=fifa15
 E_PAYLOAD=4; E_UNSUPPORTED=2; E_INCOMPLETE=5
 say() { :; }; ok() { :; }; green() { :; }; note() { :; }
-add_game_ntdll() { :; }; f15_add_gdiplus() { :; }; f15_check_game() { :; }
+add_game_ntdll() { :; }; f15_add_gdiplus() { :; }; f16_add_win32u() { :; }; f15_check_game() { :; }
 configure_bottle() { BOTTLE_OK=1; PS_OK=1; HOSTS_OK=1; }
 crossovers_running() { :; }; wineserver_pids() { :; }
 take_setup_lock() { :; }; require_bottle_free() { :; }; end_own_wine_session() { :; }

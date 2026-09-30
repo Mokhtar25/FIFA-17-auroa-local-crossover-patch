@@ -2,19 +2,21 @@
 
 Two patches against `crossover-sources-26.3.0`, applied after the eight before
 them and before FIFA 16's loading-loop fix, and a third, applied after that
-fix, that stops Wine's syscall stubs faulting on a watched `KUSER_SHARED_DATA`:
+fix, that stops Wine's system calls faulting on a watched `KUSER_SHARED_DATA`:
 
 | Patch | Files | Gate |
 |---|---|---|
 | `crossover-26.3-debug-register-emulation.patch` | `dlls/ntdll/unix/signal_x86_64.c`, `virtual.c`, `thread.c` | `CX_DR_TRAP=3` in the bottle; modes 0-2 unchanged |
 | `crossover-26.3-pf-pae-enabled.patch` | `dlls/ntdll/unix/system.c` | `CX_DR_TRAP=3` in the bottle (x86_64 only) |
-| `crossover-26.3-drtrap-syscall-stub.patch` | `dlls/ntdll/unix/signal_x86_64.c` | `CX_DR_TRAP=3` in the bottle |
+| `crossover-26.3-drtrap-syscall-stub.patch` | `dlls/ntdll/unix/signal_x86_64.c`, `dlls/win32u/message.c` | `CX_DR_TRAP=3` in the bottle; the `win32u` half runs in every bottle and reads the same value |
 
 All three are in `build.sh`'s `PATCHES` list (ninth, tenth and twelfth, with
 `crossover-26.3-fifa16-dst-complement.patch` eleventh) and in the shared
-`fixes/x86_64-unix/ntdll.so`. Only the FIFA 16 bottle profile
+`fixes/x86_64-unix/ntdll.so`; the stub patch's `win32u` half is in
+`fixes/x86_64-unix/win32u.so`. Only the FIFA 16 bottle profile
 (`AURORA_GAME=fifa16`) sets `CX_DR_TRAP=3`. The shipped FIFA 17 bottle keeps
-`CX_DR_TRAP=2` and FIFA 15's sets no `CX_DR_TRAP`, so neither runs any of this;
+`CX_DR_TRAP=2` and FIFA 15's sets no `CX_DR_TRAP`, so neither runs any of this
+but that `win32u` half, which returns the same tick count by another route;
 the PAE fix, gated the same way, has not been run with FIFA 17. They were first
 built and tested in a separate CrossOver app (`CrossOver-FIFA16.app`, bottle
 `FIFA16-dev`).
@@ -90,7 +92,8 @@ where they could be.
    dispatcher reads its own copies of the three KUSER fields it needs
    (`usd_xsave_enabled`, `usd_xstate_features`, `usd_xstate_flags`), and the
    instrumentation-callback pointer uses the fixed `0x7ffe1000` rather than
-   the alias.
+   the alias. Bug 17's stub redirect reopened the same window in one race;
+   see there.
 6. **ALU reads of watched bytes** (`add/or/adc/sbb/and/sub/xor r, m`) fell
    back to the racy step-over. They are now completed with exact flags
    (`xbp_alu`). `tests/drbp/tools/alu_test.c` fuzzes it against the native
@@ -146,11 +149,12 @@ And the separate patches:
 17. **Every system call faulted while `KUSER_SHARED_DATA` was watched.**
     FIFA 16's protector keeps rw=11 watchpoints on `0x7ffe0270` armed for
     the whole session, so mode 3 keeps that page inaccessible, and every
-    syscall stub in Wine's ntdll reads `0x7ffe0308` (`testb $1, 0x7ffe0308`,
-    the Windows form). Bug 5 made those reads correct; they still each cost
-    a fault. Under Rosetta a plain x86_64 SIGSEGV round trip costs about
-    16 us whatever the handler does (a trivial native test program measures
-    the same), and Wine's handler adds about 1 us. In game that was ~70,000
+    syscall stub in Wine's ntdll (259) and win32u (1,542, the NtUser and
+    NtGdi calls) reads `0x7ffe0308` (`testb $1, 0x7ffe0308`, the Windows
+    form). Bug 5 made those reads correct; they still each cost a fault.
+    Under Rosetta a plain x86_64 SIGSEGV round trip costs about 16 us
+    whatever the handler does (a trivial native test program measures the
+    same), and Wine's handler adds about 1 us. In game that was ~70,000
     faults a second, 99% of them at offset `0x308`, from
     NtQueryPerformanceCounter (~20k/s), NtDelayExecution (~11.5k/s),
     NtQueryVirtualMemory (~11k/s), NtAlertThreadByThreadId and
@@ -160,8 +164,33 @@ And the separate patches:
     at a copy of `SystemCall` at `0x7ffe1008`, on the page Wine already
     keeps the dispatcher pointer on, which no watchpoint covers. One byte
     changes, and the instruction's length and result do not. Only stubs
-    inside ntdll are touched, and only in mode 3. In game: 1,000-4,000
-    faults a second afterwards. `tests/drbp/kuser_perf.c` measures it.
+    inside Wine's own builtin images (a `MEM_IMAGE` mapping whose DOS header
+    carries "Wine builtin DLL": ntdll and win32u) are touched, and only in
+    mode 3.
+
+    The first version touched ntdll's stubs alone, and the game still
+    stuttered in play: win32u's stubs faulted, and so did win32u's unix
+    side, which read the tick count straight off `0x7ffe0000` (three loads)
+    for the hung-queue check on every PeekMessage and GetAsyncKeyState
+    (PeekMessageW cost ~123 us a call armed, `kuser_perf`). That check now
+    calls `NtGetTickCount`, which reads ntdll's own unprotected alias of the
+    page, and compares in 32-bit arithmetic, which wraps correctly. This
+    half is not gated: every bottle runs it and gets the same value, one
+    function call instead of three loads.
+
+    The redirect had a race. A thread that has already run a stub's old
+    bytes can take its fault after another thread has redirected that stub;
+    decoded as it then reads, the instruction missed the page and was
+    stepped over, which makes the page readable for one instruction and lets
+    other threads' watched reads through unseen. drrf phase 6 lost up to a
+    third of its fires in 4 runs of 6 on the first version. Such a fault is
+    now completed as the `SystemCall` read it was: 10 runs of 10 clean.
+
+    In game, at the start screen: 1,140 faults a second with the ntdll-only
+    version, 490 now. What is left is kernelbase's `GetTickCount` and
+    `GetTickCount64` reading the page themselves, as on Windows (about 120
+    calls a second each, 4 faults per game loop), steady rather than in
+    bursts. `tests/drbp/kuser_perf.c` measures it.
 
 ## Results (Apple M4 Pro, Rosetta, 2026-09-28, the patched build as committed)
 
@@ -183,10 +212,12 @@ with `pushfq/orq/popfq` is delivered on time (drrf phase 7). See
   correct, but a read racing with another thread can pass a watchpoint.
 - Every read of a watched page by any thread faults, and under Rosetta each
   fault costs about 16 us, so the page is slow while armed. Wine's syscall
-  stubs no longer read it (bug 17). Direct reads of the time fields still
-  fault: `GetTickCount` and code that reads `0x7ffe0320` itself take ~17-21 us
-  a call while armed, against ~1 ns unarmed (`tests/drbp/kuser_perf.c`).
-  FIFA 16 does about 300 of those a second.
+  stubs in ntdll and win32u, and win32u's message queue, no longer read it
+  (bug 17). Direct reads of the time fields still fault: `GetTickCount` and
+  code that reads `0x7ffe0320` itself take ~17-21 us a call while armed,
+  against ~1 ns unarmed (`tests/drbp/kuser_perf.c`). In FIFA 16 that is all
+  that is left: `GetTickCount` and `GetTickCount64`, about 490 faults a
+  second at the start screen.
 - Mode 3 turns the drcache on, which logs a `CTXDR` line to stderr for every
   context get/set that carries debug registers. The shipped mode 2 does the
   same (baseline code in the rosetta patch).

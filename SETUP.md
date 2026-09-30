@@ -1141,8 +1141,10 @@ checks cover separate bottle profiles, offline recovery and cleanup behavior.
 
 The same CrossOver-FIFA copy also runs FIFA 16, in its own `FIFA16` bottle.
 FIFA 15 and FIFA 17 are not affected: the four Wine fixes FIFA 16 needs are
-in the shared `ntdll.so`, but each one only acts when a bottle setting is there
-that only the FIFA 16 bottle has.
+in the shared `ntdll.so` (one also in `win32u.so`), and each one only acts
+when a bottle setting is there that only the FIFA 16 bottle has. The exception
+is one small part in `win32u.so` that runs in every bottle; it reads the same
+clock value as before, by another route.
 
 It is **experimental and unreliable for now**. The stutter is fixed, but the
 fix for the endless loading after the language screen only works on some
@@ -1156,8 +1158,9 @@ never ships the game and never changes a file in it.
 ```
 
 It makes the copy if needed, and on a copy that is already there it replaces
-`ntdll.so` if it is a build from before FIFA 16's fixes. It makes the `FIFA16`
-bottle (CrossOver must be closed) and adds four settings to it:
+`ntdll.so` and `win32u.so` if they are builds from before FIFA 16's fixes. It
+makes the `FIFA16` bottle (CrossOver must be closed) and adds four settings to
+it:
 
 | Setting | Why |
 |---|---|
@@ -1194,7 +1197,7 @@ and the menus appear.
 > 🔴 **It stutters in play.**
 
 > [!TIP]
-> 🟢 Fixed by `crossover-26.3-drtrap-syscall-stub.patch`, which is in the `ntdll.so` this package ships. The game's protection keeps a read watchpoint on a page every Wine system call reads, and under Rosetta each of those reads cost a fault of about 16 microseconds, some 70,000 a second. The patch points Wine's system-call stubs at a copy of that value on a page nothing watches; the game now takes 1,000 to 4,000 of those faults a second.
+> 🟢 Fixed by `crossover-26.3-drtrap-syscall-stub.patch`, which is in the `ntdll.so` and `win32u.so` this package ships. The game's protection keeps a read watchpoint on a page every Wine system call reads, and under Rosetta each of those reads cost a fault of about 16 microseconds, some 70,000 a second. The patch points Wine's system-call stubs, in `ntdll` and `win32u`, at a copy of that value on a page nothing watches, and makes `win32u`'s message queue read the clock through `ntdll` instead of off that page. At the start screen the game now takes about 490 of those faults a second, from reading the clock itself, as it would on Windows. A copy of CrossOver-FIFA set up with the earlier version of the fix, which covered only `ntdll.so`, still stutters: double-click `FIFA 16.command`, or run `./setup.sh --fifa16`, with CrossOver closed, and it brings both files into the copy.
 
 Other forms: `./setup.sh --fifa16 --verify` (also
 `diagnostics/16 Check the install (FIFA 16).command`), `./setup.sh --fifa16
