@@ -22,9 +22,11 @@ Open this folder in Finder and double-click the one you want.
 | `12 Play with a crash log.command` | Quit CrossOver first. Starts the Aurora17 launcher with CrossOver's own log on; press PLAY in it, let the game crash, close the launcher, and it prints where the crash was (which module, or generated code). It also records every name the bottle looks up, so the log says how far the game got before it died. The log lands in `crash-logs/` here and the next bundle picks it up. Use it for `FIFA 17 crashed` / exit code `0xC0000005`. | no (writes a log here) |
 | `13 Check the install (FIFA 15).command` | Checks the FIFA 15 bottle, shared app, offline DLL and original-backup status. | no |
 | `15 Fix my installation.command` | One run that puts an install right again without copying CrossOver: quits CrossOver cleanly, replaces any fix file in the copy that is missing or out of date and re-signs it, sets the bottle up again (including the WebView2 runtime the RebornFUT launcher needs), has the game's loader write a fresh licence file, then checks the lot. Also the update path for an older install. | the copy and the bottle |
+| `16 Check the install (FIFA 16).command` | Checks the FIFA 16 bottle and its four settings, the shared app, and whether the bottle has a drive letter that reaches the game folder. | no |
 
 FIFA 15 log collection and smoke tests are not supported yet. Use number 13,
-or `./setup-both.sh --verify` to check both installations.
+or `./setup-both.sh --verify` to check both installations. The same goes for
+FIFA 16: number 16 is its check.
 
 `Diagnostics.command`, one folder up, is the same as number 1, and **Fix my
 installation.command** beside it is the same as number 15 — they are there so

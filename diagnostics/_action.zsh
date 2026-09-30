@@ -196,6 +196,8 @@ esac
 
 if [ -n "${AURORA_GAME:-}" ] && [ "$AURORA_GAME" = fifa15 ]; then
     TITLE="$TITLE — FIFA 15"
+elif [ -n "${AURORA_GAME:-}" ] && [ "$AURORA_GAME" = fifa16 ]; then
+    TITLE="$TITLE — FIFA 16"
 fi
 
 underline=""
@@ -213,6 +215,8 @@ print -r -- ""
 
 if [ "${AURORA_GAME:-}" = fifa15 ]; then
     ./setup.sh --fifa15 "$FLAG"
+elif [ "${AURORA_GAME:-}" = fifa16 ]; then
+    ./setup.sh --fifa16 "$FLAG"
 else
     ./setup.sh "$FLAG"
 fi

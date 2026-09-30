@@ -1,20 +1,29 @@
 # Debug registers under Rosetta 2 (`CX_DR_TRAP=3`), and `PF_PAE_ENABLED`
 
-Two patches against `crossover-sources-26.3.0`, applied after the eight shipped ones:
+Two patches against `crossover-sources-26.3.0`, applied after the eight before
+them and before FIFA 16's loading-loop fix, and a third, applied after that
+fix, that stops Wine's syscall stubs faulting on a watched `KUSER_SHARED_DATA`:
 
 | Patch | Files | Gate |
 |---|---|---|
 | `crossover-26.3-debug-register-emulation.patch` | `dlls/ntdll/unix/signal_x86_64.c`, `virtual.c`, `thread.c` | `CX_DR_TRAP=3` in the bottle; modes 0-2 unchanged |
-| `crossover-26.3-pf-pae-enabled.patch` | `dlls/ntdll/unix/system.c` | none (x86_64 only) |
+| `crossover-26.3-pf-pae-enabled.patch` | `dlls/ntdll/unix/system.c` | `CX_DR_TRAP=3` in the bottle (x86_64 only) |
+| `crossover-26.3-drtrap-syscall-stub.patch` | `dlls/ntdll/unix/signal_x86_64.c` | `CX_DR_TRAP=3` in the bottle |
 
-Neither is in `build.sh`'s `PATCHES` list or in `fixes/`. The shipped FIFA 17
-bottle keeps `CX_DR_TRAP=2`. The PAE fix is unconditional, and it has not been
-run with FIFA 17. They were built and tested in a separate CrossOver app
-(`CrossOver-FIFA16.app`, bottle `FIFA16-dev`).
+All three are in `build.sh`'s `PATCHES` list (ninth, tenth and twelfth, with
+`crossover-26.3-fifa16-dst-complement.patch` eleventh) and in the shared
+`fixes/x86_64-unix/ntdll.so`. Only the FIFA 16 bottle profile
+(`AURORA_GAME=fifa16`) sets `CX_DR_TRAP=3`. The shipped FIFA 17 bottle keeps
+`CX_DR_TRAP=2` and FIFA 15's sets no `CX_DR_TRAP`, so neither runs any of this;
+the PAE fix, gated the same way, has not been run with FIFA 17. They were first
+built and tested in a separate CrossOver app (`CrossOver-FIFA16.app`, bottle
+`FIFA16-dev`).
 
 ```
 patch -p1 --forward < ../patches/crossover-26.3-debug-register-emulation.patch
 patch -p1 --forward < ../patches/crossover-26.3-pf-pae-enabled.patch
+patch -p1 --forward < ../patches/crossover-26.3-fifa16-dst-complement.patch
+patch -p1 --forward < ../patches/crossover-26.3-drtrap-syscall-stub.patch
 ```
 
 ## The problem
@@ -125,12 +134,34 @@ where they could be.
     `pthread_exit_wrapper`), so a reused TID inherits nothing and pages get
     their access back.
 
-And the separate patch:
+And the separate patches:
 
 16. **`PF_PAE_ENABLED` was FALSE.** Wine reads it from CPUID leaf 1 EDX bit 6,
     which Rosetta leaves clear. Long mode runs on PAE paging, and no 64-bit
-    Windows has ever reported FALSE. `init_cpu_info` now sets it on x86_64.
-    This also changes the `ProcessorFeatures` array in `KUSER_SHARED_DATA`.
+    Windows has ever reported FALSE. `init_cpu_info` now sets it on x86_64
+    when `CX_DR_TRAP` is 3, the only setting the one program known to need it
+    (FIFA 16's protector, which hashes the feature array) runs under. Every
+    other bottle reads the bit from CPUID as before. Where it applies, it also
+    changes the `ProcessorFeatures` array in `KUSER_SHARED_DATA`.
+17. **Every system call faulted while `KUSER_SHARED_DATA` was watched.**
+    FIFA 16's protector keeps rw=11 watchpoints on `0x7ffe0270` armed for
+    the whole session, so mode 3 keeps that page inaccessible, and every
+    syscall stub in Wine's ntdll reads `0x7ffe0308` (`testb $1, 0x7ffe0308`,
+    the Windows form). Bug 5 made those reads correct; they still each cost
+    a fault. Under Rosetta a plain x86_64 SIGSEGV round trip costs about
+    16 us whatever the handler does (a trivial native test program measures
+    the same), and Wine's handler adds about 1 us. In game that was ~70,000
+    faults a second, 99% of them at offset `0x308`, from
+    NtQueryPerformanceCounter (~20k/s), NtDelayExecution (~11.5k/s),
+    NtQueryVirtualMemory (~11k/s), NtAlertThreadByThreadId and
+    NtWaitForAlertByThreadId (~6k/s each) and NtProtectVirtualMemory
+    (~3.7k/s): the stutter. `crossover-26.3-drtrap-syscall-stub.patch`
+    retargets a stub on its first fault: the `testb` displacement is pointed
+    at a copy of `SystemCall` at `0x7ffe1008`, on the page Wine already
+    keeps the dispatcher pointer on, which no watchpoint covers. One byte
+    changes, and the instruction's length and result do not. Only stubs
+    inside ntdll are touched, and only in mode 3. In game: 1,000-4,000
+    faults a second afterwards. `tests/drbp/kuser_perf.c` measures it.
 
 ## Results (Apple M4 Pro, Rosetta, 2026-09-28, the patched build as committed)
 
@@ -150,8 +181,12 @@ with `pushfq/orq/popfq` is delivered on time (drrf phase 7). See
 - The decoder handles no SSE/AVX loads, no `rep`/string ops and no 16-bit
   completed loads. Those accesses fall back to the step-over. It is still
   correct, but a read racing with another thread can pass a watchpoint.
-- Every read of a watched page by any thread faults, so the page is slow
-  while armed.
+- Every read of a watched page by any thread faults, and under Rosetta each
+  fault costs about 16 us, so the page is slow while armed. Wine's syscall
+  stubs no longer read it (bug 17). Direct reads of the time fields still
+  fault: `GetTickCount` and code that reads `0x7ffe0320` itself take ~17-21 us
+  a call while armed, against ~1 ns unarmed (`tests/drbp/kuser_perf.c`).
+  FIFA 16 does about 300 of those a second.
 - Mode 3 turns the drcache on, which logs a `CTXDR` line to stderr for every
   context get/set that carries debug registers. The shipped mode 2 does the
   same (baseline code in the rosetta patch).

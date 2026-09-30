@@ -35,6 +35,9 @@ class ScriptTests(unittest.TestCase):
             ("setup.sh", ["--fifa15", "one.app", "two.app"], 2),
             ("setup.sh", ["--repair", "--offline"], 2),
             ("setup.sh", ["--fifa15", "--repair"], 2),
+            ("setup.sh", ["--fifa16", "--unknown"], 2),
+            ("setup.sh", ["--fifa16", "one.app", "two.app"], 2),
+            ("setup.sh", ["--fifa16", "--repair"], 2),
             ("setup-both.sh", ["--repair", "extra"], 2),
             ("setup-both.sh", ["--help"], 0),
             ("setup-both.sh", ["--unknown"], 2),
@@ -190,6 +193,7 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
         for game, bottle, setting, excluded in [
             ("fifa17", "Aurora17", "CX_DR_TRAP=2", "CX_TOPDOWN_LIMIT="),
             ("fifa15", "Aurora15", "CX_TOPDOWN_LIMIT=0x1ffffffff", "CX_DR_TRAP="),
+            ("fifa16", "FIFA16", "CX_FIFA16_DSTFIX=0", "CX_TOPDOWN_LIMIT="),
         ]:
             with self.subTest(game=game):
                 result = subprocess.run(["/bin/zsh", str(probe), "--verify"],
@@ -203,7 +207,10 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
                 self.assertIn("x86_64-windows/gdiplus.dll", lines)
                 self.assertIn("x86_64-windows/ole32.dll", lines)
                 self.assertIn("x86_64-unix/win32u.so", lines)
-                # The WebView2 pin is FIFA 17's: FIFA 15 has no RebornFUT.
+                if game == "fifa16":
+                    # Mode 3, not FIFA 17's 2: the debug-register emulation.
+                    self.assertIn("CX_DR_TRAP=3", lines)
+                # The WebView2 pin is FIFA 17's: FIFA 15 and 16 have no RebornFUT.
                 pin = r"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=C:\webview2-fixed\99.0.1150.52"
                 if game == "fifa17":
                     self.assertIn(pin, lines)
@@ -211,8 +218,13 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
                     self.assertFalse(any(line.startswith("WEBVIEW2_") for line in lines))
 
     def test_single_profile_refuses_other_games_bottle(self):
+        # FIFA 17's marker is CX_DR_TRAP=2 exactly: FIFA 16 sets CX_DR_TRAP too.
         for game, other, setting in [("fifa15", "Aurora17", "CX_DR_TRAP"),
-                                      ("fifa17", "Aurora15", "CX_TOPDOWN_LIMIT")]:
+                                      ("fifa17", "Aurora15", "CX_TOPDOWN_LIMIT"),
+                                      ("fifa16", "Aurora17", "CX_DR_TRAP"),
+                                      ("fifa16", "Aurora15", "CX_TOPDOWN_LIMIT"),
+                                      ("fifa17", "FIFA16", "CX_FIFA16_DSTFIX"),
+                                      ("fifa15", "FIFA16", "CX_FIFA16_DSTFIX")]:
             for bottle in (other, "custom"):
                 with self.subTest(game=game, bottle=bottle):
                     folder = self.work / "bottles" / bottle
@@ -228,11 +240,12 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
                     self.assertEqual(conf.read_text(), contents)
 
     def test_fifa15_refuses_fifa17_only_actions(self):
-        for action in ("--offline", "--play-offline", "--play-log", "--reseed-licence", "--bundle",
-                       "--repair"):
-            with self.subTest(action=action):
+        for game, action in [(game, action) for game in ("fifa15", "fifa16")
+                             for action in ("--offline", "--play-offline", "--play-log",
+                                            "--reseed-licence", "--bundle", "--repair")]:
+            with self.subTest(game=game, action=action):
                 result = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), action],
-                                        env={**self.env, "AURORA_GAME": "fifa15"},
+                                        env={**self.env, "AURORA_GAME": game},
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("FIFA 17", result.stdout)
@@ -962,7 +975,7 @@ class WebView2RuntimeTests(unittest.TestCase):
     # ------------------------------------------------------------- the doctor
 
     def test_the_doctor_checks_the_folder_as_well_as_the_setting(self):
-        block = self.block('    if [ "$GAME" != fifa15 ] && [ "${WEBVIEW2_RUNTIME:-}" != skip ]; then')
+        block = self.block('    if [ "$GAME" = fifa17 ] && [ "${WEBVIEW2_RUNTIME:-}" != skip ]; then')
         report = '\nprint -r -- "problems=$problems"\n'
         with tempfile.TemporaryDirectory(prefix="fifa-wv2-") as directory:
             work = Path(directory)
@@ -991,8 +1004,8 @@ class WebView2RuntimeTests(unittest.TestCase):
             self.assertIn("OK WebView2 99.0.1150.52 in the Aurora17 bottle", whole.stdout)
             self.assertIn("problems=0", whole.stdout)
 
-            # FIFA 15 has no RebornFUT, and skip means it was never installed.
-            for skipped in ("GAME=fifa15\n", "WEBVIEW2_RUNTIME=skip\n"):
+            # FIFA 15 and 16 have no RebornFUT, and skip means it was never installed.
+            for skipped in ("GAME=fifa15\n", "GAME=fifa16\n", "WEBVIEW2_RUNTIME=skip\n"):
                 quiet = self.run_zsh(harness + skipped + block + report)
                 self.assertIn("problems=0", quiet.stdout)
                 self.assertNotIn("WebView2", quiet.stdout)

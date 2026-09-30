@@ -1,23 +1,34 @@
-FIFA 16 endless loading after the language screen: the RUNE protector's VM
-hands msvcr110!memmove the sign-extended complement (0xffffffffde50bd6d) of
-its real buffer pointer (0x21af4292, in the committed RW private region
-0x21700000-0x22b00000).  The first movsb at msvcr110+0xecd9 takes an access
-violation and the game's own VEH resumes the same instruction forever.
+FIFA 16 endless loading after the language pick, and the same freeze when a
+match loads the training field: the RUNE protector's VM hands
+msvcr110!memmove the 64-bit complement of its real buffer pointer
+(0xffffffffde50bd6d for a buffer at 0x21af4292, 0xffffffffde42bd6d for one
+at 0x21bd4292).  The first movsb at msvcr110+0xecd9 takes an access violation
+and the game's own VEH resumes the same instruction forever.
 
-This patch adds fifa16_dstfix_patch() to setup_raise_exception(): on an access
-violation whose write target is 0xffffffffde50bd6d, the context handed to the
-guest gets rcx = rdi = ~target before the guest handler runs, so the retried
-movsb writes to the real buffer and the copy completes.
+The first version of this patch matched one exact fault address, so it only
+ever worked on the run whose buffer happened to land at 0x21af4292.  This
+version treats any access violation at a negative (kernel/non-canonical)
+address as a complemented pointer: ~target is the real buffer, and every
+general register still holding the bad value is rewritten before the guest
+handler runs.  The buffer is heap memory and moves between runs, so the
+faulting address does too; this fires on all of them.  The game passed the
+training-field load that used to loop 770,595 times at 0xffffffffde42bd6d.
+tests/drbp/tools/dstfix_test.c exercises the mechanism directly: it writes
+through ~buffer, and exits 0 only when ntdll rewrote the address.
 
 Gated by CX_FIFA16_DSTFIX: unset = off (behaviour unchanged), 0 = auto
-(complement of the fault address), <hex> = explicit candidate value.
+(complement of the faulting address), <hex> = explicit candidate value.
+The "CTXBP dstfix generic" line it logs is also the marker setup.sh looks
+for, so a copy carrying the old one-address build is replaced.
 
-Documentation-only: not in build.sh's PATCHES list.  It is specific to the
-FIFA 16 bottle and does nothing unless the bottle sets the variable.  See
-../FIX-fifa16-loading-loop.md and ../HANDOFF-fifa16-loading-loop.md.
---- a/dlls/ntdll/unix/signal_x86_64.c	2026-09-29 11:42:03
-+++ b/dlls/ntdll/unix/signal_x86_64.c	2026-09-29 11:42:03
-@@ -3247,6 +3247,50 @@
+The eleventh patch in build.sh's PATCHES list, built into fixes/; only
+crossover-26.3-drtrap-syscall-stub.patch comes after it.  It applies to a
+tree that already has the debug-register emulation and PF_PAE patches, and
+does nothing unless a bottle sets CX_FIFA16_DSTFIX.
+
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3247,6 +3247,96 @@
  /***********************************************************************
   *           setup_raise_exception
   */
@@ -37,38 +48,84 @@ FIFA 16 bottle and does nothing unless the bottle sets the variable.  See
 +    }
 +}
 +
-+/* Experiment for the FIFA 16 loading loop: the protector hands msvcr110's
-+ * memmove a sign-extended complement (0xffffffffde50bd6d) of the real buffer
-+ * pointer.  When CX_FIFA16_DSTFIX is set, the faulting context's rcx/rdi are
-+ * rewritten to the given value (0 = complement of the fault address) before
-+ * the guest handler runs. */
++/* FIFA 16's RUNE protector hands msvcr110!memmove the 64-bit complement of
++ * its real buffer pointer: 0xffffffffde50bd6d for a buffer at 0x21af4292.
++ * The first movsb faults on a sign-extended kernel-space address and the
++ * game's own VEH resumes the same instruction forever - the endless loading
++ * after the language pick, and the same retry loop when a match loads the
++ * training field.  The buffer is heap memory, so the faulting address moves
++ * between runs (0xffffffffde50bd6d one run, 0xffffffffde42bd6d the next); a
++ * patch that matches one exact address only ever fires on one lucky run.
++ *
++ * When CX_FIFA16_DSTFIX is set, an access violation at a negative
++ * (kernel/non-canonical) address is taken to be a complemented pointer:
++ * ~target is the real address, and every general register still holding the
++ * bad value is rewritten in the context handed to the guest, so the retried
++ * instruction completes.  <hex> overrides the replacement value, for
++ * probing a candidate without a rebuild. */
++static ULONG_PTR fifa16_dstfix_regs( CONTEXT *context, ULONG_PTR target, ULONG_PTR newdst )
++{
++    ULONG_PTR *regs[] =
++    {
++        &context->Rax, &context->Rbx, &context->Rcx, &context->Rdx,
++        &context->Rsi, &context->Rdi, &context->Rbp,
++        &context->R8,  &context->R9,  &context->R10, &context->R11,
++        &context->R12, &context->R13, &context->R14, &context->R15
++    };
++    ULONG_PTR fixed = 0;
++    unsigned int i;
++
++    for (i = 0; i < ARRAY_SIZE(regs); i++)
++    {
++        if (*regs[i] != target) continue;
++        *regs[i] = newdst;
++        fixed |= (ULONG_PTR)1 << i;
++    }
++    return fixed;
++}
++
 +static void fifa16_dstfix_patch( EXCEPTION_RECORD *rec, CONTEXT *context )
 +{
-+    ULONG_PTR newdst;
++    ULONG_PTR target, newdst, fixed;
++    unsigned int opcode;
 +    struct ctxlog_buf buf;
 +
 +    fifa16_dstfix_config();
 +    if (!fifa16_dstfix) return;
 +    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return;
 +    if (rec->NumberParameters < 2) return;
-+    if (rec->ExceptionInformation[1] != (ULONG_PTR)0xffffffffde50bd6dULL) return;
 +
-+    newdst = fifa16_dstfix_val ? fifa16_dstfix_val : ~(ULONG_PTR)0xffffffffde50bd6dULL;
++    target = rec->ExceptionInformation[1];
++    if (fifa16_dstfix_val)
++        newdst = fifa16_dstfix_val;
++    else
++    {
++        /* the complemented half the VM keeps is negative */
++        if (!(target & ((ULONG_PTR)1 << 63))) return;
++        newdst = ~target;
++    }
++
++    fixed = fifa16_dstfix_regs( context, target, newdst );
++    if (!fixed) return;   /* no register carries it: a different fault */
++
++    /* the faulting page is executing, so its first byte is readable here */
++    opcode = *(const unsigned char *)context->Rip;
++
 +    buf.len = 0;
-+    ctxlog_str( &buf, "CTXBP dstfix" );
-+    ctxlog_field( &buf, "a", rec->ExceptionInformation[1], 16 );
++    ctxlog_str( &buf, "CTXBP dstfix generic" );
++    ctxlog_field( &buf, "a", target, 16 );
 +    ctxlog_field( &buf, "b", newdst, 16 );
 +    ctxlog_field( &buf, "c", context->Rip, 16 );
++    ctxlog_field( &buf, "d", opcode, 2 );
++    ctxlog_field( &buf, "e", fixed, 4 );
 +    ctxlog_char( &buf, '\n' );
 +    ctxlog_emit( buf.data, buf.len );
-+    context->Rcx = newdst;
-+    context->Rdi = newdst;
 +}
 +
  static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec, struct xcontext *xcontext )
  {
      ULONG_PTR rsp;
-@@ -3283,6 +3327,8 @@
+@@ -3283,6 +3373,8 @@
  
      /* fix up instruction pointer in context for EXCEPTION_BREAKPOINT */
      if (rec->ExceptionCode == EXCEPTION_BREAKPOINT) context->Rip--;

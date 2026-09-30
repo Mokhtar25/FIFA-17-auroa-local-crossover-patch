@@ -107,6 +107,24 @@ PATCHES=(
 # could equally apply first.
 [ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] \
     && PATCHES+=( crossover-26.3-win32u-shm-flush-under-user-lock.patch )
+# Then FIFA 16's first three, in this order. The debug-register emulation and PF_PAE
+# are what let the crack's protector run at all; the dst fix is what stops the
+# endless loading after the language screen, and it was made against a tree
+# that already has the other two, so it goes last. All three go into the shared
+# ntdll and none changes anything for FIFA 15 or 17: the emulation and PF_PAE
+# act only when the bottle sets CX_DR_TRAP=3, the dst fix only when it sets
+# CX_FIFA16_DSTFIX, and only the FIFA 16 bottle profile sets either.
+[ -f "$HERE/patches/crossover-26.3-debug-register-emulation.patch" ] \
+    && PATCHES+=( crossover-26.3-debug-register-emulation.patch )
+[ -f "$HERE/patches/crossover-26.3-pf-pae-enabled.patch" ] \
+    && PATCHES+=( crossover-26.3-pf-pae-enabled.patch )
+[ -f "$HERE/patches/crossover-26.3-fifa16-dst-complement.patch" ] \
+    && PATCHES+=( crossover-26.3-fifa16-dst-complement.patch )
+# And one on top of the emulation, also mode 3 only: syscall stubs stop taking
+# a fault on every call while a watchpoint covers KUSER_SHARED_DATA, which is
+# what made FIFA 16 stutter. Made against the tree with all three above.
+[ -f "$HERE/patches/crossover-26.3-drtrap-syscall-stub.patch" ] \
+    && PATCHES+=( crossover-26.3-drtrap-syscall-stub.patch )
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(
@@ -523,3 +541,11 @@ say ""
 #   by hand, do not skip that step -- without it CrossOver silently drops to a
 #   graphics path that does not work on macOS and the game hangs on the loading
 #   screen with no clue why.
+#
+# * FIFA 16's four patches were applied by this script on 2026-09-29, in
+#   order, on top of a tree that already carried the other eight -- not yet
+#   starting from a pristine tarball. The fixes/x86_64-unix/ntdll.so that
+#   ships is that build. Rerunning on that same tree fails at the rosetta
+#   patch: once the emulation patch has edited its lines, the "already
+#   applied" test cannot recognise it. Reverse the four (last first) or start
+#   from a fresh tree.

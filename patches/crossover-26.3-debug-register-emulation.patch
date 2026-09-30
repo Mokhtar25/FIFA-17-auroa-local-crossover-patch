@@ -1,10 +1,11 @@
 CX_DR_TRAP=3: user-mode hardware debug registers under Rosetta 2.
 
-Not in build.sh's PATCHES list and not in fixes/. Applies after the eight
-shipped patches (it builds on the CX_DR_TRAP / CX_DR_PERSIST / drcache code
-in the rosetta patch). Nothing changes unless a bottle sets CX_DR_TRAP=3;
-modes 0-2 run the same code as before. See README-debug-register-emulation.md
-for each bug, the tests, and the results.
+The ninth patch in build.sh's PATCHES list, built into fixes/: FIFA 16's
+bottle (AURORA_GAME=fifa16) sets CX_DR_TRAP=3. Applies after the eight
+before it (it builds on the CX_DR_TRAP / CX_DR_PERSIST / drcache code in the
+rosetta patch). Nothing changes unless a bottle sets CX_DR_TRAP=3; modes 0-2
+run the same code as before, so FIFA 17's bottle, on 2, is unaffected.
+See README-debug-register-emulation.md for each bug, the tests, and the results.
 
 Rosetta refuses debug registers outright (CW HACK 22131), and stock Wine drops
 them without a word: a thread that arms Dr0-3 through SetThreadContext never

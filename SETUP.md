@@ -1,4 +1,4 @@
-# FIFA 15 + FIFA 17 on a Mac — setup guide
+# FIFA 15, FIFA 16 + FIFA 17 on a Mac — setup guide
 
 This package fixes CrossOver so FIFA 17 runs on an Apple silicon Mac. Without
 the fixes the game restarts forever, hangs on a black loading screen, has no
@@ -66,12 +66,13 @@ FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh
 
 Use the same variables for later checks. The combined installer rejects
 `AURORA_BOTTLE`, identical names and paths pointing at the same bottle. The
-single-game installer also refuses a bottle carrying the other game's profile.
+single-game installer also refuses a bottle carrying another game's profile.
 Existing separate bottles can be reused; a mixed bottle needs a new, separate
 bottle for one game. No saves or existing bottles are deleted by setup.
 
-Both profiles install the complete shared DLL payload, so rerunning the FIFA 17
-installer keeps the FIFA 15 fix. **Stop.command** stops both games, and
+Every profile installs the complete shared DLL payload, so rerunning the FIFA 17
+installer keeps the FIFA 15 and FIFA 16 fixes. FIFA 16 has its own bottle too,
+`FIFA16`, and is set up on its own: see [FIFA 16](#fifa-16-experimental). **Stop.command** stops both games, and
 **Uninstall.command** removes their shared app; bottles and saves remain.
 This describes coexistence in one installation. Playing both matches at once
 has not been validated.
@@ -1135,6 +1136,73 @@ attract-mode match on 2026-09-02. Input, sound and saves were not play-tested.
 On 2026-09-07, a user confirmed direct offline play passed language selection
 after applying the fix from a verified Aurora15 original backup. Automated
 checks cover separate bottle profiles, offline recovery and cleanup behavior.
+
+### FIFA 16 (experimental)
+
+The same CrossOver-FIFA copy also runs FIFA 16, in its own `FIFA16` bottle.
+FIFA 15 and FIFA 17 are not affected: the four Wine fixes FIFA 16 needs are
+in the shared `ntdll.so`, but each one only acts when a bottle setting is there
+that only the FIFA 16 bottle has.
+
+It is **experimental and unreliable for now**. The stutter is fixed, but the
+fix for the endless loading after the language screen only works on some
+launches; see the warning under "To play" below.
+
+You need your own FIFA 16 game folder, with `fifa16.exe` in it. This package
+never ships the game and never changes a file in it.
+
+```sh
+./setup.sh --fifa16          # or double-click "FIFA 16.command"
+```
+
+It makes the copy if needed, and on a copy that is already there it replaces
+`ntdll.so` if it is a build from before FIFA 16's fixes. It makes the `FIFA16`
+bottle (CrossOver must be closed) and adds four settings to it:
+
+| Setting | Why |
+|---|---|
+| `CX_GRAPHICS_BACKEND=d3dmetal` | the graphics path, as for the other two games |
+| `WINE_SIMULATE_WRITECOPY=1` | as for the other two games |
+| `CX_DR_TRAP=3` | the game's protection arms hardware debug registers, which Rosetta does not have; mode 3 emulates them. FIFA 17's bottle uses 2 |
+| `CX_FIFA16_DSTFIX=0` | the fix for the endless loading after the language screen |
+
+No DLL override, no C runtime override and no proxy setting: FIFA 16 has no
+launcher program and no online play here, and none of the three was in the
+bottle the fix was proven in. The PlayStation controller fix (`DisableHidraw`)
+is set, as for the other two games.
+
+Last, it finds the game folder and makes sure the bottle can reach it. It looks
+in `~/Downloads/FIFA 16`, then `~/Desktop`, `~/Games`, `~/Documents`, your home
+folder and `/Applications`; for anywhere else, `FIFA16_DIR=/path ./setup.sh
+--fifa16`. A new bottle has drive `Y:` on your home folder, so a game under it
+is reachable already (`Y:\Downloads\FIFA 16`). Anywhere else, the bottle is
+given a drive letter of its own for the folder.
+
+To play: open CrossOver-FIFA, open the `FIFA16` bottle, choose **Run Command**
+and run `fifa16.exe` from the game folder; setup prints the exact path. Tick the
+box that saves it as a launcher, and next time it is one click in the bottle.
+Press start and pick a language: on a good run the loading animation finishes
+and the menus appear.
+
+> [!CAUTION]
+> 🔴 **It loads forever after the language screen, or freezes loading a match.**
+
+> [!TIP]
+> 🟢 There is no fix for this yet; it is the known limit of the loading fix. The game's protection hands `msvcr110!memmove` the complement of a buffer's address, and the fix corrects that only for one exact address: the one the buffer had on the run where the fix was made. The buffer is heap memory, and where it lands changes from one launch to the next. When it lands somewhere else the fix does not fire, and the game loops at the language screen, or gets to the menus and freezes when a match loads the pre-game training field. On 2026-09-29 both happened on the same Mac, with the same game. Quit the game and launch it again: that has sometimes got a run through, but it is luck, not a remedy. `FIX-fifa16-loading-loop.md` is how the fix was found.
+
+> [!CAUTION]
+> 🔴 **It stutters in play.**
+
+> [!TIP]
+> 🟢 Fixed by `crossover-26.3-drtrap-syscall-stub.patch`, which is in the `ntdll.so` this package ships. The game's protection keeps a read watchpoint on a page every Wine system call reads, and under Rosetta each of those reads cost a fault of about 16 microseconds, some 70,000 a second. The patch points Wine's system-call stubs at a copy of that value on a page nothing watches; the game now takes 1,000 to 4,000 of those faults a second.
+
+Other forms: `./setup.sh --fifa16 --verify` (also
+`diagnostics/16 Check the install (FIFA 16).command`), `./setup.sh --fifa16
+--bottle`. `--smoke`, `--report` and `--bundle` are FIFA 17 only.
+
+Where it stands: on 2026-09-29, on one Mac, one run got past the language
+screen to the menus and then froze loading a kickoff match; another looped at
+the language screen. Matches, controller, sound and saves were not play-tested.
 
 ## Reference
 

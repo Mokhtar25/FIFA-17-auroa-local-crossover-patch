@@ -14,6 +14,8 @@
 # (For FIFA 15 it does add Microsoft's msvcr110/msvcp110 next to fifa15.exe,
 # copied from your FIFA 17 folder or out of the game's own _Redist installer:
 # without them an online match desyncs at kick-off.)
+# (For FIFA 16 it changes nothing in the game folder; if the bottle has no
+# drive letter that reaches the folder, it gives the bottle one.)
 #
 #   ./setup.sh [/path/to/CrossOver.app]   install
 #   ./setup.sh --resign                   repair the signature, no re-copy
@@ -63,6 +65,11 @@
 #                                         the Aurora15 bottle, its settings and files
 #   ./setup.sh --fifa15 --verify          check the FIFA 15 setup, change nothing
 #                                         (experimental; see SETUP.md "FIFA 15")
+#   ./setup.sh --fifa16                   set FIFA 16 up: the copy if it is missing,
+#                                         the FIFA16 bottle, its settings, and a
+#                                         drive letter for the game folder
+#   ./setup.sh --fifa16 --verify          check the FIFA 16 setup, change nothing
+#                                         (experimental; see SETUP.md "FIFA 16")
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -130,6 +137,18 @@ case "${1:-}" in
             --shutdown) MODE=shutdown; shift ;;
             --resign) MODE=resign; shift ;;
             -*) print -r -- "Unknown option after --fifa15: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
+        esac ;;
+    --fifa16)
+        # The same for FIFA 16: AURORA_GAME=fifa16, with the mode picked below
+        # from what is already there, and a mode after it taken as given.
+        AURORA_GAME=fifa16; MODE=fifa16; shift
+        case "${1:-}" in
+            --verify) MODE=verify; shift ;;
+            --bottle) MODE=bottle; shift ;;
+            --unstick) MODE=unstick; shift ;;
+            --shutdown) MODE=shutdown; shift ;;
+            --resign) MODE=resign; shift ;;
+            -*) print -r -- "Unknown option after --fifa16: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
         esac ;;
     --help|-h)
         sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -494,7 +513,10 @@ BOTTLE_DIR="${CX_BOTTLE_PATH:-$HOME/Library/Application Support/CrossOver/Bottle
 # mode supports. FIFA 15 (AURORA_GAME=fifa15) shares the same patched CrossOver
 # -- its one Wine patch is inert until CX_TOPDOWN_LIMIT is set, which is what
 # its bottle profile does -- and differs only in the bottle settings and in
-# skipping the Aurora17-only steps. See SETUP.md, "FIFA 15".
+# skipping the Aurora17-only steps. See SETUP.md, "FIFA 15". FIFA 16
+# (AURORA_GAME=fifa16) shares it too: its three Wine patches act only under
+# CX_DR_TRAP=3 and CX_FIFA16_DSTFIX, which only its bottle profile sets, and it
+# skips the same steps. See SETUP.md, "FIFA 16".
 GAME="${AURORA_GAME:-fifa17}"
 
 # ------------------------------- the browser runtime the RebornFUT launcher needs
@@ -524,9 +546,13 @@ WEBVIEW2_SHA256=b43a87ae6a039daaf96a8a3766a11c317a90c1ffe973bb19087374528d611544
 WEBVIEW2_WIN_DIR='C:\webview2-fixed\99.0.1150.52'
 
 case "$GAME" in
-    fifa17|fifa15) ;;
-    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17 or fifa15)"; exit $E_UNSUPPORTED ;;
+    fifa17|fifa15|fifa16) ;;
+    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15 or fifa16)"; exit $E_UNSUPPORTED ;;
 esac
+# The ntdll.so a game cannot run without, known by the name of the bottle
+# variable its patch reads (see add_game_ntdll). FIFA 17's needs nothing the
+# full payload does not already carry, so it has none.
+NTDLL_MARKER=""; NTDLL_OLD=""; NTDLL_WHY=""
 if [ "$GAME" = fifa15 ]; then
     BOTTLE="${AURORA_BOTTLE:-${FIFA15_BOTTLE:-Aurora15}}"
     # No CX_DR_TRAP: the FIFA 15 protector was never seen to need it, and the
@@ -534,12 +560,29 @@ if [ "$GAME" = fifa15 ]; then
     # for its start-up crash (patches/README-fifa15-wine-fixes.md).
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" "CX_TOPDOWN_LIMIT=0x1ffffffff" )
     GAME_LABEL="FIFA 15"
-    case "$MODE" in
-        smoke|report|bundle|play-log|play-offline|offline-menu|ensure-licence|reseed-licence|repair) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for FIFA 15 yet."
-                      print -r -- "Use  ./setup.sh --fifa15 --verify  instead."
-                      exit $E_UNSUPPORTED ;;
-    esac
-    [ "$NO_AURORA" = 0 ] || die $E_UNSUPPORTED "--offline is for FIFA 17. Use ./setup.sh --fifa15 for FIFA 15."
+    NTDLL_MARKER=CX_TOPDOWN_LIMIT
+    NTDLL_OLD="the FIFA 17-only"
+    NTDLL_WHY="FIFA 15 dies seven seconds in with it"
+elif [ "$GAME" = fifa16 ]; then
+    BOTTLE="${AURORA_BOTTLE:-${FIFA16_BOTTLE:-FIFA16}}"
+    # CX_DR_TRAP=3, not FIFA 17's 2: the crack's protector arms debug
+    # registers on itself and on other threads and reads through them, and
+    # only mode 3 emulates all of that under Rosetta (it also reports PAE, which
+    # the protector hashes). See patches/README-debug-register-emulation.md.
+    # CX_FIFA16_DSTFIX=0 is the fix for the endless loading after the
+    # language pick and for the same freeze when a match loads: 0 means
+    # "invert whatever negative address the protector faults on"
+    # (FIX-fifa16-loading-loop.md). FIFA 15's CX_TOPDOWN_LIMIT and FIFA 17's
+    # WebView2 folder are not FIFA 16's and stay out.
+    BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1"
+                      "CX_DR_TRAP=3" "CX_FIFA16_DSTFIX=0" )
+    GAME_LABEL="FIFA 16"
+    # The marker is the generic loop fix's log line: a build with only the
+    # one-address version of the fix has the syscall stub but still loops
+    # whenever the heap buffer lands elsewhere.
+    NTDLL_MARKER="CTXBP dstfix generic"
+    NTDLL_OLD="an older"
+    NTDLL_WHY="FIFA 16 stops before its start screen, loops after the language pick, or stutters, with it"
 else
     BOTTLE="${AURORA_BOTTLE:-${FIFA17_BOTTLE:-Aurora17}}"
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
@@ -550,25 +593,44 @@ else
         || BOTTLE_SETTINGS+=( "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=$WEBVIEW2_WIN_DIR" )
     GAME_LABEL="FIFA 17"
 fi
+# FIFA 15 and FIFA 16 have no Aurora17, so every mode built around its
+# launcher, its logs or its licence has nothing to do for them.
+if [ "$GAME" != fifa17 ]; then
+    case "$MODE" in
+        smoke|report|bundle|play-log|play-offline|offline-menu|ensure-licence|reseed-licence|repair) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for $GAME_LABEL yet."
+                      print -r -- "Use  ./setup.sh --$GAME --verify  instead."
+                      exit $E_UNSUPPORTED ;;
+    esac
+    [ "$NO_AURORA" = 0 ] || die $E_UNSUPPORTED "--offline is for FIFA 17. Use ./setup.sh --$GAME for $GAME_LABEL."
+fi
 
-# Reject reused bottles before either profile can change their settings.
+# Reject reused bottles before any profile can change their settings. Each
+# game's bottle carries one setting no other profile writes, so a bottle that
+# has another game's is that game's: Aurora17 has CX_DR_TRAP=2, Aurora15 has
+# CX_TOPDOWN_LIMIT, FIFA16 has CX_FIFA16_DSTFIX. FIFA 16 sets CX_DR_TRAP too,
+# to 3, so FIFA 17's marker is the whole line, value and all.
 # Resolve symlinks and compare without case, since the usual Mac filesystem
 # treats Aurora15 and aurora15 as the same directory.
-if [ "$GAME" = fifa15 ]; then
-    OTHER_BOTTLE="${FIFA17_BOTTLE:-Aurora17}"
-    OTHER_SETTING=CX_DR_TRAP
-else
-    OTHER_BOTTLE="${FIFA15_BOTTLE:-Aurora15}"
-    OTHER_SETTING=CX_TOPDOWN_LIMIT
-fi
 BOTTLE_PATH="$BOTTLE_DIR/$BOTTLE"
-OTHER_BOTTLE_PATH="$BOTTLE_DIR/$OTHER_BOTTLE"
-if [ "${(L)BOTTLE_PATH:A}" = "${(L)OTHER_BOTTLE_PATH:A}" ] \
-   || grep -Eq "^\"$OTHER_SETTING\"[[:space:]]*=" "$BOTTLE_PATH/cxbottle.conf" 2>/dev/null; then
-    die $E_UNSUPPORTED "$GAME_LABEL needs its own bottle; '$BOTTLE' is assigned to the other game.
-         Use separate FIFA17_BOTTLE and FIFA15_BOTTLE names (defaults: Aurora17 and Aurora15).
+for OTHER_GAME in fifa17 fifa15 fifa16; do
+    [ "$OTHER_GAME" != "$GAME" ] || continue
+    case "$OTHER_GAME" in
+        fifa17) OTHER_BOTTLE="${FIFA17_BOTTLE:-Aurora17}"; OTHER_LABEL="FIFA 17"
+                OTHER_SETTING='"CX_DR_TRAP"[[:space:]]*=[[:space:]]*"2"' ;;
+        fifa15) OTHER_BOTTLE="${FIFA15_BOTTLE:-Aurora15}"; OTHER_LABEL="FIFA 15"
+                OTHER_SETTING='"CX_TOPDOWN_LIMIT"[[:space:]]*=' ;;
+        fifa16) OTHER_BOTTLE="${FIFA16_BOTTLE:-FIFA16}"; OTHER_LABEL="FIFA 16"
+                OTHER_SETTING='"CX_FIFA16_DSTFIX"[[:space:]]*=' ;;
+    esac
+    OTHER_BOTTLE_PATH="$BOTTLE_DIR/$OTHER_BOTTLE"
+    if [ "${(L)BOTTLE_PATH:A}" = "${(L)OTHER_BOTTLE_PATH:A}" ] \
+       || grep -Eq "^$OTHER_SETTING" "$BOTTLE_PATH/cxbottle.conf" 2>/dev/null; then
+        die $E_UNSUPPORTED "$GAME_LABEL needs its own bottle; '$BOTTLE' is assigned to $OTHER_LABEL.
+         Use separate FIFA17_BOTTLE, FIFA15_BOTTLE and FIFA16_BOTTLE names
+         (defaults: Aurora17, Aurora15 and FIFA16).
          Nothing has been changed."
-fi
+    fi
+done
 
 # --fifa15 is the whole FIFA 15 setup in one command, and what that means
 # depends on what is there. No patched CrossOver copy yet: the full install,
@@ -576,9 +638,16 @@ fi
 # copy already there, made by either profile: the bottle only -- the Aurora15
 # bottle is made if it is missing, and the copy gets gdiplus.dll if plain
 # ./setup.sh made it without. Either way it ends with the game folder checked.
+#
+# --fifa16 is the same for FIFA 16. No copy yet: the full install with the
+# FIFA 16 profile. A copy there: the bottle only -- the FIFA16 bottle made if
+# it is missing, and the copy's ntdll.so replaced if it is a build without the
+# FIFA 16 fix, which every copy made before that build is. Either way it ends
+# with the game folder found and reachable from the bottle.
 F15_ONE=0
-if [ "$MODE" = fifa15 ]; then
-    F15_ONE=1
+F16_ONE=0
+if [ "$MODE" = fifa15 ] || [ "$MODE" = fifa16 ]; then
+    if [ "$MODE" = fifa15 ]; then F15_ONE=1; else F16_ONE=1; fi
     if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
@@ -590,6 +659,9 @@ fi
 ALL_PORTS=47170,47171,47172,47173,3216
 if [ "$GAME" = fifa15 ]; then
     GAME_PORTS=3216; GAME_PORTS_LABEL=3216
+elif [ "$GAME" = fifa16 ]; then
+    # FIFA 16 runs on its own: no Aurora, no port.
+    GAME_PORTS=""; GAME_PORTS_LABEL=""
 else
     GAME_PORTS=47170,47171,47172,47173; GAME_PORTS_LABEL=47170-47173
 fi
@@ -826,22 +898,23 @@ wine_leftovers() {
     return 0
 }
 
-# The games and Aurora programs, by name: fifa17/15.exe,
+# The games and Aurora programs, by name: fifa17/16/15.exe,
 # Aurora17/15 Connector/Client/Server/Launcher. A Wine process shows its
 # Windows command line to ps, so the name is on it -- including the
 # winewrapper.exe lines that start a connector from a .lnk (those contain no
 # .exe, only "Aurora15Connector-2.lnk", so matching .exe alone misses the
 # wrapper and leaves a PPID-1 stray behind).
 #
-# Both games by default; "game_leftovers fifa17" or "game_leftovers fifa15"
+# Every game by default; "game_leftovers fifa17", "fifa15" or "fifa16"
 # narrows it to one. --play-log needs FIFA 17's only: an Aurora15Connector
 # left listening on 3216 is a normal state, not a reason to refuse to start
-# Aurora17's launcher.
+# Aurora17's launcher. FIFA 16 has no Aurora, so its name is the game's alone.
 game_leftovers() {
-    local p pat='fifa1[57]|Aurora1[57](Connector|Client|Server|Launcher)'
+    local p pat='fifa1[567]|Aurora1[57](Connector|Client|Server|Launcher)'
     case "${1:-}" in
         fifa17) pat='fifa17|Aurora17(Connector|Client|Server|Launcher)' ;;
         fifa15) pat='fifa15|Aurora15(Connector|Client|Server|Launcher)' ;;
+        fifa16) pat='fifa16' ;;
     esac
     for p in ${(f)"$(ps -Ao pid=,command= 2>/dev/null \
         | grep -Ei "($pat)" \
@@ -928,13 +1001,13 @@ shutdown_wineservers() {
     return 0
 }
 
-# ----------------------------------------------------- FIFA 15 one-command
-# Makes the bottle with CrossOver's own tool, so --fifa15 and --offline do not
-# send anyone to the New Bottle dialog. The copy's cxbottle is used, so the bottle
-# is born pointing at the patched CrossOver. It runs wineboot, which takes
-# about twenty seconds and leaves user.reg and system.reg behind -- the two
-# files configure_bottle needs, and the reason a bottle CrossOver has never
-# opened is not enough.
+# ------------------------------------------------ FIFA 15/16 one-command
+# Makes the bottle with CrossOver's own tool, so --fifa15, --fifa16 and
+# --offline do not send anyone to the New Bottle dialog. The copy's cxbottle is
+# used, so the bottle is born pointing at the patched CrossOver. It runs
+# wineboot, which takes about twenty seconds and leaves user.reg and system.reg
+# behind -- the two files configure_bottle needs, and the reason a bottle
+# CrossOver has never opened is not enough.
 make_bottle() {
     local app="$1" cxb="$1/Contents/SharedSupport/CrossOver/bin/cxbottle" running out
     say ""
@@ -988,7 +1061,7 @@ f15_add_gdiplus() {
         fi
         return 0
     fi
-    f15_require_closed "$app"
+    require_app_closed "$app"
     [ -f "$wine/$f.orig" ] || cp -X "$wine/$f" "$wine/$f.orig" 2>/dev/null || true
     if cp -X "$HERE/fixes/$f" "$wine/$f" 2>/dev/null; then
         ok "${f:t} -- installed (Wine's own kept as ${f:t}.orig)"
@@ -1002,9 +1075,9 @@ f15_add_gdiplus() {
     resign_app "$app"
 }
 
-f15_require_closed() {
+require_app_closed() {
     app_is_running "$1" || return 0
-    die $E_PERMISSION "${1:t} is open, and the FIFA 15 files cannot go in while it is.
+    die $E_PERMISSION "${1:t} is open, and the $GAME_LABEL files cannot go in while it is.
          Quit it completely (Command-Q, not just closing the window), then
          run this again. Nothing has been changed."
 }
@@ -1015,26 +1088,34 @@ f15_require_closed() {
 # older ntdll.so, and FIFA 15 in it dies seven seconds in with 0x80000004 --
 # every bottle setting right, nothing in any log. The build's marker is the
 # environment variable's name in the file, so that is what is looked for.
+# FIFA 16 is the same story two builds later: its four patches (the
+# debug-register emulation, PF_PAE, the loading-loop fix and the syscall-stub
+# fix) came after, and its marker is the generic loop fix's log line, since a
+# build with the one-address version has the syscall stub but still loops
+# whenever the heap buffer lands elsewhere. Without them the crack's
+# protector exits before the start screen, and without the loop fix the game
+# loops forever after the language pick. NTDLL_MARKER says which one this
+# game needs.
 # Installing it is the full install's steps 4 to 6 for one file: copy, the
 # lib64 search path, sign the file, sign the app. This one IS a stop when it
 # fails: the bottle is useless without it.
-f15_add_ntdll() {
+add_game_ntdll() {
     local app="$1" wine="$1/Contents/SharedSupport/CrossOver/lib/wine" f=x86_64-unix/ntdll.so
     say ""
-    say "Checking ${app:t} for the FIFA 15 files"
+    say "Checking ${app:t} for the $GAME_LABEL files"
     if [ ! -f "$HERE/fixes/$f" ]; then
         die $E_PAYLOAD "fixes/${f:t} is missing from this package. Download it again."
     fi
-    if ! strings -a "$HERE/fixes/$f" 2>/dev/null | grep -q CX_TOPDOWN_LIMIT; then
-        die $E_PAYLOAD "fixes/${f:t} is a build without the FIFA 15 patch.
-         Download the complete main-branch package again. FIFA 15 cannot run with this file."
+    if ! strings -a "$HERE/fixes/$f" 2>/dev/null | grep -q "$NTDLL_MARKER"; then
+        die $E_PAYLOAD "fixes/${f:t} is a build without the $GAME_LABEL patch.
+         Download the complete main-branch package again. $GAME_LABEL cannot run with this file."
     fi
-    if strings -a "$wine/$f" 2>/dev/null | grep -q CX_TOPDOWN_LIMIT; then
-        ok "${f:t} -- already the build with the FIFA 15 patch"
+    if strings -a "$wine/$f" 2>/dev/null | grep -q "$NTDLL_MARKER"; then
+        ok "${f:t} -- already the build with the $GAME_LABEL patch"
         return 0
     fi
-    say "        ${app:t} has the FIFA 17-only ${f:t}; FIFA 15 dies seven seconds in with it"
-    f15_require_closed "$app"
+    say "        ${app:t} has $NTDLL_OLD ${f:t}; $NTDLL_WHY"
+    require_app_closed "$app"
     require_clt
     if [ -f "$wine/$f.orig" ]; then
         ok "${f:t}.orig backup already there, keeping it"
@@ -1110,6 +1191,82 @@ f15_check_game() {
             note "could not tell which ItsAMe_Origin.dll is there:"
             print -r -- "$out" | sed 's/^/        /' ;;
     esac
+    return 0
+}
+
+# ------------------------------------------------- FIFA 16's game folder
+# The folder is the player's own and nothing in it is checked or changed:
+# FIFA 16 runs fifa16.exe straight from it, with no launcher. What the bottle
+# needs is a drive letter that reaches it. A bottle cxbottle makes has y: on
+# the home folder, so anything under ~ is reachable already (the run that
+# proved the fix used Y:\Downloads\FIFA 16). A folder outside ~, or a bottle
+# whose y: has gone, is given a letter of its own.
+f16_game_dir() {
+    local d
+    for d in "${FIFA16_DIR:-}" "$HOME/Downloads/FIFA 16" "$HOME/Desktop/FIFA 16" \
+             "$HOME/Games/FIFA 16" "$HOME/Documents/FIFA 16" "$HOME/FIFA 16" \
+             "/Applications/FIFA 16"; do
+        [ -n "$d" ] || continue
+        if [ -f "$d/fifa16.exe" ]; then print -r -- "${d:A}"; return 0; fi
+    done
+    return 1
+}
+
+# Says where the game is and how the bottle reaches it. "f16_check_game map"
+# also adds the drive letter when none reaches it; without "map" it changes
+# nothing, which is what --verify needs. Leaves the Windows path to fifa16.exe
+# in F16_EXE_WIN for the closing message.
+F16_EXE_WIN=""
+f16_check_game() {
+    local mode="${1:-check}" d gwin dd="$BOTTLE_DIR/$BOTTLE/dosdevices" letter=""
+    say ""
+    say "The FIFA 16 game folder"
+    if [ -n "${FIFA16_DIR:-}" ] && [ ! -f "$FIFA16_DIR/fifa16.exe" ]; then
+        note "FIFA16_DIR is $FIFA16_DIR, and there is no fifa16.exe in it"
+    fi
+    if ! d="$(f16_game_dir)"; then
+        note "no FIFA 16 folder found (looked in ~/Downloads, ~/Desktop, ~/Games,"
+        say "        ~/Documents, ~ and /Applications). The game is never modified, but"
+        say "        the bottle needs a drive letter that reaches it. If it is elsewhere:"
+        say "            FIFA16_DIR='/path/to/FIFA 16' ./setup.sh --fifa16"
+        return 0
+    fi
+    ok "fifa16.exe in $d"
+    if [ ! -d "$dd" ]; then
+        note "the $BOTTLE bottle has no dosdevices folder, so no drive letter was checked"
+        return 0
+    fi
+    if gwin="$(unix_path_to_win "$d" 2>/dev/null)"; then
+        ok "the $BOTTLE bottle reaches it as $gwin"
+        F16_EXE_WIN="$gwin\\fifa16.exe"
+        return 0
+    fi
+    if [ "$mode" != map ]; then
+        note "no drive letter in the $BOTTLE bottle reaches $d"
+        say "        CrossOver's Run Command cannot browse to fifa16.exe. Fix:"
+        say "            ./setup.sh --fifa16"
+        return 0
+    fi
+    # y: first, where CrossOver itself puts the home folder, when the game is
+    # under it and the letter is free. Otherwise the first free letter from
+    # x: down, pointed at the game folder itself.
+    if [ "${d#$HOME/}" != "$d" ] && [ ! -e "$dd/y:" ] && [ ! -L "$dd/y:" ]; then
+        ln -s "$HOME" "$dd/y:" 2>/dev/null && letter=y
+    else
+        for letter in x w v u t s r q p o n m l k j i h; do
+            [ -e "$dd/$letter:" ] || [ -L "$dd/$letter:" ] || break
+            letter=""
+        done
+        [ -n "$letter" ] && { ln -s "$d" "$dd/$letter:" 2>/dev/null || letter=""; }
+    fi
+    if [ -n "$letter" ] && gwin="$(unix_path_to_win "$d" 2>/dev/null)"; then
+        ok "gave the $BOTTLE bottle drive ${(U)letter}: -- the game is $gwin"
+        F16_EXE_WIN="$gwin\\fifa16.exe"
+    else
+        note "could not give the $BOTTLE bottle a drive letter for $d"
+        say "        Add one yourself: open ${BOTTLE} in CrossOver, Wine Configuration,"
+        say "        Drives, Add, and point it at that folder."
+    fi
     return 0
 }
 
@@ -1252,8 +1409,10 @@ OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
 # game's ProtoSSLConnect target to Aurora's server) is a proxy dinput8.dll next
 # to fifa15.exe. Without the override the game loads Wine's own dinput8, talks
 # to spring14.gosredirector.ea.com and says the servers are closed -- with the
-# Origin/LSX side working perfectly (FIFA 15 checkpoint fact 81).
-if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; else OVERRIDE_DLL=version; fi
+# Origin/LSX side working perfectly (FIFA 15 checkpoint fact 81). FIFA 16:
+# none. Nothing redirects it anywhere, and the bottle the fix was proven in
+# had no override, so it gets none.
+if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; elif [ "$GAME" = fifa16 ]; then OVERRIDE_DLL=""; else OVERRIDE_DLL=version; fi
 OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 
 # ------------------------------------------------ the C runtime override
@@ -1277,7 +1436,11 @@ OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 # ships none, so f15_ensure_crt_dlls puts a Microsoft pair where the game will
 # find it first -- from the FIFA 17 folder, or out of the VS2012 redistributable
 # that FIFA 15 itself carries in _Redist.
-if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
+#
+# FIFA 16 gets neither. The override is for online matches, and FIFA 16 here
+# is played offline; its loading-loop fix was found and proven on Wine's own
+# msvcr110, and nothing here should move that ground under it.
+if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); elif [ "$GAME" = fifa16 ]; then CRT_OVERRIDE_DLLS=(); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
 
 bottle_user_reg()   { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
 bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
@@ -2133,7 +2296,7 @@ verify_install() {
     # macOS 14 user crashed 0xC0000005 at the main menu -- and still did after
     # updating to macOS 26, so that crash is not a macOS 14 matter. What is
     # left is only that nobody has confirmed online play on 14. Not BAD.
-    if [ "$offline" = 0 ] && [ "${GAME:-fifa17}" != fifa15 ]; then
+    if [ "$offline" = 0 ] && [ "${GAME:-fifa17}" = fifa17 ]; then
         case "$(sw_vers -productVersion 2>/dev/null)" in
             14.*)
                 note "macOS 14: online play has not been confirmed on macOS 14 yet. If the game"
@@ -2224,7 +2387,7 @@ verify_install() {
                           | sed -n 's/^"\([A-Za-z_][A-Za-z0-9_]*\)" = .*/\1/p')"}; do
             [ -n "$fk" ] || continue
             case "$fk" in
-                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|WINE_COREAUDIO_EXCLUDE|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|PROMPT) ;;
+                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|CX_FIFA16_DSTFIX|WINE_COREAUDIO_EXCLUDE|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|PROMPT) ;;
                 *) foreign+=( "$fk" ) ;;
             esac
         done
@@ -2242,7 +2405,7 @@ verify_install() {
     # The folder the variable above points at. The variable on its own is worth
     # nothing: the WebView2 loader falls back to the evergreen runtime, and the
     # launcher's window is blank again.
-    if [ "$GAME" != fifa15 ] && [ "${WEBVIEW2_RUNTIME:-}" != skip ]; then
+    if [ "$GAME" = fifa17 ] && [ "${WEBVIEW2_RUNTIME:-}" != skip ]; then
         local wv="$BOTTLE_DIR/$BOTTLE/drive_c/webview2-fixed/$WEBVIEW2_VERSION"
         if [ -f "$wv/msedgewebview2.exe" ] && [ -f "$wv/$WEBVIEW2_VERSION.manifest" ]; then
             ok "WebView2 $WEBVIEW2_VERSION in the $BOTTLE bottle"
@@ -2287,10 +2450,15 @@ verify_install() {
 
     # Check whether any Aurora ports are held by orphaned processes. Aurora17's
     # server listens on 47170-47173; Aurora15Connector's Origin stand-in on 3216.
-    local port_pids
-    port_pids="$(/usr/sbin/lsof -nP -iTCP:$GAME_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
-    port_pids="${port_pids% }"
-    if [ -z "$port_pids" ]; then
+    # FIFA 16 has no Aurora and so no port to check.
+    local port_pids=""
+    if [ -n "$GAME_PORTS" ]; then
+        port_pids="$(/usr/sbin/lsof -nP -iTCP:$GAME_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
+        port_pids="${port_pids% }"
+    fi
+    if [ -z "$GAME_PORTS" ]; then
+        ok "FIFA 16: no Aurora ports to check"
+    elif [ -z "$port_pids" ]; then
         ok "all Aurora ports ($GAME_PORTS_LABEL) are free"
     elif [ -n "$(crossovers_running)" ] || hold_pid_alive; then
         # hold_pid_alive covers a session started by --play-log or
@@ -2310,7 +2478,8 @@ verify_install() {
 
     # Without this the redirect shim is never loaded and the only symptom is
     # "servers have been shut down" -- with every other check here passing.
-    if [ -f "$(bottle_user_reg)" ]; then
+    # FIFA 16 has no override (see OVERRIDE_DLL).
+    if [ -n "$OVERRIDE_DLL" ] && [ -f "$(bottle_user_reg)" ]; then
         version_override_is_set \
             && ok "$OVERRIDE_DLL = native,builtin in the $BOTTLE bottle" \
             || { bad "the $BOTTLE bottle loads Wine's own $OVERRIDE_DLL.dll, so"
@@ -2356,8 +2525,9 @@ verify_install() {
 
     # Without this Aurora's helper spends five seconds looking for a proxy before
     # its first request, and the shim's five-second deadline for the Origin auth
-    # code runs out first. See BUGS.md §21.
-    if [ -f "$(bottle_user_reg)" ]; then
+    # code runs out first. See BUGS.md §21. FIFA 16 has no helper, and its
+    # bottle is not given the setting.
+    if [ "$GAME" != fifa16 ] && [ -f "$(bottle_user_reg)" ]; then
         proxy_autodetect_is_off \
             && ok "proxy auto-detect off in the $BOTTLE bottle" \
             || { if [ "$GAME" = fifa15 ]; then
@@ -2424,6 +2594,9 @@ verify_install() {
     if [ "$GAME" = fifa15 ]; then
         ok "FIFA 15: no Aurora17 stand-in to check"
         f15_check_game
+    elif [ "$GAME" = fifa16 ]; then
+        ok "FIFA 16: no Aurora17 stand-in to check"
+        f16_check_game
     elif [ "$offline" = 1 ]; then
         ok "offline install: no Aurora17 stand-in to check"
     else
@@ -2488,6 +2661,8 @@ verify_install() {
     # game serves its own licence, so for FIFA 15 none of this applies.
     if [ "$GAME" = fifa15 ]; then
         ok "FIFA 15: Aurora17's EA names, licence and certificate checks do not apply"
+    elif [ "$GAME" = fifa16 ]; then
+        ok "FIFA 16: Aurora17's EA names, licence and certificate checks do not apply"
     elif [ "$offline" = 1 ]; then
         ok "offline install: Aurora17's EA names, redirect and certificate do not apply"
         # The licence file is the game's own and is checked either way.
@@ -2649,6 +2824,11 @@ verify_install() {
         if [ "$GAME" = fifa15 ]; then
             say "For direct offline play, the DLL check above must say offline-patched."
             say "Otherwise use Aurora15Connector's PLAY button. These checks do not test a launch."
+            return 0
+        fi
+        if [ "$GAME" = fifa16 ]; then
+            say "These checks do not test a launch. Run fifa16.exe in the $BOTTLE bottle,"
+            say "press start and pick a language: the menus appearing is the real test."
             return 0
         fi
         say "That is not the same as \"the game will play\": these checks cannot"
@@ -3585,7 +3765,12 @@ configure_bottle() {
         fi
         # See the comment on set_version_override. Nothing else puts this there,
         # and without it every other part of the install is wasted.
-        if [ -f "$(bottle_user_reg)" ]; then
+        # FIFA 16 needs none of the three user.reg settings below: no redirect
+        # DLL, no online C runtime, and no Aurora helper racing a proxy lookup.
+        # None of the three was in the bottle its fix was proven in.
+        if [ "$GAME" = fifa16 ]; then
+            ok "FIFA 16: no DLL override or proxy setting needed"
+        elif [ -f "$(bottle_user_reg)" ]; then
             if version_override_is_set; then
                 ok "$OVERRIDE_DLL = native,builtin — already set"
             elif set_version_override; then
@@ -3675,6 +3860,16 @@ configure_bottle() {
         BOTTLE_OK=1
     fi
 
+    if [ "$GAME" = fifa16 ]; then
+        # The same three steps, for the same reason, and nothing in their
+        # place: fifa16.exe runs on its own. What it needs from the bottle is
+        # the four settings above and a drive letter for its folder, which
+        # f16_check_game sees to once this returns.
+        say ""
+        say "8-9a. Skipped — these three steps are FIFA 17's (Aurora17 stand-in, EA names, licence)"
+        PS_OK=1; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""; HOSTS_OK=1; LICENCE_OK=1
+        return 0
+    fi
     if [ "$GAME" = fifa15 ]; then
         # Steps 8, 9 and 9a are FIFA 17's: the PowerShell stand-in exists for
         # Aurora17's Play.ps1, the six names are Aurora17's redirect targets,
@@ -4201,7 +4396,7 @@ require_bottle_free() {
          to be overwritten when CrossOver does quit, and the game would say the
          servers have been shut down. Nothing has been changed."
     fi
-    if [ "$GAME" != fifa15 ] && hold_pid_alive; then
+    if [ "$GAME" = fifa17 ] && hold_pid_alive; then
         die $E_PERMISSION "FIFA 17 is playing right now (started by --play-offline).
          Quit the game first, then run this again. Nothing has been changed."
     fi
@@ -4550,8 +4745,12 @@ if [ "$MODE" = bottle ]; then
     take_setup_lock
     require_bottle_free
     if [ "$F15_ONE" = 1 ]; then
-        f15_add_ntdll "$TARGET"
+        add_game_ntdll "$TARGET"
         f15_add_gdiplus "$TARGET"
+        [ -d "$BOTTLE_DIR/$BOTTLE" ] || make_bottle "$TARGET"
+    elif [ "$F16_ONE" = 1 ]; then
+        # No gdiplus.dll: that is Aurora15Connector's, and FIFA 16 has none.
+        add_game_ntdll "$TARGET"
         [ -d "$BOTTLE_DIR/$BOTTLE" ] || make_bottle "$TARGET"
     fi
     [ -d "$BOTTLE_DIR/$BOTTLE" ] \
@@ -4563,6 +4762,7 @@ if [ "$MODE" = bottle ]; then
     say "Setting up the $BOTTLE bottle for ${TARGET:t}"
     configure_bottle "$TARGET"
     [ "$GAME" = fifa15 ] && f15_check_game
+    [ "$GAME" = fifa16 ] && f16_check_game map
     end_own_wine_session
     say ""
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
@@ -4574,12 +4774,19 @@ if [ "$MODE" = bottle ]; then
             say "In Aurora15Connector, never press \"Repair connection\": under Wine it"
             say "kills its own Origin stand-in and the game then hangs at the flag."
             say "If a second connector says port 3216 is in use:  ./setup.sh --unstick"
+        elif [ "$GAME" = fifa16 ]; then
+            green "Done. Open ${TARGET:t:r}, pick the $BOTTLE bottle, choose Run Command and"
+            say "      run ${F16_EXE_WIN:-fifa16.exe from your FIFA 16 folder}."
+            say "      Tick the box that saves it as a launcher, and next time it is one"
+            say "      click in the bottle."
         else
             green "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
         fi
         say ""
         if [ "$GAME" = fifa15 ]; then
             say "To check:  ./setup.sh --fifa15 --verify"
+        elif [ "$GAME" = fifa16 ]; then
+            say "To check:  ./setup.sh --fifa16 --verify"
         else
             say "To check:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
         fi
@@ -4710,7 +4917,7 @@ if [ "$MODE" = play-offline ]; then
     # CrossOver's wine wrapper returns as soon as it has started the program --
     # it forwards --wait-children only when asked -- so waiting on that pid is
     # not waiting for the game. Watch the bottle instead: FIFA 17 in THIS
-    # bottle, by bottle_game_pids. game_leftovers matches both games and every
+    # bottle, by bottle_game_pids. game_leftovers matches every game and every
     # Aurora program by name, so with Aurora15Connector listening it said
     # "FIFA 17 is running" before the game existed and never saw it close.
     # The hold file below is what tells --unstick and --shutdown that a Wine
@@ -5235,6 +5442,15 @@ rm -f "$PRE_ENT"
     || die $E_PAYLOAD "The files in aurora17/ do not match their checksums.
          Do not install these. Download the package again and re-extract it."
 ok "the files to install match their checksums"
+# A checksum only says the files are the ones SHA256SUMS names, not that they
+# are the build this game needs. An older package's ntdll.so matches its own
+# sums and has no FIFA 16 fix in it, and FIFA 16 would install "done" and then
+# never get past its start screen. The same test add_game_ntdll makes.
+if [ "$GAME" = fifa16 ] \
+   && ! strings -a "$HERE/fixes/x86_64-unix/ntdll.so" 2>/dev/null | grep -q "$NTDLL_MARKER"; then
+    die $E_PAYLOAD "fixes/ntdll.so is a build without the FIFA 16 patch.
+         Download the complete main-branch package again. FIFA 16 cannot run with this file."
+fi
 
 if [ "$IN_PLACE" != "1" ]; then
     assert_safe_target "$TARGET"
@@ -5325,14 +5541,14 @@ require_bottle_free
 # Without one the installer used to copy a gigabyte, note the missing bottle in
 # passing at step 7, and finish "done" with nothing that plays.
 #
-# An offline install and --fifa15 need no launcher in the bottle, so they make
-# it themselves with cxbottle -- after the copy exists, since it is the copy's
-# cxbottle that makes it. That needs CrossOver closed: an open one lists the
-# bottles it found when it started and puts the new one's registry back its
-# own way on quit. So it is checked here, before a gigabyte is copied, rather
+# An offline install, --fifa15 and --fifa16 need no launcher in the bottle, so
+# they make it themselves with cxbottle -- after the copy exists, since it is
+# the copy's cxbottle that makes it. That needs CrossOver closed: an open one
+# lists the bottles it found when it started and puts the new one's registry
+# back its own way on quit. So it is checked here, before a gigabyte is copied, rather
 # than in make_bottle afterwards.
 MAKE_BOTTLE=0
-if [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
+if [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$F16_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
     [ ! -e "$BOTTLE_DIR/$BOTTLE" ] \
         || die $E_UNSUPPORTED "There is a '$BOTTLE' folder in $BOTTLE_DIR, but it is not a
          finished bottle (no cxbottle.conf in it). Move it out of the way, or
@@ -5511,6 +5727,7 @@ if [ "$MAKE_BOTTLE" = 1 ]; then
 fi
 configure_bottle "$APP"
 [ "$GAME" = fifa15 ] && f15_check_game
+[ "$GAME" = fifa16 ] && f16_check_game map
 end_own_wine_session
 
 # ------------------------------------------------------------- the receipt
@@ -5556,6 +5773,13 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
         say "          In the connector never press \"Repair connection\": under Wine it"
         say "          kills its own Origin stand-in and the game hangs at the flag."
         say "          Port 3216 in use afterwards?  ./setup.sh --unstick"
+    elif [ "$GAME" = fifa16 ]; then
+        say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
+        say "          $BOTTLE bottle, choose Run Command and run"
+        say "          ${F16_EXE_WIN:-fifa16.exe from your FIFA 16 folder}."
+        say "          Tick the box that saves it as a launcher, and next time it is"
+        say "          one click in the bottle. No launcher program is involved: the"
+        say "          game runs on its own (SETUP.md, FIFA 16)."
     elif [ "$IN_PLACE" = "1" ]; then
         say "To play:  open CrossOver, then open Aurora17 in the $BOTTLE bottle"
         say "          and press PLAY FIFA 17."

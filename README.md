@@ -1,4 +1,4 @@
-# FIFA 15 + FIFA 17 on a Mac (Apple silicon)
+# FIFA 15, FIFA 16 + FIFA 17 on a Mac (Apple silicon)
 
 FIFA 17 and its Aurora17 server do not run in stock CrossOver on an Apple
 silicon Mac. This package fixes that.
@@ -11,6 +11,17 @@ CrossOver and all your other bottles are never touched.
 controller, sound and saves are not play-tested yet. `fifa15/README.md` says
 exactly where it stands, and SETUP.md has the section for it.
 
+**FIFA 16** runs on that same copy too, in its own `FIFA16` bottle, and is
+**experimental and unreliable for now**. It needs your own FIFA 16 game
+folder; this package never ships a game. The stutter in play is fixed. The
+endless loading after the language screen is not reliably fixed: the fix
+matches one exact memory address, and the game puts that buffer somewhere
+different from one launch to the next. When it lands in the right place the
+game reaches the menus; when it does not, the game loops at the language
+screen, or freezes loading a match. Quitting and launching again sometimes
+gets a run through, but nothing guarantees it. SETUP.md, "FIFA 16", has the
+details.
+
 ## What you need
 
 - A Mac with Apple silicon (M1 or newer), macOS 14 or newer
@@ -22,7 +33,8 @@ exactly where it stands, and SETUP.md has the section for it.
 ## Before you install
 
 **FIFA 15 only?** Put your game folder in Downloads, quit CrossOver, and
-double-click **FIFA 15.command**. The steps below are for FIFA 17 or both games.
+double-click **FIFA 15.command**. **FIFA 16?** The same, with your **FIFA 16**
+folder and **FIFA 16.command**. The steps below are for FIFA 17 or both games.
 
 1. Put the **FIFA 17** folder and the **Aurora17** folder in your Downloads folder.
    Doing FIFA 15 too? Put the **FIFA 15** folder there as well.
@@ -49,6 +61,7 @@ Pick one:
 | Single player only, no Aurora17 | **START HERE offline.command** |
 | Both games, in separate Aurora17 and Aurora15 bottles | **Both games.command** |
 | FIFA 15 only (makes the copy first if it is not there) | **FIFA 15.command** |
+| FIFA 16 (makes the copy first if it is not there) | **FIFA 16.command** |
 
 If macOS says "Apple could not verify..." go to **System Settings → Privacy &
 Security**, scroll down, and click **Open Anyway**. You only do this once.
@@ -67,7 +80,8 @@ hosts, menu entries, and the WebView2 runtime the RebornFUT launcher needs if
 it is not there yet), has the game's own loader write a fresh licence file,
 and checks the lot. CrossOver is not copied again, so it takes a minute or
 two. From Terminal it is `./setup.sh --repair`; for FIFA 15, `./setup.sh
---fifa15` brings that bottle up to date.
+--fifa15` brings that bottle up to date, and `./setup.sh --fifa16` does the
+same for FIFA 16.
 
 The **RebornFUT** launcher needs two more fixes from version 3.1.45 on, the
 point where it became a WebView2 app. Both are CrossOver bugs its browser
@@ -107,6 +121,11 @@ fix right under it.
   original backup and preserves the currently installed DLL. Never press the connector's **Repair connection** button —
   under Wine it kills the connector's own client and the game hangs.
   `fifa15/README.md` covers both ways in full.
+- **FIFA 16:** open **CrossOver-FIFA**, open the **FIFA16** bottle, choose
+  **Run Command** and run `fifa16.exe` from your FIFA 16 folder (setup prints
+  its exact path, for example `Y:\Downloads\FIFA 16\fifa16.exe`). Tick the box
+  to save it as a launcher and next time it is one click. There is no launcher
+  program: the game runs on its own, offline.
 
 Always use **CrossOver-FIFA**, not your normal CrossOver. They look the same,
 but only the copy has the fixes.
@@ -141,6 +160,7 @@ into one zip in the **diagnostics** folder and opens that folder for you.
 
 For FIFA 15, use **diagnostics/13 Check the install (FIFA 15).command**.
 If it freezes at the language screen, see [the launch-mode check](fifa15/README.md#frozen-at-the-language-screen).
+For FIFA 16, use **diagnostics/16 Check the install (FIFA 16).command**.
 
 Every other check and repair is a double-click in there too — check the
 install, unstick a bottle, repair the signature, run a smoke test — one
@@ -157,6 +177,8 @@ The same actions from Terminal, if you prefer:
 
 ./setup.sh --fifa15            # set FIFA 15 up
 ./setup.sh --fifa15 --verify   # check the FIFA 15 setup, change nothing
+./setup.sh --fifa16            # set FIFA 16 up
+./setup.sh --fifa16 --verify   # check the FIFA 16 setup, change nothing
 ./setup-both.sh --verify       # check both games
 ```
 
@@ -165,7 +187,7 @@ The same actions from Terminal, if you prefer:
 ## Undo
 
 Double-click **Uninstall.command**. It removes the shared CrossOver-FIFA copy and the
-one file it put in your Aurora17 folder, disabling this setup for **both games**.
+one file it put in your Aurora17 folder, disabling this setup for **every game**.
 Your bottles and saves remain. Your own CrossOver was never changed.
 
 If you used the FIFA 15 offline patch, undo that one yourself first —
@@ -180,6 +202,7 @@ game folder, which Uninstall never touches.
 | `START HERE offline.command` | install (single player, no Aurora17) |
 | `Both games.command` | install FIFA 17, then set FIFA 15 up |
 | `FIFA 15.command` | set FIFA 15 up on its own (experimental) |
+| `FIFA 16.command` | set FIFA 16 up on its own (experimental) |
 | `PLAY FIFA 17 offline.command` | play offline without opening CrossOver |
 | `Stop.command` | quit game, Aurora and CrossOver cleanly |
 | `Diagnostics.command` | collect the logs for a bug report |
