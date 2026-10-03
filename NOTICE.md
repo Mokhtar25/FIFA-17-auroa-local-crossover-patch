@@ -15,6 +15,7 @@ are not ours to relicense.** `./build.sh` rebuilds all of it from source.
 | `SETUP.md`, `MANUAL.md`, and the rest of the documentation | ours | MIT |
 | `fixes/a17hosts.c`, `fixes/x86_64-unix/a17hosts.dylib` | ours | MIT |
 | `aurora17/aurora-pwsh.c`, `aurora17/powershell.exe` | ours | MIT |
+| `fixes/cas-powershell.c`, `fixes/x86_64-windows/cas-powershell.exe`, `fixes/cas-link.applescript` | ours | MIT |
 | `fixes/x86_64-unix/ntdll.so` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-unix/crypt32.so` | Wine, modified by us | **LGPL-2.1-or-later** |
 | `fixes/x86_64-unix/win32u.so` | Wine, modified by us | **LGPL-2.1-or-later** |

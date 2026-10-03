@@ -218,7 +218,7 @@ check_deps() {
     fi
 
     if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-        ok "mingw-w64 (builds the .dll half)"
+        ok "mingw-w64 (builds the .dll half and cas-powershell.exe)"
     else
         bad "no x86_64-w64-mingw32-gcc. Without it --with-mingw fails and"
         say "        you get no Windows-side DLLs at all:  brew install mingw-w64"
@@ -264,7 +264,7 @@ say "1. Checking the tools"
 check_deps
 # clang reads both from the environment, so configure, make and the
 # a17hosts.dylib step below all get the same SDK and minimum macOS. The
-# mingw compiler that builds the .dll half ignores them.
+# mingw compiler that builds the .dll half and cas-powershell.exe ignores them.
 export SDKROOT="$SDK" MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 
 if [ "${1:-}" = "--deps" ]; then
@@ -487,17 +487,32 @@ otool -L "$OUT/x86_64-unix/a17hosts.dylib" | grep -q 'reexport' \
 check_macho x86_64-unix/a17hosts.dylib
 ok "a17hosts.dylib"
 
-# --------------------------------------------------------- 8. the comparison
+# cas-powershell.exe is ours outright too: the powershell.exe that answers the
+# CAS launcher's device check, and hands every other command line to
+# Aurora17's stand-in (see the top of fixes/cas-powershell.c). One C file and
+# mingw, nothing of Wine's. -s and --no-insert-timestamp leave out the symbols
+# and the link time, which are all that differed between two builds, so with
+# the same mingw this one comes out byte-identical to the shipped file.
 say ""
-say "8. Comparing with the files this package ships"
+say "8. Building cas-powershell.exe"
+[ -f "$HERE/fixes/cas-powershell.c" ] || fail "fixes/cas-powershell.c is missing from this package."
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
+      -o "$OUT/x86_64-windows/cas-powershell.exe" "$HERE/fixes/cas-powershell.c" -lbcrypt \
+    || fail "cas-powershell.exe did not build."
+ok "cas-powershell.exe"
+
+# --------------------------------------------------------- 9. the comparison
 say ""
-( cd "$OUT" && shasum -a 256 x86_64-unix/*.so x86_64-unix/*.dylib x86_64-windows/*.dll ) \
+say "9. Comparing with the files this package ships"
+say ""
+( cd "$OUT" && shasum -a 256 x86_64-unix/*.so x86_64-unix/*.dylib x86_64-windows/*.dll \
+                             x86_64-windows/*.exe ) \
     > "$OUT/SHA256SUMS.built"
 
 same=0; differ=0
 while IFS= read -r line; do
     f="${line##* }"
-    case "$f" in *.c) continue ;; esac
+    case "$f" in *.c|*.applescript) continue ;; esac
     want="${line%% *}"
     got="$(cd "$OUT" && shasum -a 256 "$f" 2>/dev/null | cut -d' ' -f1)"
     if [ "$want" = "$got" ]; then

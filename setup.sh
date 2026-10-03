@@ -11,6 +11,10 @@
 # FIFA 17 only), which is what makes the RebornFUT launcher's window draw;
 # WEBVIEW2_CAB=/path/to/the.cab uses a copy you already have and
 # WEBVIEW2_RUNTIME=skip leaves it out.
+# (For FIFA 17 it also makes the CAS launcher work: a powershell.exe in the
+# bottle that answers CAS's device check, and a small app in ~/Applications,
+# "CAS Link (CrossOver)", that brings CAS's cas:// sign-in link back from the
+# browser to the bottle. CAS_SUPPORT=skip leaves both out.)
 # (For FIFA 15 it does add Microsoft's msvcr110/msvcp110 next to fifa15.exe,
 # copied from your FIFA 17 folder or out of the game's own _Redist installer:
 # without them an online match desyncs at kick-off.)
@@ -49,9 +53,10 @@
 #                                         cleanly, replace any fix file that is missing
 #                                         or stale in the copy and re-sign it, set the
 #                                         bottle up again (settings, overrides, hosts,
-#                                         menu entries, the WebView2 runtime), have the
-#                                         game's loader write a fresh licence file, then
-#                                         --verify. "Fix my installation.command" is this
+#                                         menu entries, the WebView2 runtime, the CAS
+#                                         launcher's two pieces), have the game's loader
+#                                         write a fresh licence file, then --verify.
+#                                         "Fix my installation.command" is this
 #   ./setup.sh --offline-menu             (re)add the FIFA 17 (offline) entry to the
 #                                         bottle, e.g. after moving the game folder
 #   ./setup.sh --offline                  install FIFA 17 with no Aurora17 at all:
@@ -544,6 +549,33 @@ WEBVIEW2_URL="https://github.com/westinyang/WebView2RuntimeArchive/releases/down
 WEBVIEW2_SHA256=b43a87ae6a039daaf96a8a3766a11c317a90c1ffe973bb19087374528d611544
 # Single quotes: this is a Windows path, and the backslashes are the path's own.
 WEBVIEW2_WIN_DIR='C:\webview2-fixed\99.0.1150.52'
+
+# ------------------------------------------------ what the CAS launcher needs
+# CAS is a second FIFA 17 launcher, a Tauri app like RebornFUT, so the
+# WebView2 runtime above is what makes its window draw too. It then stopped
+# twice, and neither stop says what it is:
+#
+# * Its device check runs Windows PowerShell to read the machine's UUID, and
+#   Wine's powershell.exe is a stub that prints nothing. CAS takes the empty
+#   answer to mean an old CAS and says "Install the latest CAS launcher to
+#   verify this device.", and sign-in never starts. fixes/cas-powershell.c
+#   answers that one script with what real PowerShell would print.
+# * Discord sign-in ends with the browser opening a cas:// link, and that
+#   scheme is registered only inside the bottle, so the Mac browser has
+#   nowhere to send it. fixes/cas-link.applescript, compiled into a small app
+#   in ~/Applications, takes the link and starts cas.exe in the bottle with
+#   it; CAS's single-instance plugin hands it to the window already open.
+#
+# Both are FIFA 17's only, and CAS is optional: nothing here is ever a stop.
+#   CAS_SUPPORT=skip   leave both out
+CAS_PS="$HERE/fixes/x86_64-windows/cas-powershell.exe"
+# The name Aurora17's stand-in takes in the bottle once CAS's has its place:
+# cas-powershell.exe hands it every command line that is not CAS's.
+CAS_HANDOFF=aurora17-powershell.exe
+CAS_LINK_SRC="$HERE/fixes/cas-link.applescript"
+CAS_LINK_APP="$HOME/Applications/CAS Link (CrossOver).app"
+CAS_LINK_ID=com.fifa17-crossover.cas-link
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 case "$GAME" in
     fifa17|fifa15|fifa16) ;;
@@ -2466,6 +2498,33 @@ verify_install() {
         fi
     fi
 
+    # The CAS launcher's two pieces (step 9c). Notes, never BAD: CAS is a
+    # second launcher nobody has to use, and the game plays without it.
+    if [ "$GAME" = fifa17 ] && [ "${CAS_SUPPORT:-}" != skip ]; then
+        local casps="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0/powershell.exe"
+        if cmp -s "$CAS_PS" "$casps" 2>/dev/null; then
+            ok "CAS's device check answers in the $BOTTLE bottle"
+        else
+            note "the $BOTTLE bottle's powershell.exe is not CAS's stand-in, so the CAS"
+            say "        launcher says \"Install the latest CAS launcher to verify this"
+            say "        device.\" and sign-in never starts. Run ./setup.sh --bottle"
+        fi
+        # The handler starts whichever wine and bottle it was built with; one
+        # built for another copy or bottle hands the link to the wrong place.
+        local cassrc="$CAS_LINK_APP/Contents/Resources/cas-link.applescript"
+        if cas_link_registered \
+           && grep -Fq -- "\"$app/Contents/SharedSupport/CrossOver/bin/wine\"" "$cassrc" 2>/dev/null \
+           && grep -Fq -- "\"$BOTTLE\"" "$cassrc" 2>/dev/null; then
+            ok "CAS Link (CrossOver) takes cas:// sign-in links"
+        elif cas_link_registered; then
+            note "CAS Link (CrossOver) was built for another CrossOver copy or bottle,"
+            say "        so CAS's sign-in link would go there. Run ./setup.sh --bottle"
+        else
+            note "nothing on this Mac takes cas:// links, so CAS's Discord sign-in"
+            say "        cannot get back from the browser. Run ./setup.sh --bottle"
+        fi
+    fi
+
     # A live session means everything below is being read from a file Wine is
     # about to overwrite from its own memory; a session with no CrossOver
     # behind it means the bottle will not open at all. See prefix_holders.
@@ -2660,6 +2719,14 @@ verify_install() {
     local -a stale_at
     if cmp -s "$HERE/aurora17/powershell.exe" "$psdir/powershell.exe" 2>/dev/null; then
         ok "PowerShell stand-in in the bottle"; found=1
+    elif cmp -s "$CAS_PS" "$psdir/powershell.exe" 2>/dev/null; then
+        # CAS's stand-in has the name (step 9c) and hands PLAY's calls to
+        # Aurora17's beside it, so that is the file that has to be right.
+        if cmp -s "$HERE/aurora17/powershell.exe" "$psdir/$CAS_HANDOFF" 2>/dev/null; then
+            ok "PowerShell stand-in in the bottle (as $CAS_HANDOFF, behind CAS's)"; found=1
+        elif [ -f "$psdir/$CAS_HANDOFF" ]; then
+            stale=1; stale_at+=( "the $BOTTLE bottle ($CAS_HANDOFF)" )
+        fi
     elif [ -f "$psdir/powershell.exe" ]; then
         stale=1; stale_at+=( "the $BOTTLE bottle" )
     fi
@@ -3722,10 +3789,198 @@ install_webview2_runtime() {
     return 0
 }
 
+# --------------------------------------------- the CAS launcher, in the bottle
+# See the CAS_* block near the top. CAS runs PowerShell by its full path,
+# %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe, which is also
+# where step 8 puts Aurora17's stand-in. One file cannot be both, so CAS's
+# takes the name and Aurora17's moves beside it as aurora17-powershell.exe,
+# where CAS's hands it every command line that is not CAS's own -- PLAY from
+# an Aurora17 folder setup.sh did not find still reaches it, exit code and
+# all. Step 8 knows this and refreshes that file instead of the name.
+#
+# The device id is a hash of this Mac's hardware UUID as Wine's WMI reports
+# it, so it stays the same across bottles, reinstalls and runs. That is on
+# purpose: CAS bans by device, and an id made up per bottle would look like
+# dodging one.
+#
+# The file it replaces is kept as powershell.exe.wine-stub, once, unless step
+# 8 already kept Wine's stub as powershell.exe.wine-stub-orig. Wine's
+# fake-dll refresh after a CrossOver update does not overwrite a native file,
+# so nothing puts the stub back behind our back. Never a stop.
+install_cas_powershell() {
+    local psdir="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
+    local ps="$psdir/powershell.exe" aurora="$HERE/aurora17/powershell.exe"
+
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
+        note "no bottle called '$BOTTLE' yet, so there is nowhere to put CAS's stand-in"
+        return 0
+    fi
+    if cmp -s "$CAS_PS" "$ps"; then
+        ok "CAS's device check — already answered in the $BOTTLE bottle"
+        return 0
+    fi
+    mkdir -p "$psdir" || { note "could not make $psdir"; return 0; }
+    if [ -f "$ps" ] && cmp -s "$aurora" "$ps"; then
+        # Aurora17's, from step 8. It goes beside, first: if that copy
+        # fails, PLAY keeps the file it has and CAS goes without.
+        if ! cmp -s "$aurora" "$psdir/$CAS_HANDOFF"; then
+            cp -X "$aurora" "$psdir/$CAS_HANDOFF" || {
+                note "could not move Aurora17's stand-in aside in the $BOTTLE bottle,"
+                say "        so CAS's stand-in was not put in. Quit CrossOver completely"
+                say "        and run ./setup.sh --bottle again."
+                return 0
+            }
+        fi
+    elif [ -f "$ps" ] && [ ! -f "$ps.wine-stub" ] && [ ! -f "$ps.wine-stub-orig" ]; then
+        # Somebody else's file -- Wine's stub on a bottle step 8 never
+        # touched. Keep it once; never overwrite that copy.
+        cp -X "$ps" "$ps.wine-stub" || {
+            note "could not keep the bottle's own powershell.exe, so it was left as it is"
+            say "        and CAS will say \"Install the latest CAS launcher to verify this"
+            say "        device.\" Quit CrossOver completely and run ./setup.sh --bottle again."
+            return 0
+        }
+    fi
+    cp -X "$CAS_PS" "$ps" || {
+        note "could not write CAS's stand-in into the $BOTTLE bottle"
+        say "        CAS will say \"Install the latest CAS launcher to verify this device.\""
+        say "        Quit CrossOver completely and run ./setup.sh --bottle again."
+        return 0
+    }
+    if [ -f "$psdir/$CAS_HANDOFF" ]; then
+        ok "CAS's device check now answers in the $BOTTLE bottle"
+        say "        (Aurora17's stand-in is beside it as $CAS_HANDOFF and still gets PLAY)"
+    elif [ -f "$ps.wine-stub" ]; then
+        ok "CAS's device check now answers in the $BOTTLE bottle"
+        say "        (Wine's own powershell.exe is kept beside it as powershell.exe.wine-stub)"
+    else
+        ok "CAS's device check now answers in the $BOTTLE bottle"
+    fi
+    return 0
+}
+
+# Whether macOS hands cas:// links to CAS Link (CrossOver). LaunchServices'
+# own table is the answer; its dump names a claim by CFBundleURLName, which
+# is ours. A macOS whose lsregister cannot dump that table falls back on the
+# app being there and saying so in its Info.plist.
+cas_link_registered() {
+    local dump
+    [ -d "$CAS_LINK_APP" ] || return 1
+    dump="$("$LSREGISTER" -dump URLSchemeBinding 2>/dev/null || true)"
+    if [ -n "$dump" ]; then
+        grep -Eq '^cas:[[:space:]].*CAS sign-in' <<< "$dump"
+        return
+    fi
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' \
+        "$CAS_LINK_APP/Contents/Info.plist" 2>/dev/null | grep -qx cas
+}
+
+# The app is built here rather than shipped: the wine it runs and the bottle
+# it names are this install's, and a signed bundle cannot be edited after the
+# fact. The source it was built from is kept inside it, so a second run that
+# would build the same app finds it already there and leaves it alone.
+# osacompile writes a fresh Info.plist, which is why the plist edits come
+# after it and the signature after those. Never a stop: without it CAS still
+# runs and only the browser's sign-in hand-back is lost.
+install_cas_link() {
+    local app="$1"
+    local wine="$app/Contents/SharedSupport/CrossOver/bin/wine"
+    local tmp built src w b p n
+
+    if [ ! -f "$CAS_LINK_SRC" ]; then
+        note "fixes/cas-link.applescript is missing from this package"
+        return 0
+    fi
+    if [ ! -x "$LSREGISTER" ]; then
+        note "this macOS has no lsregister, so nothing can claim cas:// links"
+        return 0
+    fi
+    tmp="$(mktemp -d -t caslink)" || { note "could not make a scratch folder"; return 0; }
+    built="$tmp/${CAS_LINK_APP:t}"
+
+    # Each value goes into an AppleScript string, so its backslashes and
+    # double quotes are escaped the AppleScript way.
+    w="${wine//\\/\\\\}";             w="${w//\"/\\\"}"
+    b="${BOTTLE//\\/\\\\}";           b="${b//\"/\\\"}"
+    p="${BOTTLE_DIR//\\/\\\\}";       p="${p//\"/\\\"}"
+    n="${${app:t:r}//\\/\\\\}";       n="${n//\"/\\\"}"
+    src="$(<"$CAS_LINK_SRC")"
+    src="${src//@WINE@/$w}"
+    src="${src//@BOTTLE_PATH@/$p}"
+    src="${src//@BOTTLE@/$b}"
+    src="${src//@APPNAME@/$n}"
+    print -r -- "$src" > "$tmp/cas-link.applescript"
+
+    if cmp -s "$tmp/cas-link.applescript" "$CAS_LINK_APP/Contents/Resources/cas-link.applescript" \
+       && codesign --verify "$CAS_LINK_APP" 2>/dev/null && cas_link_registered; then
+        rm -rf "$tmp"
+        ok "CAS Link (CrossOver) — already takes cas:// links to the $BOTTLE bottle"
+        return 0
+    fi
+
+    if ! osacompile -o "$built" "$tmp/cas-link.applescript" >/dev/null 2>&1; then
+        rm -rf "$tmp"
+        note "osacompile could not build CAS Link (CrossOver)."
+        say "        CAS still runs, but the browser cannot hand Discord sign-in back"
+        say "        to it. Run ./setup.sh --bottle again to retry."
+        return 0
+    fi
+    local plist="$built/Contents/Info.plist"
+    if ! { plutil -replace CFBundleIdentifier -string "$CAS_LINK_ID" "$plist" \
+           && plutil -replace LSUIElement -bool YES "$plist" \
+           && plutil -replace CFBundleURLTypes \
+                  -json '[{"CFBundleURLName":"CAS sign-in","CFBundleURLSchemes":["cas"]}]' "$plist" \
+           && cp "$tmp/cas-link.applescript" "$built/Contents/Resources/cas-link.applescript" \
+           && codesign -fs - "$built" >/dev/null 2>&1; } then
+        rm -rf "$tmp"
+        note "could not finish building CAS Link (CrossOver) — CAS sign-in from the"
+        say "        browser will not reach the bottle. Run ./setup.sh --bottle again."
+        return 0
+    fi
+
+    # Swap it in: the old one is unregistered first so LaunchServices does
+    # not keep a claim on a bundle that is about to vanish.
+    mkdir -p "${CAS_LINK_APP:h}" 2>/dev/null || true
+    if [ -d "$CAS_LINK_APP" ]; then
+        "$LSREGISTER" -u "$CAS_LINK_APP" >/dev/null 2>&1 || true
+        rm -rf "$CAS_LINK_APP"
+    fi
+    if ! mv "$built" "$CAS_LINK_APP"; then
+        rm -rf "$tmp"
+        note "could not put CAS Link (CrossOver) in ${CAS_LINK_APP:h}"
+        return 0
+    fi
+    rm -rf "$tmp"
+    "$LSREGISTER" -f "$CAS_LINK_APP" >/dev/null 2>&1 || true
+    if cas_link_registered; then
+        ok "CAS Link (CrossOver) takes cas:// links to the $BOTTLE bottle"
+        say "        (in ${CAS_LINK_APP:h}; this is how Discord sign-in gets back to CAS)"
+    else
+        note "CAS Link (CrossOver) is built but macOS has not given it cas:// links."
+        say "        Open it once from ${CAS_LINK_APP:h}, then try signing in again."
+    fi
+    return 0
+}
+
+# Step 9c, both halves. FIFA 17 only: configure_bottle returns before this
+# for the other games.
+install_cas_support() {
+    local app="$1"
+    if [ "${CAS_SUPPORT:-}" = skip ]; then
+        note "skipped — CAS_SUPPORT=skip was set"
+        say "        The CAS launcher cannot verify this Mac or finish sign-in without it."
+        return 0
+    fi
+    install_cas_powershell
+    install_cas_link "$app"
+}
+
 # ------------------------------------------- the bottle, on its own
-# Steps 7 to 9 are everything that lives in the bottle rather than in the
+# Steps 7 to 9c are everything that lives in the bottle rather than in the
 # CrossOver copy: the settings, the version override, the shortcuts, the
-# PowerShell stand-in and the six network mappings.
+# PowerShell stand-in, the six network mappings, the licence file, the
+# WebView2 runtime and the CAS launcher's two pieces (one of which, the
+# cas:// handler, lives in ~/Applications but names this bottle).
 #
 # They are a function because a bottle is not necessarily made before the
 # fixes are installed. A bottle created afterwards -- and after a bad session
@@ -3963,6 +4218,9 @@ configure_bottle() {
         say ""
         say "9b. Installing the browser runtime the RebornFUT launcher needs"
         install_webview2_runtime "$APP"
+        say ""
+        say "9c. Making the CAS launcher work"
+        install_cas_support "$APP"
         install_offline_menu "$APP" || true
         return 0
     fi
@@ -4031,9 +4289,17 @@ configure_bottle() {
 
     # Also install it inside the bottle, so it is found no matter where Aurora17
     # lives. The file being replaced is Wine's own stub; we keep a copy of it.
+    # Once step 9c has put CAS's stand-in in that name, CAS's hands PLAY's
+    # calls on to $CAS_HANDOFF beside it, so that is the file kept current
+    # here, and CAS's is left where it is. Wine's stub was kept when CAS's
+    # went in.
     PSDIR="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
+    PS_BOTTLE_NAME=powershell.exe
     if [ -d "$BOTTLE_DIR/$BOTTLE" ]; then
-        if [ -f "$PSDIR/powershell.exe" ] \
+        if [ -f "$PSDIR/powershell.exe" ] && cmp -s "$CAS_PS" "$PSDIR/powershell.exe"; then
+            PS_BOTTLE_NAME="$CAS_HANDOFF"
+            PS_BOTTLE_ACTION=replaced
+        elif [ -f "$PSDIR/powershell.exe" ] \
            && ! cmp -s "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe"; then
             # Somebody else's file. Keep it once; never overwrite that copy.
             [ -f "$PSDIR/powershell.exe.wine-stub-orig" ] \
@@ -4047,11 +4313,15 @@ configure_bottle() {
             mkdir -p "$PSDIR"
             PS_BOTTLE_ACTION=created
         fi
-        cp -X "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe" \
+        cp -X "$HERE/aurora17/powershell.exe" "$PSDIR/$PS_BOTTLE_NAME" \
             || die $E_PERMISSION "Could not write the stand-in into the $BOTTLE bottle.
          Quit CrossOver completely and run this again. If it repeats, check
          there is free disk space."
-        ok "into the $BOTTLE bottle ($PS_BOTTLE_ACTION)"
+        if [ "$PS_BOTTLE_NAME" = powershell.exe ]; then
+            ok "into the $BOTTLE bottle ($PS_BOTTLE_ACTION)"
+        else
+            ok "into the $BOTTLE bottle, as $PS_BOTTLE_NAME behind CAS's stand-in"
+        fi
         PS_OK=1
     fi
 
@@ -4090,6 +4360,14 @@ configure_bottle() {
     say ""
     say "9b. Installing the browser runtime the RebornFUT launcher needs"
     install_webview2_runtime "$APP"
+
+    # ---------------------------------------------- 9c. the CAS launcher
+    # See install_cas_powershell and install_cas_link. After 9b, whose
+    # runtime CAS's window needs as much as RebornFUT's, and after step 8,
+    # whose file in the bottle it moves aside.
+    say ""
+    say "9c. Making the CAS launcher work"
+    install_cas_support "$APP"
 }
 
 # ------------------------------------------------- the launch that is watched
@@ -5237,8 +5515,9 @@ $APP_MGMT_HINT"
 #                     the search path and the signature are redone.
 #   3. --bottle       settings, the version and C runtime overrides, hosts, the
 #                     menu entries, the PowerShell stand-in, a licence file if
-#                     there is none, and the WebView2 runtime the RebornFUT
-#                     launcher's window needs (a 165 MB download, once).
+#                     there is none, the WebView2 runtime the RebornFUT
+#                     launcher's window needs (a 165 MB download, once), and
+#                     the CAS launcher's device check and cas:// handler.
 #   4. the licence    the game's own loader writes a fresh one over whatever
 #                     is there. A file that exists but is wrong passes every
 #                     other check while the game relaunches itself with no

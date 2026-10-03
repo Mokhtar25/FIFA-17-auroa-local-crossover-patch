@@ -507,6 +507,19 @@ The same information, for reference:
 > `HANDOFF-rebornfut-launcher.md`.
 
 > [!CAUTION]
+> 🔴 The **CAS** launcher says "Install the latest CAS launcher to verify this
+> device." and never offers sign-in — or sign-in finishes in the browser and
+> CAS never notices.
+
+> [!TIP]
+> 🟢 Neither is about CAS's version. The first is Wine's `powershell.exe`,
+> which prints nothing when CAS asks it for the device id; the second is the
+> browser having nowhere to send CAS's `cas://` sign-in link. Double-click
+> **Fix my installation.command** (or `./setup.sh --bottle`), which puts in
+> both fixes. What each one does, and what the device id is made of:
+> [9c. The CAS launcher](#9c-the-cas-launcher).
+
+> [!CAUTION]
 > 🔴 The **RebornFUT** launcher's PLAY says FIFA 17 is running, but no game
 > window ever appears, and a minute later it says the game stopped. In
 > Activity Monitor (or `ps`) `FIFA17.exe` comes and goes with `/dbrv=4`,
@@ -1080,6 +1093,82 @@ Doing it by hand is the same three moves: put the cabinet in the bottle as
 and rename the `Microsoft.WebView2.FixedVersionRuntime.99.0.1150.52.x64`
 folder it makes to `99.0.1150.52`, then delete the cabinet.
 
+### 9c. The CAS launcher
+
+CAS is a second launcher for FIFA 17 (and Fortnite). It installs per user, to
+`C:\users\crossover\AppData\Local\CAS\cas.exe` in the Aurora17 bottle, and it
+is a Tauri app like RebornFUT, so the runtime from step 9b is what makes its
+window draw. This was tested from the 0.3.7 installer, which updates itself to
+0.4.3 in place on first start. After the window, CAS stopped twice, and
+neither stop says what it is. The installer fixes both, for FIFA 17 only; CAS
+is optional, so neither is ever a reason for the installer or `--verify` to
+fail.
+
+**The device check.** Before it offers sign-in, CAS works out a device id by
+running Windows PowerShell — by its full path,
+`C:\windows\system32\WindowsPowerShell\v1.0\powershell.exe` — with a script
+that reads the machine's UUID and prints a SHA-256 hash of it. Wine's
+`powershell.exe` is a stub that prints nothing, and CAS reads the empty answer
+as an out-of-date CAS:
+
+> Install the latest CAS launcher to verify this device.
+
+Installing a newer CAS changes nothing; it is PowerShell that is missing. The
+installer puts `fixes/x86_64-windows/cas-powershell.exe` (source:
+`fixes/cas-powershell.c`) in that path. It answers that one script with what
+real PowerShell would print, and nothing else. Every other command line goes,
+unchanged, to Aurora17's stand-in from [step 8](#8-the-powershell-stand-in),
+which used to sit in that same path and now sits beside it as
+`aurora17-powershell.exe`, so Aurora17's PLAY works exactly as before. A
+bottle without Aurora17 gets what Wine's stub gives: no output, exit 0. The
+file it replaces is kept once, as `powershell.exe.wine-stub` (or step 8's
+`powershell.exe.wine-stub-orig`, if that is already there), and never
+overwritten.
+
+**What it sends.** Only the hash, the same calculation CAS makes on a Windows
+PC: SHA-256 of `CAS-device-v1:` followed by the machine's hardware UUID. On a
+Mac that UUID comes from Wine's own WMI, which reads it from the Mac's
+firmware — the Mac's own hardware UUID, in the byte order Windows uses. The
+UUID itself is never sent, stored or logged. It is the same in every bottle
+and every reinstall on one Mac, on purpose: CAS bans by device, and an id
+made up per bottle would look like dodging one.
+
+**The sign-in link.** Discord sign-in ends with the browser opening a
+`cas://auth?…` link. That scheme is registered only inside the bottle, so the
+Mac's browser has nowhere to send it and CAS waits for ever. The installer
+builds a small app, **CAS Link (CrossOver)**, in `~/Applications` from
+`fixes/cas-link.applescript`, with this install's CrossOver copy and bottle
+filled in, and registers it for `cas://`. It runs no window of its own: given
+a link, it starts `cas.exe` in the bottle with it, and CAS passes the link to
+the window already open. Each link is noted in `~/Library/Logs/cas-link.log`
+by its shape only — every value after an `=` is replaced with `…`, because
+those are one-time sign-in codes:
+
+```
+2026-01-01 12:00:00 cas://auth?attempt=…&ticket=…
+```
+
+The app is rebuilt whenever the copy or bottle it names changes, and left
+alone when it would come out the same. If macOS does not hand it the link,
+open it once from `~/Applications` and sign in again.
+
+**Fans at full speed.** CAS's animated background renders on the CPU under
+Wine: `msedgewebview2.exe` was measured at about 680% CPU. CAS's Settings >
+Performance > **Quiet** (30 particles, 24 FPS) brings it down.
+
+`CAS_SUPPORT=skip` leaves both pieces out:
+
+```sh
+CAS_SUPPORT=skip ./setup.sh --bottle
+```
+
+To undo them, `./uninstall.sh` puts the bottle's own `powershell.exe` back,
+removes `aurora17-powershell.exe`, unregisters and deletes CAS Link
+(CrossOver), and deletes its log. By hand: copy
+`powershell.exe.wine-stub` (or `.wine-stub-orig`) back over `powershell.exe`
+in the bottle's `WindowsPowerShell\v1.0`, delete `aurora17-powershell.exe`
+there, and drag CAS Link (CrossOver) to the Trash.
+
 ### 10. Offline menu entry (offline install only)
 
 `./setup.sh --offline-menu` adds the **FIFA 17 (offline)** entry to the bottle.
@@ -1242,11 +1331,14 @@ eventually stops with `Session request was rejected with HTTP 401`, press
 ```
 
 Or double-click **Uninstall.command**. Or by hand: drag CrossOver-FIFA to the
-Trash and delete `powershell.exe` from your Aurora17 folder.
+Trash and delete `powershell.exe` from your Aurora17 folder (and, if you used
+CAS, drag **CAS Link (CrossOver)** from `~/Applications` to the Trash; see
+[9c](#9c-the-cas-launcher)).
 
 Your own CrossOver was never changed. The bottle settings do nothing on their
 own and can stay. Nothing was ever written outside the copy, the bottle and
-your Aurora17 folder. You were never asked for a password.
+your Aurora17 folder, except CAS Link (CrossOver) in `~/Applications` and its
+log in `~/Library/Logs`. You were never asked for a password.
 
 If you used `AURORA_IN_PLACE=1` to patch your real CrossOver, `uninstall.sh`
 puts the `.orig` files back and re-signs the app. It cannot restore
@@ -1263,7 +1355,7 @@ CodeWeavers' own signature. Reinstall CrossOver to have it exactly as shipped.
 | `Diagnostics.command` | collect the logs for a bug report into `diagnostics/` |
 | `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh` | what the .command files run |
-| `fixes/` | the ten files for the CrossOver copy, source and checksums |
+| `fixes/` | the ten files for the CrossOver copy, CAS's PowerShell stand-in and link handler, source and checksums |
 | `aurora17/` | the PowerShell stand-in, its source, the certificate, checksums |
 | `patches/` | the Wine source changes the fixes were built from |
 | `build.sh` | rebuilds `fixes/` from source |

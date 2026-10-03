@@ -102,6 +102,14 @@ launcher installs for itself is left alone and simply not used, and every
 other WebView2 app on your Mac is unaffected. `HANDOFF-rebornfut-launcher.md`
 has the version-by-version evidence.
 
+The **CAS** launcher draws with that same runtime, and setup fixes the two
+places it stopped after that: a `powershell.exe` in the bottle that answers
+its device check (without it CAS says "Install the latest CAS launcher to
+verify this device." and sign-in never starts), and a small app in
+`~/Applications`, **CAS Link (CrossOver)**, that brings the browser's
+`cas://` sign-in link back to the bottle. `CAS_SUPPORT=skip` leaves both out.
+SETUP.md, "9c. The CAS launcher", says what each one does and what it sends.
+
 Custom bottle names: `FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh`.
 Use distinct bottles. Unset `AURORA_BOTTLE` before running the combined installer.
 

@@ -279,6 +279,35 @@ fi
 # ------------------------------------------------ the PowerShell stand-in
 say ""
 PSDIR="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
+
+# CAS's stand-in first (setup.sh step 9c). It took the name powershell.exe
+# and moved Aurora17's beside it as aurora17-powershell.exe, a name nothing
+# but setup.sh uses, so that one simply goes. What CAS's replaced comes back:
+# Wine's stub kept as .wine-stub-orig is put back by the block below, as it
+# always was; one kept as .wine-stub is put back here; with neither, the
+# bottle had no powershell.exe and CAS's is removed. Only while it is still
+# the file we put there -- anything else in that name is left alone.
+if [ -f "$PSDIR/aurora17-powershell.exe" ]; then
+    rm -f "$PSDIR/aurora17-powershell.exe"
+    ok "removed Aurora17's stand-in from beside CAS's in the $BOTTLE bottle"
+    undone=$((undone+1))
+fi
+if [ -f "$PSDIR/powershell.exe" ] \
+   && cmp -s "$HERE/fixes/x86_64-windows/cas-powershell.exe" "$PSDIR/powershell.exe"; then
+    if [ -f "$PSDIR/powershell.exe.wine-stub-orig" ]; then
+        :   # the block below puts Wine's stub back over it
+    elif [ -f "$PSDIR/powershell.exe.wine-stub" ]; then
+        mv -f "$PSDIR/powershell.exe.wine-stub" "$PSDIR/powershell.exe"
+        ok "put Wine's own powershell.exe back in the $BOTTLE bottle (CAS's stand-in removed)"
+        undone=$((undone+1))
+    else
+        rm -f "$PSDIR/powershell.exe"
+        rmdir "$PSDIR" 2>/dev/null || true
+        ok "removed CAS's stand-in from the $BOTTLE bottle"
+        undone=$((undone+1))
+    fi
+fi
+
 if [ -f "$PSDIR/powershell.exe.wine-stub-orig" ]; then
     mv -f "$PSDIR/powershell.exe.wine-stub-orig" "$PSDIR/powershell.exe"
     ok "put Wine's own powershell.exe back in the $BOTTLE bottle"
@@ -367,6 +396,34 @@ if [ -d "$WV2DIR" ]; then
     rm -rf "$WV2DIR"
     ok "removed the WebView2 runtime from the $BOTTLE bottle"
     undone=$((undone+1))
+fi
+
+# ------------------------------------------------ the CAS sign-in handler
+# setup.sh step 9c builds CAS Link (CrossOver) in ~/Applications so the Mac
+# browser can hand CAS's cas:// sign-in link back to the bottle. It names a
+# copy that is about to be deleted, so it goes, unregistered first so macOS
+# does not keep a claim on cas:// for a bundle that is no longer there. Only
+# the bundle carrying our identifier: an app someone else put at that path is
+# not ours to delete. Its log, which holds link shapes and times only, goes
+# with it.
+say ""
+CAS_LINK_APP="$HOME/Applications/CAS Link (CrossOver).app"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+if [ -d "$CAS_LINK_APP" ]; then
+    cas_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' \
+                  "$CAS_LINK_APP/Contents/Info.plist" 2>/dev/null || true)"
+    if [ "$cas_id" = com.fifa17-crossover.cas-link ]; then
+        "$LSREGISTER" -u "$CAS_LINK_APP" >/dev/null 2>&1 || true
+        rm -rf "$CAS_LINK_APP"
+        ok "removed CAS Link (CrossOver) from ${CAS_LINK_APP:h}"
+        undone=$((undone+1))
+    else
+        note "${CAS_LINK_APP:t} is not the one setup.sh built. Leaving it alone."
+    fi
+fi
+if [ -f "$HOME/Library/Logs/cas-link.log" ]; then
+    rm -f "$HOME/Library/Logs/cas-link.log"
+    ok "removed CAS Link's log"
 fi
 
 # ------------------------------------------- the FIFA 17 (offline) menu entry

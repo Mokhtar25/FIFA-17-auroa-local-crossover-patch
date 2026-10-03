@@ -295,6 +295,49 @@ evergreen runtime the launcher installs for itself, under
 `Program Files (x86)\Microsoft\EdgeWebView`, is version 100 or later and must
 not be the one it uses: leave it alone, and leave the setting in.
 
+## 9c. The CAS launcher (optional)
+
+CAS is a second FIFA 17 launcher, and a WebView2 app like RebornFUT, so step 9
+is what makes its window draw. Two more things stop it; SETUP.md, "CAS
+launcher", has the why.
+
+Its device check runs PowerShell by full path, the same file step 8 put
+Aurora17's stand-in in. CAS's stand-in takes that name and hands every command
+line that is not CAS's to Aurora17's, which moves beside it:
+
+```sh
+PSDIR="$BOTTLES/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
+cmp -s aurora17/powershell.exe "$PSDIR/powershell.exe" &&
+    cp -X aurora17/powershell.exe "$PSDIR/aurora17-powershell.exe"
+[ -f "$PSDIR/powershell.exe" ] && [ ! -f "$PSDIR/aurora17-powershell.exe" ] &&
+    [ ! -f "$PSDIR/powershell.exe.wine-stub-orig" ] && [ ! -f "$PSDIR/powershell.exe.wine-stub" ] &&
+    cp -X "$PSDIR/powershell.exe" "$PSDIR/powershell.exe.wine-stub"
+cp -X fixes/x86_64-windows/cas-powershell.exe "$PSDIR/powershell.exe"
+```
+
+Then the app that brings the browser's `cas://` sign-in link back to the
+bottle. Fill in the template, compile it, and only then edit its Info.plist —
+`osacompile` writes a fresh one:
+
+```sh
+L="$HOME/Applications/CAS Link (CrossOver).app"
+T="$(mktemp -d)"
+sed -e "s|@WINE@|$APP/Contents/SharedSupport/CrossOver/bin/wine|" \
+    -e "s|@BOTTLE_PATH@|$BOTTLES|" -e "s|@BOTTLE@|$BOTTLE|" -e "s|@APPNAME@|${APP:t:r}|" \
+    fixes/cas-link.applescript > "$T/cas-link.applescript"
+osacompile -o "$L" "$T/cas-link.applescript"
+plutil -replace CFBundleIdentifier -string com.fifa17-crossover.cas-link "$L/Contents/Info.plist"
+plutil -replace LSUIElement -bool YES "$L/Contents/Info.plist"
+plutil -replace CFBundleURLTypes \
+    -json '[{"CFBundleURLName":"CAS sign-in","CFBundleURLSchemes":["cas"]}]' "$L/Contents/Info.plist"
+cp "$T/cas-link.applescript" "$L/Contents/Resources/"
+codesign -fs - "$L"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$L"
+```
+
+`open 'cas://auth/test'` should add a line to `~/Library/Logs/cas-link.log`;
+CAS ignores a link like that one.
+
 ---
 
 ## Check the lot
