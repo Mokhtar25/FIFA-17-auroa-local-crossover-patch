@@ -12,3 +12,6 @@ diagnostics/online-kickoff/crt-native.*.previous
 
 # ./build.sh output when no outdir is given (a full Wine tree, ~1 GB)
 build-out/
+
+# local agent handoff notes, kept out of the repo
+HANDOFF-*.md
