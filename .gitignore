@@ -13,6 +13,9 @@ diagnostics/online-kickoff/crt-native.*.previous
 # ./build.sh output when no outdir is given (a full Wine tree, ~1 GB)
 build-out/
 
+# dev checkpoints, never committed
+diagnostics/online-kickoff/checkpoints/
+
 # Markdown stays local (handoff notes, checkpoints, analyses) except the docs
 # below, which users read or setup.sh, build.sh and the tests point at.
 *.md
@@ -20,5 +23,4 @@ build-out/
 !/SETUP.md
 !/MANUAL.md
 !/NOTICE.md
-!/FIX-fifa16-loading-loop.md
 !/patches/README-*.md
