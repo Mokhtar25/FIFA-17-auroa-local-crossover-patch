@@ -24,3 +24,4 @@ diagnostics/online-kickoff/checkpoints/
 !/MANUAL.md
 !/NOTICE.md
 !/patches/README-*.md
+/tests/drbp/README.md
