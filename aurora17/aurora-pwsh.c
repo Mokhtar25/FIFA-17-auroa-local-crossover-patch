@@ -2417,6 +2417,42 @@ typedef struct {
     wchar_t log[MAX_PATH];
 } a21_math;
 
+/* The shim's own step; the script needs none of it. The maths bridge loads the
+ * client pack's ucrt\ucrtbase.dll into FIFA by its full path and expects a
+ * second module beside the system one. Wine's default load order tries its
+ * builtin first, finds the ucrtbase FIFA already has loaded and hands that
+ * back, so the bridge saw no new module and gave up ("FIFA did not load the
+ * bundled maths library"). With no bridge report the server groups this Mac by
+ * the bottle's Windows build, "pre24h2", where nobody else is, and matchmaking
+ * never pairs it.
+ *
+ * native,builtin for ucrtbase, for the game and the bridge only, lets the file
+ * at that path load as itself. FIFA's own start-up is unchanged: neither its
+ * folder nor system32 holds a native ucrtbase, so its imports still bind to
+ * Wine's until the bridge switches them. The bridge needs it as well: it reads
+ * the pinned copy's version and FMA3 state in its own process, and handed the
+ * builtin it reports Wine's version (10.0.14393) with FMA3 off -- a different
+ * group, and not the maths FIFA then runs.
+ *
+ * Wine opens a program's AppDefaults key once per process, so this has to be
+ * in place before FIFA starts. */
+static BOOL a21_prefer_pinned_ucrt(const wchar_t *program, LSTATUS *err)
+{
+    static const wchar_t value[] = L"native,builtin";
+    wchar_t key[MAX_PATH];
+    _snwprintf(key, MAX_PATH - 1, L"Software\\Wine\\AppDefaults\\%s\\DllOverrides", program);
+    key[MAX_PATH - 1] = 0;
+    HKEY k;
+    LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, key, 0, NULL, 0, KEY_SET_VALUE, NULL, &k, NULL);
+    if (st == ERROR_SUCCESS)
+    {
+        st = RegSetValueExW(k, L"ucrtbase", 0, REG_SZ, (const BYTE *)value, sizeof(value));
+        RegCloseKey(k);
+    }
+    *err = st;
+    return st == ERROR_SUCCESS;
+}
+
 /* Start-MathBridge. Its standard input stays open for the code, which only goes
  * to it once the launch is ready; its output goes to a file beside its log
  * (the script redirects it to pipes it never reads). */
@@ -2826,6 +2862,17 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
     }
     else
         method = a21_launch_method(game_path, reason, 256);
+
+    {
+        const wchar_t *programs[] = { a21_leaf(game_path), L"Aurora21-MathBridge.exe" };
+        for (int i = 0; i < 2; i++)
+        {
+            LSTATUS err;
+            if (!a21_prefer_pinned_ucrt(programs[i], &err))
+                out(L"[INFO] maths bridge: Wine could not be told to load the pinned ucrtbase for %s (error %ld)\n",
+                    programs[i], (long)err);
+        }
+    }
 
     if (a21_newest_game(&game))
     {
