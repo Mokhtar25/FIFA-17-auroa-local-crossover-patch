@@ -1169,6 +1169,26 @@ removes `aurora17-powershell.exe`, unregisters and deletes CAS Link
 in the bottle's `WindowsPowerShell\v1.0`, delete `aurora17-powershell.exe`
 there, and drag CAS Link (CrossOver) to the Trash.
 
+### 9d. FIFA 21's Aurora launcher
+
+FIFA 21 plays on Aurora 21 through the Aurora launcher (`Aurora.exe`), run in
+this same Aurora17 bottle. Its PLAY runs the client pack's `Start-Aurora21.ps1`
+through PowerShell, which reaches step 8's stand-in; that stand-in does the
+script's work and two things the script cannot do under Wine: it tells Wine to
+load Microsoft's `ucrtbase` for FIFA21.exe and the pack's maths bridge, so the
+server can pair this Mac with Windows players, and it watches for Ultimate
+Team to load and patches the Online Friendlies freeze.
+
+Before any of that, the launcher asks Windows whether its DNS Client service,
+`Dnscache`, is running, and a bottle has no such service, so PLAY stops there.
+This step registers Wine's print spooler, `spoolsv.exe`, under that name as a
+service that starts with the bottle. It does nothing, and needs to do nothing:
+the game's lookups go through Wine's resolver either way. Online install only;
+FIFA 17 does not need it, so it is never a reason for the installer to fail.
+
+To undo it, with the bottle running: `sc delete Dnscache` from CrossOver's
+**Run Command** in the Aurora17 bottle.
+
 ### 10. Offline menu entry (offline install only)
 
 `./setup.sh --offline-menu` adds the **FIFA 17 (offline)** entry to the bottle.

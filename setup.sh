@@ -3975,6 +3975,60 @@ install_cas_support() {
     install_cas_link "$app"
 }
 
+# ------------------------------- FIFA 21's launcher, the DNS Client check
+# The Aurora launcher plays FIFA 21 in this same bottle, but before it starts
+# anything it asks the service manager whether Windows' DNS Client service,
+# Dnscache, is running. A bottle has no such service, so the check fails and
+# PLAY never gets as far as the game. Wine has no DNS Client to offer, and the
+# game does not need one: its lookups go through Wine's resolver, which
+# a17hosts already steers.
+#
+# So Dnscache is made a name for a service Wine does have. spoolsv.exe is
+# Wine's print spooler, a do-nothing service process that starts and stays
+# up; registered as its own process under this name, with start type 2, Wine
+# starts it with the bottle and the launcher sees "Running". Proven in the
+# bottle FIFA 21 first played online from (launcher log: dnsClient=Running;
+# startType=2; preflight=pass). These are the values `sc create` wrote there.
+#
+# Written straight into system.reg, like every other key here, so CrossOver
+# has to be quit, which setup.sh already makes sure of. Never a stop: FIFA 17
+# does not need it.
+DNSCACHE_SECTION='[System\\CurrentControlSet\\Services\\Dnscache]'
+DNSCACHE_LINES=(
+    '"DisplayName"="DNS Client"'
+    '"ErrorControl"=dword:00000001'
+    '"ImagePath"=str(2):"C:\\windows\\system32\\spoolsv.exe"'
+    '"ObjectName"="LocalSystem"'
+    '"Start"=dword:00000002'
+    '"Type"=dword:00000010'
+)
+install_dnscache_standin() {
+    local reg line missing=0
+    reg="$(bottle_system_reg)"
+    if [ ! -f "$reg" ]; then
+        note "no bottle called '$BOTTLE' yet, so there is nowhere to add it"
+        return 0
+    fi
+    for line in "${DNSCACHE_LINES[@]}"; do
+        reg_line_is_set "$reg" "$DNSCACHE_SECTION" "$line" || { missing=1; break; }
+    done
+    if [ "$missing" = 0 ]; then
+        ok "the DNS Client check FIFA 21's launcher makes — already answered in the $BOTTLE bottle"
+        return 0
+    fi
+    for line in "${DNSCACHE_LINES[@]}"; do
+        set_reg_line "$reg" "$DNSCACHE_SECTION" "$line" "${line%%=*}" || {
+            note "could not add the DNS Client stand-in to the $BOTTLE bottle"
+            say "        FIFA 21's Aurora launcher will stop before the game starts."
+            say "        Quit CrossOver completely and run ./setup.sh --bottle again."
+            return 0
+        }
+    done
+    ok "FIFA 21's Aurora launcher will find a DNS Client running in the $BOTTLE bottle"
+    say "        (Wine's print spooler, registered as Dnscache; it starts with the bottle)"
+    return 0
+}
+
 # ------------------------------------------- the bottle, on its own
 # Steps 7 to 9c are everything that lives in the bottle rather than in the
 # CrossOver copy: the settings, the version override, the shortcuts, the
@@ -4368,6 +4422,13 @@ configure_bottle() {
     say ""
     say "9c. Making the CAS launcher work"
     install_cas_support "$APP"
+
+    # -------------------------------------------- 9d. FIFA 21's launcher
+    # See install_dnscache_standin. Online only: an offline install has no
+    # Aurora launcher to ask.
+    say ""
+    say "9d. Letting the Aurora launcher start FIFA 21"
+    install_dnscache_standin
 }
 
 # ------------------------------------------------- the launch that is watched
