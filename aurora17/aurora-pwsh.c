@@ -2602,6 +2602,203 @@ static void a21_math_status(a21_math *m)
     free(text);
 }
 
+/* ------------------------------------------------- the friendlies parser */
+
+/* Not in the script: a fix for this client. Aurora's Online Friendlies house
+ * rules end with "lastPlayedFriend":0, and CardsDLL hands that key to a reader
+ * that expects an object and only stops at the object's end. Given a number it
+ * reads on to the end of the text and spins there for good: one CardsDLL
+ * thread at 100%, the screen frozen, Esc dead. The server's own templates
+ * carry the same 0, so it is not a bad response to one player.
+ *
+ * The key's id is 0x25f. Where CardsDLL dispatches on it, the jump to the
+ * object reader becomes a 6-byte nop, and the key goes the way of every key
+ * the parser does not know: its value is skipped. The friend shown as last
+ * played is all that is lost. The bytes either side are checked first, so any
+ * other build of CardsDLL is left alone.
+ *
+ * CardsDLL is not loaded yet when the game is held for the other patches;
+ * FIFA loads it when Ultimate Team opens, minutes later or never. So a copy of
+ * this program waits beside the game (-WatchFriendlies), patches CardsDLL when
+ * it appears -- and again if it is ever loaded afresh -- and goes when the
+ * game does. By then the game is long past its copy protection's start-up
+ * phase, the one a patch must not land in. */
+#define A21_CARDS_DLL       L"CardsDLL_Win64_retail.dll"
+#define A21_CARDS_SITE_RVA  0x35564d
+#define A21_CARDS_JUMP_AT   18          /* the je at RVA 0x35565f */
+#define A21_CARDS_JUMP_LEN  6
+
+static const BYTE A21_CARDS_SITE[33] = {
+    0x41, 0x8b, 0xd7,                       /* mov edx, r15d                  */
+    0x81, 0xea, 0x10, 0x02, 0x00, 0x00,     /* sub edx, 0x210                 */
+    0x0f, 0x84, 0x91, 0x03, 0x00, 0x00,     /* je  ...                        */
+    0x83, 0xea, 0x4f,                       /* sub edx, 0x4f    (key 0x25f)   */
+    0x0f, 0x84, 0xf8, 0x02, 0x00, 0x00,     /* je  the object reader          */
+    0x83, 0xea, 0x01,                       /* sub edx, 1                     */
+    0x0f, 0x84, 0x32, 0x02, 0x00, 0x00,     /* je  ...                        */
+};
+static const BYTE A21_CARDS_SITE_PATCHED[33] = {
+    0x41, 0x8b, 0xd7,
+    0x81, 0xea, 0x10, 0x02, 0x00, 0x00,
+    0x0f, 0x84, 0x91, 0x03, 0x00, 0x00,
+    0x83, 0xea, 0x4f,
+    0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00,     /* nop word [rax+rax]             */
+    0x83, 0xea, 0x01,
+    0x0f, 0x84, 0x32, 0x02, 0x00, 0x00,
+};
+
+static BYTE *a21_module_base(DWORD pid, const wchar_t *name)
+{
+    BYTE *base = NULL;
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+    if (s == INVALID_HANDLE_VALUE) return NULL;
+    MODULEENTRY32W me;
+    me.dwSize = sizeof(me);
+    for (BOOL ok = Module32FirstW(s, &me); ok && !base; ok = Module32NextW(s, &me))
+        if (!_wcsicmp(me.szModule, name)) base = me.modBaseAddr;
+    CloseHandle(s);
+    return base;
+}
+
+static BOOL a21_read_cards_site(HANDLE game, BYTE *base, BYTE *dst)
+{
+    SIZE_T n = 0;
+    return ReadProcessMemory(game, base + A21_CARDS_SITE_RVA, dst, sizeof(A21_CARDS_SITE), &n) &&
+           n == sizeof(A21_CARDS_SITE);
+}
+
+/* 1 patched now, 0 already patched, -1 not the build this fix knows,
+ * -2 could not read or write it. The game is paused only for the write. */
+static int a21_patch_cards(HANDLE game, BYTE *base)
+{
+    BYTE cur[sizeof(A21_CARDS_SITE)];
+    if (!a21_read_cards_site(game, base, cur)) return -2;
+    if (!memcmp(cur, A21_CARDS_SITE_PATCHED, sizeof(cur))) return 0;
+    if (memcmp(cur, A21_CARDS_SITE, sizeof(cur))) return -1;
+
+    BYTE *at = base + A21_CARDS_SITE_RVA + A21_CARDS_JUMP_AT;
+    BOOL ok = FALSE;
+    DWORD old;
+    SIZE_T n = 0;
+    if (!a21_suspend_process(game, TRUE)) return -2;
+    if (VirtualProtectEx(game, at, A21_CARDS_JUMP_LEN, PAGE_EXECUTE_READWRITE, &old))
+    {
+        ok = WriteProcessMemory(game, at, A21_CARDS_SITE_PATCHED + A21_CARDS_JUMP_AT,
+                                A21_CARDS_JUMP_LEN, &n) && n == A21_CARDS_JUMP_LEN;
+        VirtualProtectEx(game, at, A21_CARDS_JUMP_LEN, old, &old);
+        FlushInstructionCache(game, at, A21_CARDS_JUMP_LEN);
+    }
+    a21_suspend_process(game, FALSE);
+    return ok && a21_read_cards_site(game, base, cur) &&
+           !memcmp(cur, A21_CARDS_SITE_PATCHED, sizeof(cur)) ? 1 : -2;
+}
+
+static void a21_clock(wchar_t *dst)
+{
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    _snwprintf(dst, 15, L"%02u:%02u:%02u", t.wHour, t.wMinute, t.wSecond);
+    dst[15] = 0;
+}
+
+/* -WatchFriendlies <pid>. Writes only to its standard output, which the game's
+ * launch points at friendlies-patch.log. Polls for CardsDLL twice a second; once
+ * it is seen to, only rereads those 33 bytes every two seconds, so the module
+ * list is not walked for the rest of the session. */
+static int a21_watch_friendlies(DWORD pid)
+{
+    wchar_t now[16];
+    HANDLE game = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ |
+                              PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_SUSPEND_RESUME,
+                              FALSE, pid);
+    if (!game)
+    {
+        out(L"[ERROR] FIFA 21 (PID %lu) could not be opened: Windows error %lu\n", pid, GetLastError());
+        return 3;
+    }
+    a21_clock(now);
+    out(L"[WAIT] %s waiting for Ultimate Team to load %s in FIFA 21 (PID %lu)\n", now, A21_CARDS_DLL, pid);
+
+    BYTE *seen = NULL;
+    int failures = 0, rc = 0;
+    while (WaitForSingleObject(game, seen ? 2000 : 500) == WAIT_TIMEOUT)
+    {
+        BYTE cur[sizeof(A21_CARDS_SITE)];
+        if (seen)
+        {
+            if (a21_read_cards_site(game, seen, cur) && !memcmp(cur, A21_CARDS_SITE_PATCHED, sizeof(cur)))
+                continue;
+            seen = NULL;    /* unloaded, or loaded afresh */
+        }
+        BYTE *base = a21_module_base(pid, A21_CARDS_DLL);
+        if (!base) continue;
+        int r = a21_patch_cards(game, base);
+        a21_clock(now);
+        if (r == -2)
+        {
+            if (++failures < 5) continue;
+            out(L"[ERROR] %s %s at %p could not be patched: Windows error %lu; Online Friendlies will freeze\n",
+                now, A21_CARDS_DLL, base, GetLastError());
+            rc = 4;
+            break;
+        }
+        if (r == -1)
+        {
+            out(L"[SKIPPED] %s %s at %p is not the build this fix knows; left alone\n", now, A21_CARDS_DLL, base);
+            rc = 2;
+            break;
+        }
+        out(r == 1 ? L"[PATCHED] %s %s at %p: \"lastPlayedFriend\" is skipped\n"
+                   : L"[ALREADY] %s %s at %p: \"lastPlayedFriend\" is skipped\n", now, A21_CARDS_DLL, base);
+        seen = base;
+        failures = 0;
+    }
+    if (rc == 0)
+    {
+        a21_clock(now);
+        out(L"[DONE] %s FIFA 21 has closed\n", now);
+    }
+    CloseHandle(game);
+    return rc;
+}
+
+/* Starts the watcher above for PID, detached: like the maths helper it
+ * outlives this program, and it gets none of this program's standard handles,
+ * so the launcher's pipes close when this program exits. */
+static BOOL a21_start_friendlies_watch(const wchar_t *script_path, DWORD pid, const wchar_t *log,
+                                       wchar_t *why, size_t cap)
+{
+    wchar_t self[MAX_PATH], dir[MAX_PATH], cmd[4096];
+    DWORD n = GetModuleFileNameW(NULL, self, MAX_PATH);
+    if (!n || n >= MAX_PATH)
+    {
+        _snwprintf(why, cap - 1, L"this program's path is unknown (Windows error %lu)", GetLastError());
+        why[cap - 1] = 0;
+        return FALSE;
+    }
+    a21_parent_dir(self, dir, MAX_PATH);
+    _snwprintf(cmd, 4095, L"\"%s\" -File \"%s\" -WatchFriendlies %lu", self, script_path, pid);
+    cmd[4095] = 0;
+    HANDLE logh = a21_inheritable_file(log, TRUE);
+    if (logh == INVALID_HANDLE_VALUE)
+    {
+        _snwprintf(why, cap - 1, L"%s could not be written (Windows error %lu)", a21_leaf(log), GetLastError());
+        why[cap - 1] = 0;
+        return FALSE;
+    }
+    HANDLE p = a21_spawn(cmd, dir, NULL, logh, logh, NULL);
+    DWORD err = GetLastError();
+    CloseHandle(logh);
+    if (!p)
+    {
+        _snwprintf(why, cap - 1, L"Windows error %lu starting it", err);
+        why[cap - 1] = 0;
+        return FALSE;
+    }
+    CloseHandle(p);
+    return TRUE;
+}
+
 /* Test-TrustPatched: "[SUCCESS] Patched", the GOS 2015 CA patched or already
  * patched on one line, and for a direct copy the Origin client bootstrap
  * bypass the same way. */
@@ -2733,6 +2930,7 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
     const wchar_t *game_path = NULL, *server_address = NULL, *trust_anchors = NULL;
     const wchar_t *log_arg = NULL, *launch_arg = L"auto";
     BOOL no_game_launch = FALSE, detect_only = FALSE, cleanup = FALSE;
+    DWORD watch_pid = 0;
     for (int i = 0; i < argc; i++)
     {
         const wchar_t *a = argv[i];
@@ -2746,7 +2944,10 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
         else if (!_wcsicmp(a, L"-NoGameLaunch")) no_game_launch = TRUE;
         else if (!_wcsicmp(a, L"-DetectOnly")) detect_only = TRUE;
         else if (!_wcsicmp(a, L"-Cleanup")) cleanup = TRUE;
+        else if (!_wcsicmp(a, L"-WatchFriendlies") && more) watch_pid = wcstoul(argv[++i], NULL, 10);
     }
+    /* Ours, not the script's: see the friendlies parser above. */
+    if (watch_pid) return a21_watch_friendlies(watch_pid);
 
     /* Everything the exit path below cleans up, set before the first way out. */
     a21_game game = {0};
@@ -2996,6 +3197,15 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
             goto done;
         }
         held = FALSE;
+    }
+
+    {
+        wchar_t flog[MAX_PATH], why[512];
+        join(flog, MAX_PATH, logs, L"friendlies-patch.log");
+        if (a21_start_friendlies_watch(script_path, game.pid, flog, why, 512))
+            out(L"[INFO] friendlies fix: waiting for Ultimate Team to load CardsDLL (see friendlies-patch.log)\n");
+        else
+            out(L"[INFO] friendlies fix: not started (%s); Online Friendlies may freeze\n", why);
     }
 
     /* Ready: the maths helper of the patched process gets the code for its
