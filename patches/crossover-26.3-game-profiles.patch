@@ -1,0 +1,580 @@
+Game profiles: each process picks its FIFA workarounds by its main exe's name.
+
+CX_DR_TRAP, CX_TOPDOWN_LIMIT and CX_FIFA16_DSTFIX were bottle-wide
+environment variables, so one bottle could only be set up for one game. The
+community launchers (Aurora.exe, Impulsum17, CAS, RebornFUT) start several
+FIFA games out of one bottle, and each game then ran with the launcher
+bottle's settings: FIFA 15 in an Aurora17 bottle got FIFA 17's CX_DR_TRAP=2
+and no CX_TOPDOWN_LIMIT, and died with 0x80000004.
+
+cx_profile_init (unix/loader.c) runs once in start_main_thread, right after
+init_startup_info has the main exe's name and before any guest code, and
+resolves all three settings for the process. Per setting the first layer
+that says anything wins: HKCU\Software\Wine\AppDefaults\<exe>\CrossOver-FIFA
+"DrTrap"/"TopdownLimit"/"Fifa16DstFix"; the same key's "Profile"
+(fifa15|fifa16|fifa17|fifa21|none); the built-in table (fifa15.exe,
+fifa16.exe, fifa17.exe, _fifa17.exe, fifa21.exe, fifa21_trial.exe, any case);
+the bare environment variable, as before; off. A profile sets all three,
+including the ones it turns off. Processes the table does not name --
+launchers, WebView2, .NET helpers -- get the bare variables exactly as before.
+
+The three readers (drbp_mode, the dst fix, NtAllocateVirtualMemory's top-down
+limit) no longer cache: they ask cx_dr_trap/cx_fifa16_dstfix/cx_topdown_limit,
+which answer from the bare variables until the profile is resolved, so a
+signal taken before then cannot pin a process to its bottle's value. Those
+are parsed once, first thing in start_main_thread (or on the first call, if
+anything is earlier), into statics of their own: no getenv per signal. An
+empty AppDefaults value counts as not there. When a
+profile resolves to mode 3 and the bottle-wide variable did not, the second
+view of KUSER_SHARED_DATA that mode 3 reads through is mapped then.
+
+PF_PAE_ENABLED lives in KUSER_SHARED_DATA, written once per session by the
+process that boots it, so it cannot be per-exe: CX_PF_PAE=1 turns it on for
+the session, and a bare CX_DR_TRAP=3 still does too.
+
+CX_GAME_PROFILES=0 ignores the table and the registry: the old behaviour.
+WINEDEBUG=+cxprofile logs one CXPROFILE line per process. Applies after every
+other patch (dlls/ntdll/unix only).
+
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -97,6 +97,7 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(module);
+ WINE_DECLARE_DEBUG_CHANNEL(syscall);
++WINE_DECLARE_DEBUG_CHANNEL(cxprofile);
+ 
+ #if defined __i386__ || defined __x86_64__
+ #define SO_DLLS_SUPPORTED
+@@ -2214,12 +2215,351 @@
+ #endif
+ 
+ /***********************************************************************
++ *           CrossOver-FIFA game profiles  (CX_GAME_PROFILES)
++ *
++ * The FIFA workarounds in this ntdll (CX_DR_TRAP, CX_TOPDOWN_LIMIT,
++ * CX_FIFA16_DSTFIX) used to be bottle-wide environment variables.  The
++ * community launchers start several FIFA games out of one bottle, so a game
++ * got whatever its launcher's bottle was set up for: FIFA 15 in an Aurora17
++ * bottle ran with FIFA 17's CX_DR_TRAP=2 and without CX_TOPDOWN_LIMIT, and
++ * died with 0x80000004.
++ *
++ * So each process picks its settings by the file name of its main exe, once,
++ * in start_main_thread before any guest code runs.  Per setting, the first of
++ * these that says anything wins:
++ *
++ *   1. HKCU\Software\Wine\AppDefaults\<exe>\CrossOver-FIFA, REG_SZ "DrTrap",
++ *      "TopdownLimit", "Fifa16DstFix" (the env var syntax; "off" also turns
++ *      Fifa16DstFix off)
++ *   2. the same key's "Profile" = fifa15|fifa16|fifa17|fifa21|none, for a
++ *      renamed exe; "none" turns the table off for that exe
++ *   3. the built-in table below, exe name compared case-insensitively
++ *   4. the bare environment variable, as before -- what every process the
++ *      table does not name (launchers, WebView2, .NET helpers) keeps getting
++ *   5. off
++ *
++ * A profile, once picked, sets all three settings, including the ones it
++ * turns off: that is the point, the bottle's other game's values must not
++ * leak in.  CX_GAME_PROFILES=0 ignores layers 1-3 and leaves exactly the old
++ * behaviour.  WINEDEBUG=+cxprofile logs one CXPROFILE line per process.
++ */
++
++struct cx_settings
++{
++    int       dr_trap;      /* CX_DR_TRAP: 0 off, 1 probe, 2 deliver, 3 emulate */
++    ULONG_PTR topdown;      /* CX_TOPDOWN_LIMIT: 0 off */
++    int       dstfix;       /* CX_FIFA16_DSTFIX: 0 off, 1 on */
++    ULONG_PTR dstfix_val;   /* its replacement value, 0 = ~target (auto) */
++};
++
++/* FIFA 15's CX_DR_TRAP.  Its own bottle never set one; this is the one place
++ * to change if it turns out to want FIFA 17's 2. */
++#define CX_FIFA15_DR_TRAP 0
++
++static const struct cx_game_profile
++{
++    const char        *name;
++    struct cx_settings settings;
++} cx_game_profiles[] =
++{
++    { "fifa15", { CX_FIFA15_DR_TRAP, 0x1ffffffff, 0, 0 } },
++    { "fifa16", { 3,                 0,           1, 0 } },
++    { "fifa17", { 2,                 0,           0, 0 } },
++    { "fifa21", { 2,                 0,           0, 0 } },
++};
++
++static const struct
++{
++    const char *exe;
++    const char *profile;
++} cx_game_exes[] =
++{
++    { "fifa15.exe",       "fifa15" },
++    { "fifa16.exe",       "fifa16" },
++    { "fifa17.exe",       "fifa17" },
++    { "_fifa17.exe",      "fifa17" },
++    { "fifa21.exe",       "fifa21" },
++    { "fifa21_trial.exe", "fifa21" },
++};
++
++static struct cx_settings cx_profile;   /* valid once cx_profile_ready is set */
++static int cx_profile_ready;
++
++static int cx_parse_dr_trap( const char *val )
++{
++    int mode = val ? val[0] - '0' : 0;
++    return (mode < 0 || mode > 3) ? 0 : mode;
++}
++
++static ULONG_PTR cx_parse_topdown( const char *val )
++{
++    return val ? strtoull( val, NULL, 0 ) : 0;
++}
++
++static void cx_parse_dstfix( const char *val, struct cx_settings *s )
++{
++    s->dstfix = val != NULL;
++    s->dstfix_val = val ? strtoull( val, NULL, 16 ) : 0;
++}
++
++static void cx_env_settings( struct cx_settings *s )
++{
++    s->dr_trap = cx_parse_dr_trap( getenv( "CX_DR_TRAP" ));
++    s->topdown = cx_parse_topdown( getenv( "CX_TOPDOWN_LIMIT" ));
++    cx_parse_dstfix( getenv( "CX_FIFA16_DSTFIX" ), s );
++}
++
++/* The bare variables, parsed once: the getters' answer until the profile is
++ * resolved.  Kept apart from cx_profile so that nothing read this early can
++ * stand in for the profile.  cx_env_init runs first thing in
++ * start_main_thread; anything earlier parses them on its first call.  Two
++ * threads racing here write the same values. */
++static struct cx_settings cx_env;
++static int cx_env_ready;
++
++static const struct cx_settings *cx_env_get(void)
++{
++    if (!__atomic_load_n( &cx_env_ready, __ATOMIC_ACQUIRE ))
++    {
++        struct cx_settings s;
++
++        cx_env_settings( &s );
++        cx_env = s;
++        __atomic_store_n( &cx_env_ready, 1, __ATOMIC_RELEASE );
++    }
++    return &cx_env;
++}
++
++static void cx_env_init(void)
++{
++    cx_env_get();
++}
++
++static const struct cx_game_profile *cx_profile_by_name( const char *name )
++{
++    unsigned int i;
++
++    for (i = 0; i < ARRAY_SIZE(cx_game_profiles); i++)
++        if (!strcasecmp( name, cx_game_profiles[i].name )) return &cx_game_profiles[i];
++    return NULL;
++}
++
++static const struct cx_game_profile *cx_profile_by_exe( const WCHAR *exe )
++{
++    WCHAR nameW[32];
++    unsigned int i;
++
++    for (i = 0; i < ARRAY_SIZE(cx_game_exes); i++)
++    {
++        ascii_to_unicode( nameW, cx_game_exes[i].exe, strlen( cx_game_exes[i].exe ) + 1 );
++        if (!ntdll_wcsicmp( exe, nameW )) return cx_profile_by_name( cx_game_exes[i].profile );
++    }
++    return NULL;
++}
++
++/* HKCU\Software\Wine\AppDefaults\<exe>\CrossOver-FIFA, or 0 */
++static HANDLE cx_open_app_key( const WCHAR *exe )
++{
++    static const char subkey[] = "\\CrossOver-FIFA";
++    OBJECT_ATTRIBUTES attr;
++    UNICODE_STRING nameW;
++    HANDLE root, key = 0;
++    ULONG len = wcslen( exe );
++
++    if (open_hkcu_key( "Software\\Wine\\AppDefaults", &root )) return 0;
++    nameW.Buffer = malloc( (len + sizeof(subkey)) * sizeof(WCHAR) );
++    if (nameW.Buffer)
++    {
++        memcpy( nameW.Buffer, exe, len * sizeof(WCHAR) );
++        ascii_to_unicode( nameW.Buffer + len, subkey, sizeof(subkey) );
++        nameW.Length = (len + sizeof(subkey) - 1) * sizeof(WCHAR);
++        nameW.MaximumLength = nameW.Length + sizeof(WCHAR);
++        InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, root, NULL );
++        if (NtOpenKey( &key, KEY_QUERY_VALUE, &attr )) key = 0;
++        free( nameW.Buffer );
++    }
++    NtClose( root );
++    return key;
++}
++
++/* A REG_SZ value as ASCII, blanks trimmed.  FALSE if missing, empty or not
++ * text. */
++static BOOL cx_reg_string( HANDLE key, const char *name, char *buf, size_t size )
++{
++    union
++    {
++        KEY_VALUE_PARTIAL_INFORMATION info;
++        BYTE bytes[offsetof( KEY_VALUE_PARTIAL_INFORMATION, Data ) + 64 * sizeof(WCHAR)];
++    } data;
++    const WCHAR *str;
++    WCHAR nameW[32];
++    UNICODE_STRING nameU;
++    DWORD count, len, i, n = 0;
++
++    if (!key) return FALSE;
++    ascii_to_unicode( nameW, name, strlen( name ) + 1 );
++    init_unicode_string( &nameU, nameW );
++    if (NtQueryValueKey( key, &nameU, KeyValuePartialInformation, &data, sizeof(data), &count ))
++        return FALSE;
++    if (data.info.Type != REG_SZ && data.info.Type != REG_EXPAND_SZ)
++    {
++        WARN_(cxprofile)( "%s is not REG_SZ, ignored\n", name );
++        return FALSE;
++    }
++    str = (const WCHAR *)data.info.Data;
++    len = data.info.DataLength / sizeof(WCHAR);
++    for (i = 0; i < len && str[i]; i++)
++    {
++        if (str[i] == ' ' || str[i] == '\t') continue;
++        if (str[i] >= 0x80 || n + 1 >= size) return FALSE;
++        buf[n++] = str[i];
++    }
++    buf[n] = 0;
++    return n > 0;  /* an empty value says nothing: as if it were not there */
++}
++
++/***********************************************************************
++ *           cx_profile_init
++ *
++ * Called once, from start_main_thread, as soon as the main exe's name is
++ * known (init_startup_info) and before any guest code runs.
++ */
++void cx_profile_init(void)
++{
++    const char *val = getenv( "CX_GAME_PROFILES" );
++    BOOL enabled = !(val && val[0] == '0');
++    const struct cx_game_profile *game = NULL;
++    const char *source = "none", *profile = "none";
++    const WCHAR *exe = main_wargv[0], *p;
++    struct cx_settings s;
++    char buf[64], dstfix[24], topdown[24], exe_a[256];
++    HANDLE key = 0;
++    int len;
++
++    if ((p = wcsrchr( exe, '\\' ))) exe = p + 1;
++    if ((p = wcsrchr( exe, '/' ))) exe = p + 1;
++
++    /* layer 4: the bottle-wide variables, exactly as before */
++    s = *cx_env_get();
++    if (getenv( "CX_DR_TRAP" ) || getenv( "CX_TOPDOWN_LIMIT" ) || getenv( "CX_FIFA16_DSTFIX" ))
++        source = "env";
++
++    if (enabled)
++    {
++        /* layer 3: the table */
++        if ((game = cx_profile_by_exe( exe ))) source = "table";
++
++        /* layer 2: an AppDefaults profile, or "none" */
++        key = cx_open_app_key( exe );
++        if (cx_reg_string( key, "Profile", buf, sizeof(buf) ))
++        {
++            const struct cx_game_profile *named = cx_profile_by_name( buf );
++
++            if (named || !strcasecmp( buf, "none" ))
++            {
++                game = named;
++                source = "appdefaults";
++            }
++            else WARN_(cxprofile)( "unknown Profile %s for %s, ignored\n", debugstr_a(buf), debugstr_w(exe) );
++        }
++        if (game)
++        {
++            s = game->settings;
++            profile = game->name;
++        }
++
++        /* layer 1: one setting at a time */
++        if (cx_reg_string( key, "DrTrap", buf, sizeof(buf) ))
++        {
++            s.dr_trap = cx_parse_dr_trap( buf );
++            source = "appdefaults";
++        }
++        if (cx_reg_string( key, "TopdownLimit", buf, sizeof(buf) ))
++        {
++            s.topdown = cx_parse_topdown( buf );
++            source = "appdefaults";
++        }
++        if (cx_reg_string( key, "Fifa16DstFix", buf, sizeof(buf) ))
++        {
++            cx_parse_dstfix( strcasecmp( buf, "off" ) ? buf : NULL, &s );
++            source = "appdefaults";
++        }
++        if (key) NtClose( key );
++    }
++
++    cx_profile = s;
++    __atomic_store_n( &cx_profile_ready, 1, __ATOMIC_RELEASE );
++
++    /* Mode 3 reads KUSER_SHARED_DATA through a second view, which
++     * virtual_map_user_shared_data only set up if the bottle-wide variable
++     * said 3; a profile can say 3 for a process whose bottle does not. */
++    if (s.dr_trap == 3) virtual_alias_user_shared_data();
++
++    len = ntdll_wcstoumbs( exe, wcslen( exe ), exe_a, sizeof(exe_a) - 1, FALSE );
++    exe_a[len > 0 ? len : 0] = 0;
++    if (!s.topdown) strcpy( topdown, "0" );
++    else snprintf( topdown, sizeof(topdown), "0x%lx", (unsigned long)s.topdown );
++    if (!s.dstfix) strcpy( dstfix, "off" );
++    else if (!s.dstfix_val) strcpy( dstfix, "auto" );
++    else snprintf( dstfix, sizeof(dstfix), "0x%lx", (unsigned long)s.dstfix_val );
++    TRACE_(cxprofile)( "CXPROFILE exe=%s profile=%s source=%s dr_trap=%d topdown=%s dstfix=%s "
++                       "image_size=0x%x checksum=0x%08x%s\n",
++                       exe_a, profile, source, s.dr_trap, topdown, dstfix,
++                       (int)main_image_info.ImageFileSize, (int)main_image_info.CheckSum,
++                       enabled ? "" : " CX_GAME_PROFILES=0" );
++}
++
++static inline BOOL cx_profile_resolved(void)
++{
++    return __atomic_load_n( &cx_profile_ready, __ATOMIC_ACQUIRE );
++}
++
++/* The getters.  Before cx_profile_init has run they answer from the bare
++ * variables, as the old build did, out of cx_env (parsed once, no getenv per
++ * call: save_context calls cx_dr_trap on every signal).  That answer is not
++ * the profile's, so a signal taken that early cannot pin the process to the
++ * bottle's value instead of its own. */
++int cx_dr_trap(void)
++{
++    if (cx_profile_resolved()) return cx_profile.dr_trap;
++    return cx_env_get()->dr_trap;
++}
++
++ULONG_PTR cx_topdown_limit(void)
++{
++    if (cx_profile_resolved()) return cx_profile.topdown;
++    return cx_env_get()->topdown;
++}
++
++BOOL cx_fifa16_dstfix( ULONG_PTR *value )
++{
++    const struct cx_settings *s = cx_profile_resolved() ? &cx_profile : cx_env_get();
++
++    *value = s->dstfix_val;
++    return s->dstfix;
++}
++
++/* PF_PAE_ENABLED lives in KUSER_SHARED_DATA, which the process that boots
++ * the session fills in once for every process in it, so it cannot follow a
++ * per-process profile.  CX_PF_PAE=1 turns it on for the session; a bare
++ * CX_DR_TRAP=3 still does too.  64-bit Windows always reports it. */
++BOOL cx_pf_pae(void)
++{
++    const char *val = getenv( "CX_PF_PAE" );
++
++    if (val && val[0] == '1') return TRUE;
++    return cx_env_get()->dr_trap == 3;
++}
++
++/***********************************************************************
+  *           start_main_thread
+  */
+ static void start_main_thread(void)
+ {
+-    TEB *teb = virtual_alloc_first_teb();
++    TEB *teb;
+ 
++    cx_env_init();
++    teb = virtual_alloc_first_teb();
+     signal_init_threading();
+     dbg_init();
+     startup_info_size = server_init_process();
+@@ -2229,6 +2569,7 @@
+     init_cpu_info();
+     init_files();
+     init_startup_info();
++    cx_profile_init();
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
+     init_thread_stack( teb, 0, 0, 0 );
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1584,7 +1584,6 @@
+  * breakpoint and that only the trap delivery is missing.
+  */
+ 
+-static int drbp_enabled = -1;
+ static volatile ULONG_PTR drbp_addr;
+ static volatile ULONG_PTR drbp_page;
+ static volatile int drbp_armed;
+@@ -1592,15 +1591,12 @@
+ static volatile ULONG_PTR drbp_dr7;
+ static volatile ULONG drbp_oldprot;
+ 
++/* CX_DR_TRAP, as the process's game profile resolved it (loader.c).  Not
++ * cached here: before the profile is resolved the answer is the bare
++ * variable's, and a signal taken that early must not pin it. */
+ static int drbp_mode(void)
+ {
+-    if (drbp_enabled == -1)
+-    {
+-        const char *val = getenv( "CX_DR_TRAP" );
+-        drbp_enabled = val ? val[0] - '0' : 0;
+-        if (drbp_enabled < 0 || drbp_enabled > 3) drbp_enabled = 0;
+-    }
+-    return drbp_enabled;
++    return cx_dr_trap();
+ }
+ 
+ static BOOL drbp_on(void)
+@@ -3311,22 +3307,7 @@
+ /***********************************************************************
+  *           setup_raise_exception
+  */
+-static int fifa16_dstfix = -1;
+-static ULONG_PTR fifa16_dstfix_val;
+ 
+-static void fifa16_dstfix_config(void)
+-{
+-    const char *val;
+-
+-    if (fifa16_dstfix >= 0) return;
+-    fifa16_dstfix = 0;
+-    if ((val = getenv( "CX_FIFA16_DSTFIX" )))
+-    {
+-        fifa16_dstfix_val = strtoull( val, NULL, 16 );
+-        fifa16_dstfix = 1;
+-    }
+-}
+-
+ /* FIFA 16's RUNE protector hands msvcr110!memmove the 64-bit complement of
+  * its real buffer pointer: 0xffffffffde50bd6d for a buffer at 0x21af4292.
+  * The first movsb faults on a sign-extended kernel-space address and the
+@@ -3365,12 +3346,12 @@
+ 
+ static void fifa16_dstfix_patch( EXCEPTION_RECORD *rec, CONTEXT *context )
+ {
+-    ULONG_PTR target, newdst, fixed;
++    ULONG_PTR target, newdst, fixed, fifa16_dstfix_val;
+     unsigned int opcode;
+     struct ctxlog_buf buf;
+ 
+-    fifa16_dstfix_config();
+-    if (!fifa16_dstfix) return;
++    /* CX_FIFA16_DSTFIX, as the process's game profile resolved it (loader.c) */
++    if (!cx_fifa16_dstfix( &fifa16_dstfix_val )) return;
+     if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return;
+     if (rec->NumberParameters < 2) return;
+ 
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -492,12 +492,11 @@
+     features[PF_PAE_ENABLED]                   = !!(regs[3] & (1 << 6));
+ #ifdef __x86_64__
+     /* long mode runs on PAE paging, and 64-bit Windows always reports it;
+-     * Rosetta 2's CPUID leaf 1 leaves the bit clear.  Only under CX_DR_TRAP=3,
+-     * so no other bottle's view of the CPU changes. */
+-    {
+-        const char *val = getenv( "CX_DR_TRAP" );
+-        if (val && val[0] == '3') features[PF_PAE_ENABLED] = TRUE;
+-    }
++     * Rosetta 2's CPUID leaf 1 leaves the bit clear.  Only under CX_PF_PAE=1
++     * or a bare CX_DR_TRAP=3, so no other bottle's view of the CPU changes.
++     * This page is filled once per session, so no per-exe profile can turn
++     * it on (cx_pf_pae, loader.c). */
++    if (cx_pf_pae()) features[PF_PAE_ENABLED] = TRUE;
+ #endif
+     features[PF_MMX_INSTRUCTIONS_AVAILABLE]    = !!(regs[3] & (1 << 23));
+     features[PF_XMMI_INSTRUCTIONS_AVAILABLE]   = (regs[3] & (1 << 24)) && (regs[3] & (1 << 25));
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -298,6 +298,7 @@
+                                             SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page );
+ extern void virtual_map_user_shared_data(void);
+ extern void virtual_init_user_shared_data(void);
++extern void virtual_alias_user_shared_data(void);
+ extern NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack );
+ extern unsigned int virtual_locked_server_call( void *req_ptr );
+ extern ssize_t virtual_locked_read( int fd, void *addr, size_t size );
+@@ -557,6 +558,13 @@
+     LO_BUILTIN_NATIVE,  /* builtin then native */
+     LO_DEFAULT          /* nothing specified, use default strategy */
+ };
++
++/* CrossOver-FIFA game profiles (loader.c) */
++extern void cx_profile_init(void);
++extern int cx_dr_trap(void);
++extern ULONG_PTR cx_topdown_limit(void);
++extern BOOL cx_fifa16_dstfix( ULONG_PTR *value );
++extern BOOL cx_pf_pae(void);
+ 
+ extern void set_load_order_app_name( const WCHAR *app_name );
+ extern enum loadorder get_load_order( const UNICODE_STRING *nt_name );
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4437,6 +4437,41 @@
+             user_shared_data = alias;
+     }
+     if (needs_close) close( fd );
++    NtClose( section );
++}
++
++
++/***********************************************************************
++ *           virtual_alias_user_shared_data
++ *
++ * The second view of the user shared data that CX_DR_TRAP=3 reads through,
++ * for a process whose game profile (loader.c) resolves to mode 3 although
++ * the bottle-wide variable did not, so virtual_map_user_shared_data did not
++ * set one up.  Runs before any guest code; a no-op if the view exists.
++ */
++void virtual_alias_user_shared_data(void)
++{
++    UNICODE_STRING name_str = RTL_CONSTANT_STRING( shared_data_nameW );
++    OBJECT_ATTRIBUTES attr = { sizeof(attr), 0, &name_str };
++    HANDLE section;
++    int fd, needs_close;
++    void *alias;
++
++    if ((ULONG_PTR)user_shared_data != 0x7ffe0000) return;
++    if (NtOpenSection( &section, SECTION_ALL_ACCESS, &attr ))
++    {
++        ERR( "no second view of the USD: cannot open its section\n" );
++        return;
++    }
++    if (!server_get_unix_fd( section, 0, &fd, &needs_close, NULL, NULL ))
++    {
++        if ((alias = mmap( NULL, page_size, PROT_READ, MAP_SHARED, fd, 0 )) != MAP_FAILED)
++            user_shared_data = alias;
++        else
++            ERR( "no second view of the USD: mmap failed\n" );
++        if (needs_close) close( fd );
++    }
++    else ERR( "no second view of the USD: no unix fd\n" );
+     NtClose( section );
+ }
+ 
+@@ -5342,12 +5377,7 @@
+      * be steered to a Windows-looking address (e.g. 0x1ffffffff -> 0x1FFxx0000). */
+     if ((type & MEM_TOP_DOWN) && !*ret)
+     {
+-        static ULONG_PTR topdown_limit = ~(ULONG_PTR)0;
+-        if (topdown_limit == ~(ULONG_PTR)0)
+-        {
+-            const char *env = getenv( "CX_TOPDOWN_LIMIT" );
+-            topdown_limit = env ? strtoull( env, NULL, 0 ) : 0;
+-        }
++        ULONG_PTR topdown_limit = cx_topdown_limit();  /* per exe, loader.c */
+         if (topdown_limit && (!limit || topdown_limit < limit)) limit = topdown_limit;
+     }
+ 

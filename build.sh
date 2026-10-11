@@ -127,6 +127,13 @@ PATCHES=(
 # every bottle, same value). Made against the tree with all three above.
 [ -f "$HERE/patches/crossover-26.3-drtrap-syscall-stub.patch" ] \
     && PATCHES+=( crossover-26.3-drtrap-syscall-stub.patch )
+# Last, the game profiles: each process picks CX_DR_TRAP, CX_TOPDOWN_LIMIT and
+# CX_FIFA16_DSTFIX by its main exe's name instead of taking the bottle's, so
+# one launcher bottle can start FIFA 15, 16, 17 and 21 each with its own. It
+# rewires the readers the three patches above (and the FIFA 15 one) added, so
+# it goes after all of them. See patches/README-game-profiles.md.
+[ -f "$HERE/patches/crossover-26.3-game-profiles.patch" ] \
+    && PATCHES+=( crossover-26.3-game-profiles.patch )
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(

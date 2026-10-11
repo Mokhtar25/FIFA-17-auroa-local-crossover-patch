@@ -63,7 +63,7 @@ the source they were built from and the means to rebuild them. That is:
    CodeWeavers with that release. Not redistributed here — it is 142 MB and
    unmodified — but it is the exact tarball these patches apply to, and nothing
    else will apply cleanly.
-2. **Our modifications**: `patches/`, twelve build patches plus investigation records against that tarball.
+2. **Our modifications**: `patches/`, thirteen build patches plus investigation records against that tarball.
 3. **The build**: `./build.sh`, which does all of it end to end.
 
 ```sh
@@ -71,7 +71,7 @@ the source they were built from and the means to rebuild them. That is:
 ./build.sh /path/to/crossover-sources-26.3.0.tar.gz
 ```
 
-It unpacks the tarball, applies the twelve build patches **in the order that works**
+It unpacks the tarball, applies the thirteen build patches **in the order that works**
 (rosetta → online → audio → cng → topdown → gdiplus → ole32 → win32u, then
 FIFA 16's debug-register emulation → PF_PAE → dst-complement → drtrap syscall stub; alphabetical order produces a reject — see
 `patches/README`), configures, makes the `config.h` edits that cannot
@@ -93,16 +93,19 @@ Two things are known and worth stating rather than letting you find them:
 - `crypt32.dll` ships at ~4.4 MB against a stock ~830 KB. That is debugging
   information left in by the build settings, not extra code. It should be
   stripped before anyone calls this finished.
-- Of the twelve patches, the **online** one and **win32u**'s shm-flush fix have
-  been confirmed to rebuild byte-for-byte. The `ntdll.so` and `win32u.so` in
-  `fixes/` are now `build.sh`'s own output from 2026-09-30 and have not been
-  rebuilt elsewhere to compare. The rest are unverified in that specific sense,
+- Of the thirteen patches, the **online** one and **win32u**'s shm-flush fix
+  have been confirmed to rebuild byte-for-byte. The `win32u.so` in `fixes/` is
+  `build.sh`'s own output from 2026-09-30, and the `ntdll.so` the same tree
+  rebuilt on 2026-10-11 with the game-profiles patch added last; neither has
+  been rebuilt elsewhere to compare. The rest are unverified in that specific sense,
   which is exactly why `build.sh` compares and reports instead of asserting.
 
 The first eight *are* confirmed to apply cleanly, in order, to a pristine
 `crossover-sources-26.3.0.tar.gz`. FIFA 16's four were applied by `build.sh`,
 in order, on top of those eight starting from a pristine tarball on
-2026-09-30; the `ntdll.so` and `win32u.so` in `fixes/` are that build.
+2026-09-30; the `win32u.so` in `fixes/` is that build. The game-profiles
+patch was applied on top of all twelve in that same tree on 2026-10-11, and
+the `ntdll.so` in `fixes/` is that tree's ntdll rebuilt.
 
 ## What this does to your machine
 
