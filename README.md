@@ -11,7 +11,8 @@ CrossOver and all your other bottles are never touched.
 controller, sound and saves are not play-tested yet. `fifa15/README.md` says
 exactly where it stands, and SETUP.md has the section for it.
 
-**FIFA 16** runs on that same copy too, in its own `FIFA16` bottle, and is
+**FIFA 16** runs on that same copy too, in its own `FIFA16` bottle or beside
+the others in one, and is
 **experimental and unreliable for now**. It needs your own FIFA 16 game
 folder; this package never ships a game. The stutter in play is fixed. The
 endless loading after the language screen is not reliably fixed: the fix
@@ -113,6 +114,15 @@ SETUP.md, "9c. The CAS launcher", says what each one does and what it sends.
 Custom bottle names: `FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh`.
 Use distinct bottles. Unset `AURORA_BOTTLE` before running the combined installer.
 
+**One bottle for every game.** The Aurora launcher plays FIFA 13, 15, 16, 17
+and 21 from the bottle it is installed in, so a game no longer needs a bottle
+of its own. The CrossOver-FIFA copy gives each game's program its own Wine
+settings, and the bottle keeps only what they share. To add a game to the
+Aurora17 bottle: `AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15` (or `--fifa16`).
+A copy from before this cannot do that, and setup says so and stops; `./setup.sh
+--repair` brings it up to date. SETUP.md, "Several games in one bottle", has
+the details.
+
 The installer prints every step. If it stops, the reason is in **red** with the
 fix right under it.
 
@@ -178,7 +188,8 @@ Terminal, and the ones that only look at things say so.
 The same actions from Terminal, if you prefer:
 
 ```sh
-./setup.sh --verify     # checks everything, changes nothing
+./setup.sh --verify     # checks everything, changes nothing; starts with a table
+                        # of every game and launcher in the bottle
 ./setup.sh --unstick    # bottle stuck loading forever? quit CrossOver, run this
 ./setup.sh --bundle     # zips FIFA 17 logs for a bug report (no passwords or keys)
 ./setup.sh --play-log   # FIFA 17 crashes on every PLAY? identifies the module

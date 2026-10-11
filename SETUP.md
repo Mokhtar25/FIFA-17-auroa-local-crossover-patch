@@ -40,11 +40,93 @@ the fix is the green box right under it.
 
 ---
 
-## Both games in separate bottles
+## Several games in one bottle
 
-Both games ship on `main`. Use one **CrossOver-FIFA** app with two bottles:
-`Aurora17` for FIFA 17 and `Aurora15` for FIFA 15. Each bottle keeps its own
-registry, DLL overrides and game-specific environment settings.
+The Aurora launcher (`Aurora.exe`) plays FIFA 13, 15, 16, 17 and 21, and it
+starts them all from the one bottle it is installed in. So a game no longer
+needs a bottle of its own, as long as the **CrossOver-FIFA** copy is new enough
+to give each game its own settings.
+
+Each game's Wine fix used to be a setting for the whole bottle: FIFA 15's
+`CX_TOPDOWN_LIMIT`, FIFA 16's `CX_DR_TRAP=3` and `CX_FIFA16_DSTFIX`, FIFA 17's
+`CX_DR_TRAP=2`. A game started in another game's bottle got that game's
+settings and failed: FIFA 15 from `Aurora.exe` in `Aurora17` dies with
+`0x80000004`. The copy's `ntdll.so` now has a table of its own, by program
+name, and the game's program takes its settings from there whatever the bottle
+says:
+
+| Program | Settings it gets |
+|---|---|
+| `fifa15.exe` | `CX_TOPDOWN_LIMIT=0x1ffffffff`, no debug-register emulation |
+| `fifa16.exe` | `CX_DR_TRAP=3`, and the loading fix |
+| `FIFA17.exe`, `_fifa17.exe` | `CX_DR_TRAP=2` |
+| `FIFA21.exe`, `FIFA21_Trial.exe` | `CX_DR_TRAP=2` |
+
+Any other program, the launchers included, still reads the bottle's own
+settings. To add a game to a bottle another game already has, name the bottle:
+
+```sh
+AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15
+AURORA_BOTTLE=Aurora17 ./setup.sh --fifa16
+```
+
+With the table, a bottle gets only the settings every game shares:
+`CX_GRAPHICS_BACKEND`, `WINE_SIMULATE_WRITECOPY`, the WebView2 folder for FIFA
+17's launchers, and `CX_PF_PAE=1` once FIFA 16 is in it (FIFA 16's protection
+wants PAE, and PAE is for the whole Wine session, not one program). FIFA 17
+keeps its `CX_DR_TRAP=2`, which the launchers have always run with. A FIFA 16
+bottle from before the table already has PAE through its `CX_DR_TRAP=3`, which
+stays, and gets no `CX_PF_PAE`.
+
+When a game is added to a bottle that already has another game,
+`CX_TOPDOWN_LIMIT` and `CX_FIFA16_DSTFIX` from an earlier single-game setup are
+taken out of the bottle (a copy of `cxbottle.conf` is kept beside it as
+`cxbottle.conf.bak-<date>-<time>`, and setup says so). The games in the table
+never read them, and all they still did was reach the launchers, WebView2 and
+.NET helpers, where `CX_TOPDOWN_LIMIT` can break large memory reservations. A
+bottle-wide `CX_DR_TRAP` is left alone; `--verify` notes it when it is `3` in
+a bottle with FIFA 17 launchers.
+
+The C runtime overrides are set per program: `msvcr110` and `msvcp110` (and
+`dinput8`) for `fifa15.exe`; `msvcr120` and `msvcp120` for `FIFA17.exe` and
+`_fifa17.exe`. `version` stays set for the whole bottle, as it always was: the
+launchers put their own `version.dll` beside other programs (Impulsum17 beside
+`Impulsum17Launcher.exe`, the Aurora launcher beside FIFA 13, 16 and 21), and
+those load only through the bottle-wide override. It does nothing to FIFA 16.
+Overrides an earlier setup wrote for the whole bottle stay, and still count. In a bottle where FIFA 15's runtime is set for
+the whole bottle, `fifa16.exe` is kept on Wine's own, which is what its loading
+fix was proven on.
+
+A program can be given a different profile in the bottle's registry, under
+`HKCU\Software\Wine\AppDefaults\<program>\CrossOver-FIFA`: `Profile` set to
+`fifa15`, `fifa16`, `fifa17`, `fifa21` or `none`, or one value overridden with
+`DrTrap`, `TopdownLimit` or `Fifa16DstFix`. The bottle setting
+`CX_GAME_PROFILES=0` turns the table off for the whole bottle.
+
+**Is the copy new enough?** `./setup.sh --verify` says, on its `per-game table`
+line. If it says no, run `./setup.sh --repair` (or `./setup.sh --fifa15`, or
+`./setup.sh --fifa16`, which bring the copy's `ntdll.so` up to date too).
+Without the table, setup refuses to put a second game into a bottle and says
+why: the two games would run on one set of settings, and one of them would
+fail with nothing to say why.
+
+**What is ready?** `./setup.sh --verify` starts with one table for the
+bottle: a row per game, and a column per launcher (`Aurora.exe`, Impulsum17,
+CAS, RebornFUT, and the game run directly). Each cell says `ready`, `missing`
+and the first thing it lacks, or `unsupported` where that launcher does not
+start that game. It changes nothing, and it pastes as it is into a bug report.
+
+```
+| game    | folder | settings | DLL overrides             | Aurora.exe | Impulsum17         | CAS   | RebornFUT | direct      |
+| FIFA 17 | found  | table    | version msvcr120 msvcp120 | ready      | missing Impulsum17 | ready | ready     | ready       |
+| FIFA 21 | found  | table    | ucrtbase                  | ready      | unsupported        | unsupported | unsupported | unsupported |
+```
+
+### Separate bottles still work
+
+Each game can still have a bottle of its own: `Aurora17` for FIFA 17,
+`Aurora15` for FIFA 15 and `FIFA16` for FIFA 16 are the defaults, and the
+installers make the last two.
 
 1. Prepare `Aurora17` as described below; the installer creates `Aurora15`.
 2. Quit CrossOver completely, then double-click **Both games.command**.
@@ -64,18 +146,17 @@ For custom names, use:
 FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh
 ```
 
-Use the same variables for later checks. The combined installer rejects
-`AURORA_BOTTLE`, identical names and paths pointing at the same bottle. The
-single-game installer also refuses a bottle carrying another game's profile.
-Existing separate bottles can be reused; a mixed bottle needs a new, separate
-bottle for one game. No saves or existing bottles are deleted by setup.
+Use the same variables for later checks. The combined installer is the
+two-bottle way, so it rejects `AURORA_BOTTLE`, identical names and paths
+pointing at the same bottle; for one bottle, run `./setup.sh` and then
+`AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15`. No saves or existing bottles are
+deleted by setup.
 
 Every profile installs the complete shared DLL payload, so rerunning the FIFA 17
-installer keeps the FIFA 15 and FIFA 16 fixes. FIFA 16 has its own bottle too,
-`FIFA16`, and is set up on its own: see [FIFA 16](#fifa-16-experimental). **Stop.command** stops both games, and
+installer keeps the FIFA 15 and FIFA 16 fixes. FIFA 16 is set up on its own:
+see [FIFA 16](#fifa-16-experimental). **Stop.command** stops every game, and
 **Uninstall.command** removes their shared app; bottles and saves remain.
-This describes coexistence in one installation. Playing both matches at once
-has not been validated.
+Playing two matches at once has not been validated.
 
 ## What you need
 
@@ -94,7 +175,9 @@ CrossOver, the game and Aurora17 are not included and cannot be shared.
 
 ## Set up the bottle
 
-> Give FIFA 17 a bottle of its own. Put nothing else in it.
+> Give FIFA 17 a bottle of its own. The other FIFA games and their launchers
+> can go in it too ([Several games in one bottle](#several-games-in-one-bottle));
+> put nothing else in it.
 
 You do not copy the game into the bottle and you do not install it. Every
 bottle already sees your whole home folder as drive `Y:`. So if the game is in
@@ -1198,8 +1281,10 @@ It is a raw menu entry that runs `_fifa17.exe` from your game folder.
 
 ### FIFA 15 (experimental)
 
-The same CrossOver-FIFA copy also runs FIFA 15 (the 2015 CPY release) in its
-own `Aurora15` bottle. FIFA 17 is not affected.
+The same CrossOver-FIFA copy also runs FIFA 15 (the 2015 CPY release), in its
+own `Aurora15` bottle by default, or in the Aurora17 bottle with
+`AURORA_BOTTLE=Aurora17` (see [Several games in one bottle](#several-games-in-one-bottle)).
+FIFA 17 is not affected.
 
 ```sh
 ./setup.sh --fifa15          # or double-click "FIFA 15.command"
@@ -1248,10 +1333,13 @@ checks cover separate bottle profiles, offline recovery and cleanup behavior.
 
 ### FIFA 16 (experimental)
 
-The same CrossOver-FIFA copy also runs FIFA 16, in its own `FIFA16` bottle.
-FIFA 15 and FIFA 17 are not affected: the four Wine fixes FIFA 16 needs are
-in the shared `ntdll.so` (one also in `win32u.so`), and each one only acts
-when a bottle setting is there that only the FIFA 16 bottle has. The exception
+The same CrossOver-FIFA copy also runs FIFA 16, in its own `FIFA16` bottle by
+default, or in another game's bottle with `AURORA_BOTTLE=Aurora17` (see
+[Several games in one bottle](#several-games-in-one-bottle)). FIFA 15 and FIFA
+17 are not affected: the four Wine fixes FIFA 16 needs are in the shared
+`ntdll.so` (one also in `win32u.so`), and each one only acts for `fifa16.exe`,
+or, with a copy from before the per-game table, in a bottle with a setting
+only FIFA 16's has. The exception
 is one small part in `win32u.so` that runs in every bottle; it reads the same
 clock value as before, by another route.
 
@@ -1277,6 +1365,13 @@ it:
 | `WINE_SIMULATE_WRITECOPY=1` | as for the other two games |
 | `CX_DR_TRAP=3` | the game's protection arms hardware debug registers, which Rosetta does not have; mode 3 emulates them. FIFA 17's bottle uses 2 |
 | `CX_FIFA16_DSTFIX=0` | the fix for the endless loading after the language screen |
+
+With a copy that has the per-game table (`./setup.sh --verify` says so), the
+bottle gets the first two and `CX_PF_PAE=1` instead: `fifa16.exe` takes mode 3
+and the loading fix from `ntdll.so`, and only PAE, which is for the whole Wine
+session, has to be a bottle setting. That is also how FIFA 16 goes into
+another game's bottle. A `FIFA16` bottle made before the table keeps its
+`CX_DR_TRAP=3`, which turns PAE on just the same, so it needs no `CX_PF_PAE`.
 
 No DLL override, no C runtime override and no proxy setting: FIFA 16 has no
 launcher program and no online play here, and none of the three was in the

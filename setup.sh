@@ -23,7 +23,9 @@
 #
 #   ./setup.sh [/path/to/CrossOver.app]   install
 #   ./setup.sh --resign                   repair the signature, no re-copy
-#   ./setup.sh --verify                   check an install, change nothing
+#   ./setup.sh --verify                   check an install, change nothing. Starts
+#                                         with a table of every game (FIFA 13-21)
+#                                         and launcher in the bottle, then FIFA 17
 #   ./setup.sh --report                   one pasteable diagnosis, change nothing
 #   ./setup.sh --unstick                  free bottles stuck loading (kills orphaned
 #                                         Wine + wineservers, frees 47170-47173/3216)
@@ -75,6 +77,10 @@
 #                                         drive letter for the game folder
 #   ./setup.sh --fifa16 --verify          check the FIFA 16 setup, change nothing
 #                                         (experimental; see SETUP.md "FIFA 16")
+#   AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15   (or --fifa16) add the game to
+#                                         another game's bottle. Needs a copy whose
+#                                         ntdll.so gives each game its own settings;
+#                                         see SETUP.md "Several games in one bottle"
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -521,7 +527,9 @@ BOTTLE_DIR="${CX_BOTTLE_PATH:-$HOME/Library/Application Support/CrossOver/Bottle
 # skipping the Aurora17-only steps. See SETUP.md, "FIFA 15". FIFA 16
 # (AURORA_GAME=fifa16) shares it too: its three Wine patches act only under
 # CX_DR_TRAP=3 and CX_FIFA16_DSTFIX, which only its bottle profile sets, and it
-# skips the same steps. See SETUP.md, "FIFA 16".
+# skips the same steps. See SETUP.md, "FIFA 16". A copy whose ntdll.so has the
+# per-game table applies all of these by program name instead, and then any
+# game can go into any bottle: see "one bottle, every game" below.
 GAME="${AURORA_GAME:-fifa17}"
 
 # ------------------------------- the browser runtime the RebornFUT launcher needs
@@ -581,22 +589,108 @@ case "$GAME" in
     fifa17|fifa15|fifa16) ;;
     *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15 or fifa16)"; exit $E_UNSUPPORTED ;;
 esac
+# Whether the game was named (--fifa15, --fifa16 or AURORA_GAME) or plain
+# FIFA 17 was assumed. A plain --verify also prints the table of every game
+# in the bottle (verify_games_table); a named one checks that game only.
+GAME_EXPLICIT=0
+[ -n "${AURORA_GAME:-}" ] && GAME_EXPLICIT=1
+case "$GAME" in
+    fifa15) BOTTLE="${AURORA_BOTTLE:-${FIFA15_BOTTLE:-Aurora15}}" ;;
+    fifa16) BOTTLE="${AURORA_BOTTLE:-${FIFA16_BOTTLE:-FIFA16}}" ;;
+    *)      BOTTLE="${AURORA_BOTTLE:-${FIFA17_BOTTLE:-Aurora17}}" ;;
+esac
+
+# ------------------------------------------------ one bottle, every game
+# Each game's Wine workaround used to be a bottle-wide setting: FIFA 15's
+# CX_TOPDOWN_LIMIT, FIFA 16's CX_DR_TRAP=3 and CX_FIFA16_DSTFIX, FIFA 17's
+# CX_DR_TRAP=2. That made a bottle one game's, and the launchers that start
+# several games from one bottle (Aurora.exe plays FIFA 13, 15, 16, 17 and 21)
+# handed every game the settings of whichever game the bottle was made for:
+# FIFA 15 started from Aurora.exe in Aurora17 died with 0x80000004.
+#
+# The patched ntdll.so now carries a table of its own, keyed on the program's
+# name: fifa15.exe, fifa16.exe, FIFA17.exe/_fifa17.exe and FIFA21.exe get their
+# game's settings whatever the bottle says, and ignore the bare variables. A
+# build that has the table has the word CX_GAME_PROFILES in it (the variable
+# that turns it off), so that is the marker, as add_game_ntdll does for each
+# game's own patch. With it, a bottle needs only what every game shares, and
+# any game can be added to any bottle. Without it the old rule stands: one
+# game, one bottle. Per program, a bottle can still say otherwise, under
+# HKCU\Software\Wine\AppDefaults\<exe>\CrossOver-FIFA (Profile, DrTrap,
+# TopdownLimit, Fifa16DstFix); --verify shows which applies.
+PROFILE_MARKER=CX_GAME_PROFILES
+ntdll_has_profiles() { [ -f "$1" ] && LC_ALL=C grep -aqF "$PROFILE_MARKER" "$1"; }
+# The copy the bottle runs on, found the way the modes below find it.
+COPY_APP="$TARGET"
+if [ ! -d "$COPY_APP" ] && [ "$TARGET_EXPLICIT" = 0 ] && [ -d "$HOME/Applications/${TARGET:t}" ]; then
+    COPY_APP="$HOME/Applications/${TARGET:t}"
+fi
+COPY_NTDLL="$COPY_APP/Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix/ntdll.so"
+SHIPPED_NTDLL="$HERE/fixes/x86_64-unix/ntdll.so"
+# Which ntdll.so the bottle will run on once this run is over. An install
+# makes the copy afresh from fixes/, --repair refreshes it from there, and
+# --fifa15 and --fifa16 either install or bring the copy's ntdll.so up to
+# the shipped one (add_game_ntdll). Every other mode leaves the copy as it is.
+case "$MODE" in
+    install|repair|fifa15|fifa16) PROFILE_NTDLL="$SHIPPED_NTDLL" ;;
+    *) PROFILE_NTDLL="$COPY_NTDLL" ;;
+esac
+# PROFILES=1: games can share this bottle. PROFILES_WHY says why not.
+PROFILES=0; PROFILES_WHY=""
+if ! ntdll_has_profiles "$PROFILE_NTDLL"; then
+    if [ "$PROFILE_NTDLL" = "$SHIPPED_NTDLL" ] || ! ntdll_has_profiles "$SHIPPED_NTDLL"; then
+        PROFILES_WHY=package
+    elif [ ! -f "$COPY_NTDLL" ]; then
+        PROFILES_WHY=no-copy
+    else
+        PROFILES_WHY=copy
+    fi
+elif grep -Eq '^"CX_GAME_PROFILES"[[:space:]]*=[[:space:]]*"0"' "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" 2>/dev/null; then
+    # The bottle turned the table off for every program in it.
+    PROFILES_WHY=off
+else
+    PROFILES=1
+fi
+# Settings a game in a shared bottle wants but must not insist on: another
+# game set up in the bottle first may have its own value there, and with the
+# table that value no longer reaches any game the table lists. add_setting
+# notes these instead of stopping.
+SOFT_SETTINGS=()
+[ "$PROFILES" = 1 ] && SOFT_SETTINGS=( CX_DR_TRAP )
+
+# One variable out of the bottle's cxbottle.conf, empty when it is not there.
+conf_value() {
+    sed -n "s/^\"$1\" = \"\(.*\)\"\$/\1/p" "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" 2>/dev/null | tail -1
+}
+# Whether the bottle turns PF_PAE_ENABLED on, decided as ntdll.so decides it
+# (cx_pf_pae): CX_PF_PAE=1, or a bare CX_DR_TRAP=3 -- which every FIFA 16
+# bottle made before the per-game table has, and which still does it.
+bottle_pae_on() {
+    [[ "$(conf_value CX_PF_PAE)" == 1* ]] && return 0
+    [[ "$(conf_value CX_DR_TRAP)" == 3* ]]
+}
+
 # The ntdll.so a game cannot run without, known by the name of the bottle
 # variable its patch reads (see add_game_ntdll). FIFA 17's needs nothing the
 # full payload does not already carry, so it has none.
 NTDLL_MARKER=""; NTDLL_OLD=""; NTDLL_WHY=""
 if [ "$GAME" = fifa15 ]; then
-    BOTTLE="${AURORA_BOTTLE:-${FIFA15_BOTTLE:-Aurora15}}"
     # No CX_DR_TRAP: the FIFA 15 protector was never seen to need it, and the
     # bottle this was proven in did not have it. CX_TOPDOWN_LIMIT is the fix
-    # for its start-up crash (patches/README-fifa15-wine-fixes.md).
-    BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" "CX_TOPDOWN_LIMIT=0x1ffffffff" )
+    # for its start-up crash (patches/README-fifa15-wine-fixes.md). With the
+    # table, fifa15.exe gets it from ntdll.so and the bottle gets nothing of
+    # FIFA 15's own: a bare CX_TOPDOWN_LIMIT would reach every program the
+    # table does not list, launchers included.
+    if [ "$PROFILES" = 1 ]; then
+        BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" )
+    else
+        BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" "CX_TOPDOWN_LIMIT=0x1ffffffff" )
+    fi
     GAME_LABEL="FIFA 15"
     NTDLL_MARKER=CX_TOPDOWN_LIMIT
     NTDLL_OLD="the FIFA 17-only"
     NTDLL_WHY="FIFA 15 dies seven seconds in with it"
 elif [ "$GAME" = fifa16 ]; then
-    BOTTLE="${AURORA_BOTTLE:-${FIFA16_BOTTLE:-FIFA16}}"
     # CX_DR_TRAP=3, not FIFA 17's 2: the crack's protector arms debug
     # registers on itself and on other threads and reads through them, and
     # only mode 3 emulates all of that under Rosetta (it also reports PAE, which
@@ -606,8 +700,23 @@ elif [ "$GAME" = fifa16 ]; then
     # "invert whatever negative address the protector faults on"
     # (FIX-fifa16-loading-loop.md). FIFA 15's CX_TOPDOWN_LIMIT and FIFA 17's
     # WebView2 folder are not FIFA 16's and stay out.
-    BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1"
-                      "CX_DR_TRAP=3" "CX_FIFA16_DSTFIX=0" )
+    #
+    # With the table, fifa16.exe gets mode 3 and the DSTFIX from ntdll.so, and
+    # the bottle keeps them out, so the launchers and any other game in it are
+    # not run under FIFA 16's emulation. What the table cannot do is PAE: it
+    # is reported once for the whole Wine session, not per program, so
+    # CX_PF_PAE=1 is the one FIFA 16 setting a shared bottle carries -- unless
+    # the bottle already has a bare CX_DR_TRAP=3 (a FIFA 16 bottle from before
+    # the table), which turns PAE on just the same (bottle_pae_on).
+    if [ "$PROFILES" = 1 ]; then
+        BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" )
+        # Asked for unless only the bare CX_DR_TRAP=3 is what turns PAE on.
+        [[ "$(conf_value CX_PF_PAE)" != 1* && "$(conf_value CX_DR_TRAP)" == 3* ]] \
+            || BOTTLE_SETTINGS+=( "CX_PF_PAE=1" )
+    else
+        BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1"
+                          "CX_DR_TRAP=3" "CX_FIFA16_DSTFIX=0" )
+    fi
     GAME_LABEL="FIFA 16"
     # The marker is the syscall-stub fix's log line in its second form. The
     # build before it has the generic loop fix but patches only ntdll's stubs,
@@ -617,7 +726,10 @@ elif [ "$GAME" = fifa16 ]; then
     NTDLL_OLD="an older"
     NTDLL_WHY="FIFA 16 stops before its start screen, loops after the language pick, or stutters, with it"
 else
-    BOTTLE="${AURORA_BOTTLE:-${FIFA17_BOTTLE:-Aurora17}}"
+    # CX_DR_TRAP=2 stays bare even with the table, which gives FIFA17.exe and
+    # _fifa17.exe mode 2 itself: every FIFA 17 bottle has had it, and the
+    # launchers that start FIFA 17 were proven with it on. It is one of
+    # SOFT_SETTINGS, so a bottle FIFA 16 was set up in first keeps its 3.
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
     # FIFA 17 only -- FIFA 15 has no RebornFUT. Left out entirely when the
     # runtime is skipped: a variable pointing at a folder that is not there
@@ -644,7 +756,15 @@ fi
 # to 3, so FIFA 17's marker is the whole line, value and all.
 # Resolve symlinks and compare without case, since the usual Mac filesystem
 # treats Aurora15 and aurora15 as the same directory.
+#
+# With the profile table (PROFILES=1) a second game is simply added: each
+# listed game takes its own settings from ntdll.so and ignores the other
+# game's bare ones, and configure_bottle writes only what they share. Without
+# it the two games would run on one set of settings, and one of them would
+# fail in a way nothing names (FIFA 15 under FIFA 17's dies 0x80000004), so
+# this stops and says what would let them share.
 BOTTLE_PATH="$BOTTLE_DIR/$BOTTLE"
+SHARED_WITH=()
 for OTHER_GAME in fifa17 fifa15 fifa16; do
     [ "$OTHER_GAME" != "$GAME" ] || continue
     case "$OTHER_GAME" in
@@ -658,9 +778,30 @@ for OTHER_GAME in fifa17 fifa15 fifa16; do
     OTHER_BOTTLE_PATH="$BOTTLE_DIR/$OTHER_BOTTLE"
     if [ "${(L)BOTTLE_PATH:A}" = "${(L)OTHER_BOTTLE_PATH:A}" ] \
        || grep -Eq "^$OTHER_SETTING" "$BOTTLE_PATH/cxbottle.conf" 2>/dev/null; then
-        die $E_UNSUPPORTED "$GAME_LABEL needs its own bottle; '$BOTTLE' is assigned to $OTHER_LABEL.
-         Use separate FIFA17_BOTTLE, FIFA15_BOTTLE and FIFA16_BOTTLE names
-         (defaults: Aurora17, Aurora15 and FIFA16).
+        if [ "$PROFILES" = 1 ]; then
+            SHARED_WITH+=( "$OTHER_LABEL" )
+            continue
+        fi
+        case "$PROFILES_WHY" in
+            off) SHARE_WHY="the '$BOTTLE' bottle turns that table off: its cxbottle.conf
+         has \"CX_GAME_PROFILES\" = \"0\". Delete that line (CrossOver closed),
+         then run this again." ;;
+            no-copy) SHARE_WHY="there is no CrossOver-FIFA at $COPY_APP to check yet.
+         Install it first (./setup.sh, or ./setup.sh --$GAME), then run this again." ;;
+            copy) SHARE_WHY="the ntdll.so in $COPY_APP is from before that table.
+         Bring the copy up to date first, without copying CrossOver again:
+             ./setup.sh --repair
+         then run this again." ;;
+            *) SHARE_WHY="this package's fixes/ntdll.so is from before that table, so no
+         copy made from it has one. Download the current package, then
+         run this again." ;;
+        esac
+        die $E_UNSUPPORTED "$GAME_LABEL needs its own bottle here; '$BOTTLE' is assigned to $OTHER_LABEL.
+         Two games can share a bottle only when CrossOver-FIFA's ntdll.so gives
+         each game its own settings (the per-game profile table), and
+         $SHARE_WHY
+         Or keep them apart: separate FIFA17_BOTTLE, FIFA15_BOTTLE and
+         FIFA16_BOTTLE names (defaults: Aurora17, Aurora15 and FIFA16).
          Nothing has been changed."
     fi
 done
@@ -1193,10 +1334,19 @@ add_game_ntdll() {
          Download the complete main-branch package again. $GAME_LABEL cannot run with this file."
     fi
     if strings -a "$wine/$f" 2>/dev/null | grep -q "$NTDLL_MARKER"; then
-        ok "${f:t} -- already the build with the $GAME_LABEL patch"
-        return 0
+        # The game's own patch is there. A copy from before the per-game
+        # profile table still gets the shipped file when this package has
+        # the table: without it the game could not share a bottle, and the
+        # guard near the top has already let it in on the strength of this.
+        if ntdll_has_profiles "$wine/$f" || ! ntdll_has_profiles "$HERE/fixes/$f"; then
+            ok "${f:t} -- already the build with the $GAME_LABEL patch"
+            return 0
+        fi
+        say "        ${app:t} has an ${f:t} from before the per-game profile table;"
+        say "        games that share a bottle get each other's settings with it"
+    else
+        say "        ${app:t} has $NTDLL_OLD ${f:t}; $NTDLL_WHY"
     fi
-    say "        ${app:t} has $NTDLL_OLD ${f:t}; $NTDLL_WHY"
     require_app_closed "$app"
     require_clt
     if [ -f "$wine/$f.orig" ]; then
@@ -1496,6 +1646,26 @@ OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
 # had no override, so it gets none.
 if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; elif [ "$GAME" = fifa16 ]; then OVERRIDE_DLL=""; else OVERRIDE_DLL=version; fi
 OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
+# The programs the overrides are written for. Each override used to go in the
+# bottle-wide section above, which is right for a bottle that holds one game
+# and wrong for one that holds several: a bottle-wide msvcr110=native,builtin
+# puts FIFA 16 on Microsoft's runtime too, and its loading fix was proven on
+# Wine's own. So the C runtime pairs and FIFA 15's dinput8 now go under
+# HKCU\Software\Wine\AppDefaults\<exe>\DllOverrides, which Wine reads before
+# the bottle-wide section, for the game's programs only. FIFA 17 has two:
+# _fifa17.exe is its loader, which loads from the same folder and had these
+# overrides as much as FIFA17.exe did while they were bottle-wide. A
+# bottle-wide override an earlier setup.sh wrote is left where it is and still
+# counts (dll_override_is_set): removing it is not this script's to do, and
+# nothing that works today should stop working.
+#
+# version stays bottle-wide, as it always was. The launchers put proxy
+# version.dll files beside programs that are not FIFA17.exe -- Impulsum17
+# beside Impulsum17Launcher.exe in the FIFA 17 folder, the Aurora launcher
+# beside FIFA 13, 16 and 21 -- and every one of them was proven with the
+# bottle-wide override. A bottle-wide version=native,builtin is harmless to
+# FIFA 16, which has no version.dll of its own to prefer.
+if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa16 ]; then OVERRIDE_EXES=(); else OVERRIDE_EXES=(FIFA17.exe _fifa17.exe); fi
 
 # ------------------------------------------------ the C runtime override
 # An online match is a lockstep simulation: every client runs the same maths on
@@ -1532,12 +1702,16 @@ bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
 # -- "version"= does, under application keys -- and setting one of those would
 # do nothing while looking right. The section and line go in through the
 # environment, not -v: awk -v unescapes backslashes, and every key in this file
-# is full of them.
+# is full of them. The section is compared without case, as Windows and
+# wineserver compare key names: a launcher may have written
+# AppDefaults\\fifa17.exe where this script says FIFA17.exe, and wineserver
+# merges the two into the first spelling it read. The line is compared as is.
 reg_line_is_set() {
     local reg="$1"
     [ -f "$reg" ] || return 1
     A17_SEC="$2" A17_LINE="$3" awk '
-        substr($0,1,1)=="[" { insec = (index($0, ENVIRON["A17_SEC"])==1); next }
+        BEGIN { sec = tolower(ENVIRON["A17_SEC"]) }
+        substr($0,1,1)=="[" { insec = (index(tolower($0), sec)==1); next }
         insec && index($0, ENVIRON["A17_LINE"])==1 { found=1 }
         END { exit !found }
     ' "$reg"
@@ -1557,19 +1731,22 @@ set_reg_line() {
     reg_line_is_set "$reg" "$sec" "$line" && return 0
     cp -X "$reg" "$reg.bak-aurora17" 2>/dev/null || cp "$reg" "$reg.bak-aurora17" || return 1
     tmp="$(mktemp -t a17reg)" || return 1
-    if grep -qF "$sec" "$reg"; then
+    # Section and value name without case (see reg_line_is_set), so an
+    # existing section is reused under its own spelling, not appended twice.
+    if grep -qiF "$sec" "$reg"; then
         A17_SEC="$sec" A17_LINE="$line" A17_NAME="$name=" awk '
+            BEGIN { sec = tolower(ENVIRON["A17_SEC"]); vname = tolower(ENVIRON["A17_NAME"]) }
             substr($0,1,1)=="[" {
                 dropping = 0
                 if (insec && !wrote) { print ENVIRON["A17_LINE"]; wrote=1 }
-                insec = (index($0, ENVIRON["A17_SEC"])==1)
+                insec = (index(tolower($0), sec)==1)
                 print; next
             }
             dropping && substr($0,1,1)!="[" {
                 if (substr($0, length($0), 1) != "\\") dropping = 0
                 next
             }
-            insec && index($0, ENVIRON["A17_NAME"])==1 {
+            insec && index(tolower($0), vname)==1 {
                 if (substr($0, length($0), 1) == "\\") dropping = 1
                 next
             }
@@ -1590,24 +1767,89 @@ set_reg_line() {
     reg_line_is_set "$reg" "$sec" "$line"
 }
 
-version_override_is_set() { reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE"; }
-set_version_override()    { set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$OVERRIDE_LINE" "\"$OVERRIDE_DLL\""; }
+# The DllOverrides key of one program, in the form user.reg spells it.
+appdefaults_section() { print -r -- '[Software\\Wine\\AppDefaults\\'"$1"'\\DllOverrides]'; }
 
-# See the C runtime override above. Same section, same file, one line per DLL,
-# so both of these are true for FIFA 15 without touching anything: the loop
-# never runs.
+# DLL=native,builtin for every one of this game's programs, or bottle-wide.
+dll_override_is_set() {
+    local exe line="\"$1\"=\"native,builtin\""
+    reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$line" && return 0
+    [ ${#OVERRIDE_EXES} -gt 0 ] || return 1
+    for exe in $OVERRIDE_EXES; do
+        reg_line_is_set "$(bottle_user_reg)" "$(appdefaults_section "$exe")" "$line" || return 1
+    done
+    return 0
+}
+# Written per program (see OVERRIDE_EXES), except version, which is
+# bottle-wide (see OVERRIDE_EXES).
+set_dll_override() {
+    local dll="$1" exe
+    if [ "$dll" = version ]; then
+        set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" "\"$dll\"=\"native,builtin\"" "\"$dll\""
+        return
+    fi
+    for exe in $OVERRIDE_EXES; do
+        set_reg_line "$(bottle_user_reg)" "$(appdefaults_section "$exe")" \
+            "\"$dll\"=\"native,builtin\"" "\"$dll\"" || return 1
+    done
+    return 0
+}
+# Whether this override is bottle-wide in this bottle, from an earlier setup.sh.
+dll_override_is_global() {
+    reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "\"$1\"=\"native,builtin\""
+}
+
+# version counts only bottle-wide: a per-program one would miss the launchers'
+# proxies beside other programs (see OVERRIDE_EXES).
+version_override_is_set() {
+    if [ "$OVERRIDE_DLL" = version ]; then dll_override_is_global version
+    else dll_override_is_set "$OVERRIDE_DLL"; fi
+}
+set_version_override()    { set_dll_override "$OVERRIDE_DLL"; }
+
+# See the C runtime override above. Same file, one line per DLL per program.
 crt_override_is_set() {
     local dll
     for dll in $CRT_OVERRIDE_DLLS; do
-        reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "\"$dll\"=\"native,builtin\"" || return 1
+        dll_override_is_set "$dll" || return 1
     done
     return 0
 }
 set_crt_override() {
     local dll
     for dll in $CRT_OVERRIDE_DLLS; do
-        set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" \
-            "\"$dll\"=\"native,builtin\"" "\"$dll\"" || return 1
+        set_dll_override "$dll" || return 1
+    done
+    return 0
+}
+
+# FIFA 16 runs on Wine's own msvcr110/msvcp110: its loading fix was found and
+# proven there. A bottle FIFA 15 was set up in by an earlier setup.sh has
+# both bottle-wide as native,builtin, and in that bottle fifa16.exe would load
+# Microsoft's wherever it found one. A per-program "builtin" outranks the
+# bottle-wide value, so fifa16.exe is pinned to Wine's own -- only where such
+# a bottle-wide value is there to outrank. A FIFA 16 bottle without one is
+# left exactly as the fix was proven in.
+F16_CRT_PIN=(msvcr110 msvcp110)
+f16_crt_pin_needed() {
+    local dll
+    for dll in $F16_CRT_PIN; do
+        reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "\"$dll\"=\"native" && return 0
+    done
+    return 1
+}
+f16_crt_is_pinned() {
+    local dll
+    for dll in $F16_CRT_PIN; do
+        reg_line_is_set "$(bottle_user_reg)" "$(appdefaults_section fifa16.exe)" "\"$dll\"=\"builtin\"" || return 1
+    done
+    return 0
+}
+f16_pin_crt() {
+    local dll
+    for dll in $F16_CRT_PIN; do
+        set_reg_line "$(bottle_user_reg)" "$(appdefaults_section fifa16.exe)" \
+            "\"$dll\"=\"builtin\"" "\"$dll\"" || return 1
     done
     return 0
 }
@@ -2343,6 +2585,396 @@ aurora_in_use() {
     return 1
 }
 
+# ------------------------------------------------ every game in the bottle
+# A bottle can now hold every game, and the launchers start them in it, so
+# "is FIFA 17 set up" is no longer the whole question. --verify with no game
+# named answers the rest: one row per game, one cell per launcher, each cell
+# "ready", "missing <the first thing it lacks>" or "unsupported" (the launcher
+# does not start that game). It reads files and changes nothing. A cell that
+# says ready has passed the same static checks as the rest of --verify, which
+# is not the same as a launch: see the closing words of verify_install.
+#
+# Where each launcher lives, as each one installs itself:
+#   Aurora.exe   the Aurora launcher (FIFA 13, 15, 16, 17, 21). It installs
+#                itself into the bottle as AppData\Local\Aurora15Connector\
+#                Aurora15Connector.exe, and keeps the game folders it was
+#                given in Aurora15Connector.ini there.
+#   Impulsum17   an Inno installer that puts Impulsum17Launcher.exe and its
+#                own version.dll into the FIFA 17 folder itself (FIFA 17 only).
+#   CAS          per user, AppData\Local\CAS\cas.exe (FIFA 17 only here).
+#   RebornFUT    a folder unzipped on the Mac (RebornFUT-3.1.45 and the like)
+#                holding RebornFUT.exe (FIFA 17 only). REBORN_DIR names one
+#                kept somewhere else.
+#   direct       the game's own exe from the bottle, no launcher.
+GT_GAMES=( fifa13 fifa15 fifa16 fifa17 fifa21 )
+GT_LAUNCHERS=( aurora impulsum cas reborn direct )
+
+game_label_of() { print -r -- "FIFA ${1#fifa}"; }
+game_exe_of() {
+    case "$1" in
+        fifa13) print -r -- fifa13.exe ;; fifa15) print -r -- fifa15.exe ;;
+        fifa16) print -r -- fifa16.exe ;; fifa17) print -r -- FIFA17.exe ;;
+        fifa21) print -r -- FIFA21.exe ;;
+    esac
+}
+
+# The value NAME has under SECTION in REG, quotes taken off. SECTION is in
+# the file's own spelling, brackets and doubled backslashes included, and is
+# compared without case, as Windows does: the launchers write FIFA21.exe and
+# a person may write fifa21.exe.
+reg_value() {
+    local reg="$1"
+    [ -f "$reg" ] || return 1
+    A17_SEC="$2" A17_NAME="\"$3\"=" awk '
+        BEGIN { sec = tolower(ENVIRON["A17_SEC"]); name = tolower(ENVIRON["A17_NAME"]) }
+        substr($0,1,1)=="[" { insec = (index(tolower($0), sec)==1); next }
+        insec && index(tolower($0), name)==1 { v = substr($0, length(name)+1); found = 1 }
+        END { if (!found) exit 1; sub(/\r$/, "", v); gsub(/^"|"$/, "", v); print v }
+    ' "$reg"
+}
+
+# The Aurora launcher's folder in the bottle, if it has been run there.
+aurora_launcher_dir() {
+    local a d
+    a="$(bottle_appdata 2>/dev/null)" || return 1
+    d="${a:h}/Aurora15Connector"
+    [ -f "$d/Aurora15Connector.exe" ] || [ -f "$d/Aurora.exe" ] || return 1
+    print -r -- "$d"
+}
+
+# A game folder the Aurora launcher was pointed at, from its own ini, as a
+# Mac path. KEY is the ini's: FifaPath (FIFA 15), Fifa13Path, Fifa16Path...
+aurora_ini_dir() {
+    local d ini w
+    d="$(aurora_launcher_dir)" || return 1
+    ini="$d/Aurora15Connector.ini"
+    [ -f "$ini" ] || return 1
+    w="$(sed -n "s/^$1=//p" "$ini" | tr -d '\r' | tail -1)"
+    [ -n "$w" ] || return 1
+    win_path_to_unix "$w"
+}
+
+# Where a game is: what this script already knows for it, then the folder the
+# Aurora launcher was given, then the usual places. Printed as a Mac path.
+game_dir_of() {
+    local g="$1" exe key d n="${1#fifa}" var
+    exe="$(game_exe_of "$g")"
+    case "$g" in
+        fifa15) d="$(f15_game_dir 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
+        fifa16) d="$(f16_game_dir 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
+        fifa17) d="$(game_dir_find 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
+    esac
+    case "$g" in fifa15) key=FifaPath ;; *) key="Fifa${n}Path" ;; esac
+    d="$(aurora_ini_dir "$key" 2>/dev/null)" && [ -f "$d/$exe" ] && { print -r -- "${d:A}"; return 0; }
+    var="FIFA${n}_DIR"
+    for d in "${(P)var:-}" "$HOME/Downloads/FIFA $n" "$HOME/Desktop/FIFA $n" \
+             "$HOME/Games/FIFA $n" "$HOME/FIFA $n"; do
+        [ -n "$d" ] || continue
+        [ -f "$d/$exe" ] && { print -r -- "${d:A}"; return 0; }
+    done
+    return 1
+}
+
+# Where the game's own Wine settings come from in this bottle:
+#   table        the copy's ntdll.so, by the program's name
+#   AppDefaults  HKCU\Software\Wine\AppDefaults\<exe>\CrossOver-FIFA says
+#                otherwise for this program
+#   bare env     the bottle's [EnvironmentVariables], as before the table
+#   missing ...  none of them gives the game what it needs
+# FIFA 13 is not in the table and needs nothing anyone knows of, so it runs
+# with whatever the bottle has.
+game_settings_source() {
+    local g="$1" exe sec prof k v reg; local -a got lack
+    reg="$(bottle_user_reg)"
+    exe="$(game_exe_of "$g")"
+    got=(); lack=()
+    if [ "$PROFILES" = 1 ]; then
+        sec='[Software\\Wine\\AppDefaults\\'"$exe"'\\CrossOver-FIFA]'
+        prof="$(reg_value "$reg" "$sec" Profile 2>/dev/null || true)"
+        [ -n "$prof" ] && got+=( "Profile=$prof" )
+        for k in DrTrap TopdownLimit Fifa16DstFix; do
+            v="$(reg_value "$reg" "$sec" "$k" 2>/dev/null || true)"
+            [ -n "$v" ] && got+=( "$k=$v" )
+        done
+        # PAE is the one FIFA 16 need the table cannot meet per program.
+        # CX_PF_PAE=1 or a bare CX_DR_TRAP=3 turns it on (bottle_pae_on).
+        if [ "$g" = fifa16 ] && ! bottle_pae_on; then
+            lack+=( "CX_PF_PAE=1" )
+        fi
+        if [ ${#got} -gt 0 ]; then v="AppDefaults (${(j:, :)got})"
+        elif [ "$g" = fifa13 ]; then v="bare env"
+        else v="table"; fi
+        [ ${#lack} -gt 0 ] && v="$v; missing ${(j: :)lack}"
+        print -r -- "$v"
+        return 0
+    fi
+    case "$g" in
+        fifa15) [ -n "$(conf_value CX_TOPDOWN_LIMIT)" ] || lack+=( CX_TOPDOWN_LIMIT ) ;;
+        fifa16) [ "$(conf_value CX_DR_TRAP)" = 3 ] || lack+=( "CX_DR_TRAP=3" )
+                [ -n "$(conf_value CX_FIFA16_DSTFIX)" ] || lack+=( CX_FIFA16_DSTFIX ) ;;
+        fifa17|fifa21) [ "$(conf_value CX_DR_TRAP)" = 2 ] || lack+=( "CX_DR_TRAP=2" ) ;;
+    esac
+    if [ ${#lack} -gt 0 ]; then print -r -- "missing ${(j: :)lack}"; else print -r -- "bare env"; fi
+}
+
+# DLL=native... for the whole bottle.
+dll_native_global() {
+    local v
+    v="$(reg_value "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$1" 2>/dev/null || true)"
+    [[ "$v" == native* ]]
+}
+
+# DLL=native... for every one of these programs, or for the whole bottle.
+dll_native_for() {
+    local dll="$1" reg exe v; shift
+    reg="$(bottle_user_reg)"
+    v="$(reg_value "$reg" "$OVERRIDE_SECTION" "$dll" 2>/dev/null || true)"
+    [[ "$v" == native* ]] && return 0
+    for exe in "$@"; do
+        v="$(reg_value "$reg" "$(appdefaults_section "$exe")" "$dll" 2>/dev/null || true)"
+        [[ "$v" == native* ]] || return 1
+    done
+    return 0
+}
+
+# The DLL overrides a game needs, as one cell: the ones that are there, or
+# "missing" and the ones that are not.
+game_dlls() {
+    local g="$1" dll reg; local -a want have lack exes
+    reg="$(bottle_user_reg)"
+    want=(); exes=()
+    case "$g" in
+        fifa13) print -r -- "none known"; return 0 ;;
+        fifa15) want=( dinput8 msvcr110 msvcp110 ); exes=( fifa15.exe ) ;;
+        fifa17) want=( version msvcr120 msvcp120 ); exes=( FIFA17.exe _fifa17.exe ) ;;
+        fifa16)
+            # Wine's own runtime is the point (see f16_pin_crt).
+            if f16_crt_pin_needed && ! f16_crt_is_pinned; then
+                print -r -- "missing msvcr110 builtin pin"
+            elif f16_crt_is_pinned; then
+                print -r -- "msvcr110 msvcp110 builtin"
+            else
+                print -r -- "none needed"
+            fi
+            return 0 ;;
+        fifa21)
+            # The Aurora launcher's PowerShell stand-in writes this at PLAY.
+            if dll_native_for ucrtbase FIFA21.exe; then print -r -- "ucrtbase"
+            else print -r -- "ucrtbase at PLAY"; fi
+            return 0 ;;
+    esac
+    have=(); lack=()
+    for dll in $want; do
+        # version only counts bottle-wide (see OVERRIDE_EXES).
+        if [ "$dll" = version ]; then
+            if dll_native_global version; then have+=( version ); else lack+=( "version (bottle-wide)" ); fi
+            continue
+        fi
+        if dll_native_for "$dll" $exes; then have+=( "$dll" ); else lack+=( "$dll" ); fi
+    done
+    if [ ${#lack} -gt 0 ]; then
+        print -r -- "missing ${(j: :)lack}"
+    elif [ "$g" = fifa15 ] && ! gt_f15_has_microsoft_crt; then
+        # An override with no Microsoft copy to prefer does nothing.
+        print -r -- "missing Microsoft msvcr110"
+    else
+        print -r -- "${(j: :)have}"
+    fi
+}
+
+# f15_crt_native_dir, for whichever game this run is for: the pair is FIFA
+# 15's whatever CRT_OVERRIDE_DLLS says, and the folder may be one only the
+# Aurora launcher knows.
+gt_f15_has_microsoft_crt() {
+    local -a CRT_OVERRIDE_DLLS
+    CRT_OVERRIDE_DLLS=( msvcr110 msvcp110 )
+    crt_dlls_are_microsoft_in "${GT_DIR[fifa15]:-}" \
+        || crt_dlls_are_microsoft_in "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32"
+}
+
+# The launchers that are not the Aurora one, found where each one puts itself.
+cas_launcher_exe() {
+    local a; a="$(bottle_appdata 2>/dev/null)" || return 1
+    [ -f "${a:h}/CAS/cas.exe" ] && print -r -- "${a:h}/CAS/cas.exe"
+}
+impulsum_launcher_exe() {
+    local d; d="$(game_dir_of fifa17 2>/dev/null)" || return 1
+    [ -f "$d/Impulsum17Launcher.exe" ] && print -r -- "$d/Impulsum17Launcher.exe"
+}
+reborn_launcher_exe() {
+    local d a; local -a inside
+    inside=( "$BOTTLE_DIR/$BOTTLE/drive_c/Program Files"/RebornFUT*(N/) )
+    a="$(bottle_appdata 2>/dev/null || true)"
+    [ -n "$a" ] && inside+=( "${a:h}"/RebornFUT*(N/) )
+    for d in "${REBORN_DIR:-}" "$HOME"/Downloads/RebornFUT*(N/) "$HOME"/Desktop/RebornFUT*(N/) \
+             "$HOME"/Games/RebornFUT*(N/) "$HOME"/RebornFUT*(N/) $inside; do
+        [ -n "$d" ] || continue
+        [ -f "$d/RebornFUT.exe" ] && { print -r -- "$d/RebornFUT.exe"; return 0; }
+    done
+    return 1
+}
+
+# The pieces more than one launcher needs.
+gt_webview2_ok() {
+    [ -f "$BOTTLE_DIR/$BOTTLE/drive_c/webview2-fixed/$WEBVIEW2_VERSION/msedgewebview2.exe" ] \
+        && [ -n "$(conf_value WEBVIEW2_BROWSER_EXECUTABLE_FOLDER)" ]
+}
+gt_licence_ok() { [ -f "$(bottle_licence_file)" ]; }
+gt_powershell_ok() {
+    local psdir="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
+    cmp -s "$HERE/aurora17/powershell.exe" "$psdir/powershell.exe" 2>/dev/null \
+        || cmp -s "$HERE/aurora17/powershell.exe" "$psdir/$CAS_HANDOFF" 2>/dev/null
+}
+gt_dnscache_ok() {
+    local line
+    for line in "${DNSCACHE_LINES[@]}"; do
+        reg_line_is_set "$(bottle_system_reg)" "$DNSCACHE_SECTION" "$line" || return 1
+    done
+}
+
+# The single-game variables a bottle may still carry from before the per-game
+# table: FIFA 15's CX_TOPDOWN_LIMIT and FIFA 16's CX_FIFA16_DSTFIX. With the
+# table, fifa15.exe and fifa16.exe take their own and ignore these, so all
+# they still do is reach the programs the table does not list -- the
+# launchers, WebView2, .NET helpers -- and CX_TOPDOWN_LIMIT squeezes every
+# large top-down reservation those make under 8 GB. Prints the ones there.
+LEFTOVER_GAME_VARS=( CX_TOPDOWN_LIMIT CX_FIFA16_DSTFIX )
+leftover_game_vars() {
+    local conf="$1" v
+    for v in $LEFTOVER_GAME_VARS; do
+        grep -Eq "^\"$v\"[[:space:]]*=" "$conf" 2>/dev/null && print -r -- "$v"
+    done
+    return 0
+}
+
+# The FIFA 17 launchers this bottle has, by name, one per line: the ones the
+# per-game table does not list, and which therefore run under the bottle's
+# bare CX_DR_TRAP.
+fifa17_launchers_here() {
+    aurora_launcher_dir >/dev/null 2>&1 && print -r -- "Aurora.exe"
+    impulsum_launcher_exe >/dev/null 2>&1 && print -r -- "Impulsum17"
+    cas_launcher_exe >/dev/null 2>&1 && print -r -- "CAS"
+    reborn_launcher_exe >/dev/null 2>&1 && print -r -- "RebornFUT"
+    { [ "$GAME" = fifa17 ] || (( ${SHARED_WITH[(Ie)FIFA 17]} )); } && print -r -- "Aurora17Connector"
+    return 0
+}
+
+# One cell. GT_DIR, GT_SET and GT_DLL hold the game's own columns.
+gt_cell() {
+    local g="$1" l="$2" out
+    # Which launcher starts which game.
+    case "$l:$g" in
+        aurora:*) ;;
+        impulsum:fifa17|cas:fifa17|reborn:fifa17) ;;
+        direct:fifa15|direct:fifa16|direct:fifa17) ;;
+        *) print -r -- "unsupported"; return 0 ;;
+    esac
+    case "$l" in
+        aurora)   aurora_launcher_dir >/dev/null 2>&1   || { print -r -- "missing Aurora.exe"; return 0; } ;;
+        impulsum) impulsum_launcher_exe >/dev/null 2>&1 || { print -r -- "missing Impulsum17"; return 0; } ;;
+        cas)      cas_launcher_exe >/dev/null 2>&1      || { print -r -- "missing CAS"; return 0; } ;;
+        reborn)   reborn_launcher_exe >/dev/null 2>&1   || { print -r -- "missing RebornFUT"; return 0; } ;;
+    esac
+    # The game itself: its folder, its settings, its overrides.
+    [ -n "${GT_DIR[$g]:-}" ] || { print -r -- "missing game folder"; return 0; }
+    case "${GT_SET[$g]}" in *missing*) print -r -- "missing ${GT_SET[$g]#*missing }"; return 0 ;; esac
+    case "${GT_DLL[$g]}" in missing*) print -r -- "${GT_DLL[$g]}"; return 0 ;; esac
+    # What this launcher needs of the bottle for this game.
+    case "$l" in
+        impulsum|cas|reborn) gt_webview2_ok || { print -r -- "missing WebView2 $WEBVIEW2_VERSION"; return 0; } ;;
+    esac
+    case "$l" in
+        cas) cmp -s "$CAS_PS" "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0/powershell.exe" 2>/dev/null \
+                 || { print -r -- "missing CAS device check"; return 0; } ;;
+        aurora) proxy_autodetect_is_off || { print -r -- "missing proxy setting"; return 0; } ;;
+    esac
+    # The Aurora launcher's proxy version.dll beside FIFA 13, 16 and 21, and
+    # Impulsum17's beside its own launcher, load only through the bottle-wide
+    # override (see OVERRIDE_EXES). FIFA 17's own column already asks for it.
+    case "$l" in
+        aurora|impulsum) dll_native_global version || { print -r -- "missing version override"; return 0; } ;;
+    esac
+    if [ "$l:$g" = aurora:fifa21 ]; then
+        gt_powershell_ok || { print -r -- "missing PowerShell stand-in"; return 0; }
+        gt_dnscache_ok   || { print -r -- "missing Dnscache stand-in"; return 0; }
+    fi
+    if [ "$g" = fifa17 ]; then
+        gt_licence_ok || { print -r -- "missing licence file"; return 0; }
+    fi
+    if [ "$l:$g" = direct:fifa15 ]; then
+        # The crack's Origin emulator must be the offline-patched one.
+        out="$("$HERE/fifa15/fifa15-offline.sh" check "${GT_DIR[$g]}" 2>/dev/null || true)"
+        [[ "$out" == offline* ]] || { print -r -- "missing offline patch"; return 0; }
+    fi
+    if [ "$l:$g" = direct:fifa16 ]; then
+        unix_path_to_win "${GT_DIR[$g]}" >/dev/null 2>&1 || { print -r -- "missing drive letter"; return 0; }
+    fi
+    print -r -- "ready"
+}
+
+verify_games_table() {
+    local app="$1" g l pae table_line w i dash=""
+    local -A GT_DIR GT_SET GT_DLL
+    local -a row head widths rows
+    say ""
+    say "Every game in the $BOTTLE bottle"
+    say ""
+    say "  CrossOver copy   $app"
+    case "$PROFILES:$PROFILES_WHY" in
+        1:*)       table_line="yes (its ntdll.so has $PROFILE_MARKER): games can share a bottle" ;;
+        0:off)     table_line="turned off in this bottle (\"CX_GAME_PROFILES\" = \"0\")" ;;
+        0:no-copy) table_line="no copy there to check" ;;
+        *)         table_line="no: each game needs its own bottle (./setup.sh --repair updates the copy)" ;;
+    esac
+    say "  per-game table   $table_line"
+    say "  bottle           $BOTTLE  ($BOTTLE_DIR/$BOTTLE)"
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] || say "                   (there is no such bottle)"
+    pae="$(conf_value CX_PF_PAE)"
+    if [[ "$pae" != 1* ]] && bottle_pae_on; then
+        say "  CX_PF_PAE        ${pae:-not set}, but PAE is on: the bottle's CX_DR_TRAP is 3"
+    else
+        say "  CX_PF_PAE        ${pae:-not set}"
+    fi
+    say ""
+    for g in $GT_GAMES; do
+        GT_DIR[$g]="$(game_dir_of "$g" 2>/dev/null || true)"
+        GT_SET[$g]="$(game_settings_source "$g" 2>/dev/null || true)"
+        GT_DLL[$g]="$(game_dlls "$g" 2>/dev/null || true)"
+    done
+    head=( "game" "folder" "settings" "DLL overrides" "Aurora.exe" "Impulsum17" "CAS" "RebornFUT" "direct" )
+    rows=()
+    for g in $GT_GAMES; do
+        row=( "$(game_label_of "$g")" "${${GT_DIR[$g]:+found}:-missing}" "${GT_SET[$g]:-?}" "${GT_DLL[$g]:-?}" )
+        for l in $GT_LAUNCHERS; do row+=( "$(gt_cell "$g" "$l" 2>/dev/null || print -r -- '?')" ); done
+        rows+=( "${(pj:\t:)row}" )
+    done
+    # Columns padded to their widest cell, so it reads in Terminal and pastes
+    # as a Markdown table.
+    widths=()
+    for i in {1..${#head}}; do widths[i]=${#head[i]}; done
+    for w in $rows; do
+        row=( "${(@ps:\t:)w}" )
+        for i in {1..${#head}}; do (( ${#row[i]} > widths[i] )) && widths[i]=${#row[i]}; done
+    done
+    gt_print_row() {
+        local out="|" i; local -a r; r=( "$@" )
+        for i in {1..${#head}}; do out+=" ${(r:${widths[i]}:)r[i]} |"; done
+        print -r -- "$out"
+    }
+    gt_print_row $head
+    row=(); for i in {1..${#head}}; do row+=( "${(l:${widths[i]}::-:)dash}" ); done
+    gt_print_row $row
+    for w in $rows; do gt_print_row "${(@ps:\t:)w}"; done
+    say ""
+    for g in $GT_GAMES; do
+        [ -n "${GT_DIR[$g]}" ] && say "  $(game_label_of "$g"): ${GT_DIR[$g]}"
+    done
+    say "  settings: table = the copy's own per-game settings; AppDefaults = this"
+    say "  bottle's choice for that program; bare env = the bottle's variables."
+    say "  ready means every static check passed; only a launch proves it plays."
+    return 0
+}
+
 verify_install() {
     local app="$1" problems=0
     # An offline install (./setup.sh --offline) has no Aurora17 by design, so
@@ -2455,10 +3087,53 @@ verify_install() {
             # -Fx, not a regexp: WEBVIEW2_BROWSER_EXECUTABLE_FOLDER's value is a
             # Windows path, and "\9" in a regexp is a back-reference to a group
             # that does not exist, which grep rejects outright.
-            grep -Fqx -- "\"$k\" = \"$v\"" "$conf" \
-                && ok "$k" \
-                || { bad "$k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1)); }
+            if grep -Fqx -- "\"$k\" = \"$v\"" "$conf"; then
+                ok "$k"
+            elif (( ${SOFT_SETTINGS[(Ie)$k]} )) && grep -q "^\"$k\" = " "$conf"; then
+                # See add_setting: another game's value, which the games the
+                # table lists do not read.
+                ok "$k is another game's value here; $GAME_LABEL takes its own from the table"
+            else
+                bad "$k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1))
+            fi
         done
+        # Where the game's own settings come from, now that they need not be
+        # in the bottle at all. Not a BAD either way: the line above already
+        # says whether the bottle has what this setup needs.
+        if [ "$PROFILES" = 1 ]; then
+            GAME_SRC="$(game_settings_source "$GAME")"
+            case "$GAME_SRC" in
+                *missing*) note "$GAME_LABEL's own settings: $GAME_SRC (${COPY_APP:t}'s ntdll.so has the per-game table)" ;;
+                *) ok "$GAME_LABEL's own settings: $GAME_SRC (${COPY_APP:t}'s ntdll.so has the per-game table)" ;;
+            esac
+            # What the bottle's leftover single-game variables still reach
+            # (see leftover_game_vars). Never an ok: a launcher gets them.
+            local lv
+            for lv in ${(f)"$(leftover_game_vars "$conf")"}; do
+                note "$lv = $(conf_value "$lv") is still bottle-wide here. The games the table"
+                say "        lists ignore it, but every program it does not list -- the"
+                say "        launchers, WebView2, .NET helpers -- still runs with it."
+                if [ ${#SHARED_WITH} -gt 0 ]; then
+                    if [ "$GAME" = fifa17 ]; then
+                        say "        Fix (removes it, keeps a backup):  AURORA_BOTTLE='$BOTTLE' ./setup.sh --bottle"
+                    else
+                        say "        Fix (removes it, keeps a backup):  AURORA_BOTTLE='$BOTTLE' ./setup.sh --$GAME"
+                    fi
+                fi
+            done
+            # A bare CX_DR_TRAP=3 is left alone on purpose (it is the launchers'
+            # baseline in a FIFA 16 bottle, and it turns PAE on), but FIFA 17's
+            # launchers were proven under 2.
+            local -a f17l
+            f17l=( ${(f)"$(fifa17_launchers_here)"} )
+            if [[ "$(conf_value CX_DR_TRAP)" == 3* ]] && [ ${#f17l} -gt 0 ]; then
+                note "CX_DR_TRAP is 3 bottle-wide here (FIFA 16's mode), and the FIFA 17"
+                say "        launchers in this bottle (${(j:, :)f17l}) run with it; they were proven"
+                say "        under 2. The games the table lists take their own. Left as it is;"
+                say "        if a launcher misbehaves, set it to \"2\" and add \"CX_PF_PAE\" = \"1\""
+                say "        (CrossOver closed) so FIFA 16 keeps PAE."
+            fi
+        fi
         # Settings this script never writes. They arrive from other guides
         # (DXVK_CONFIG_FILE, WINEMSYNC) and have turned up on every bottle
         # that failed in a way nobody could explain. Not a BAD: none is proven
@@ -2469,7 +3144,7 @@ verify_install() {
                           | sed -n 's/^"\([A-Za-z_][A-Za-z0-9_]*\)" = .*/\1/p')"}; do
             [ -n "$fk" ] || continue
             case "$fk" in
-                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|CX_FIFA16_DSTFIX|WINE_COREAUDIO_EXCLUDE|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|PROMPT) ;;
+                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|CX_FIFA16_DSTFIX|CX_PF_PAE|CX_GAME_PROFILES|WINE_COREAUDIO_EXCLUDE|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|PROMPT) ;;
                 *) foreign+=( "$fk" ) ;;
             esac
         done
@@ -2612,6 +3287,18 @@ verify_install() {
                    say "        fully, then re-run  ./setup.sh"
                  fi
                  problems=$((problems+1)); }
+    fi
+
+    # See f16_pin_crt. A note: FIFA 16 still starts on Microsoft's runtime,
+    # but that is not the ground its loading fix was proven on.
+    if [ "$GAME" = fifa16 ] && [ -f "$(bottle_user_reg)" ] && f16_crt_pin_needed; then
+        if f16_crt_is_pinned; then
+            ok "fifa16.exe kept on Wine's own ${(j: and :)F16_CRT_PIN}"
+        else
+            note "the $BOTTLE bottle prefers Microsoft's msvcr110/msvcp110 for every program"
+            say "        (FIFA 15's setup did that), so FIFA 16 loads them too; its loading"
+            say "        fix was proven on Wine's own. Fix:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --fifa16"
+        fi
     fi
 
     # And an override is only half of it: Wine can only prefer a native runtime
@@ -3083,6 +3770,10 @@ report_mode() {
 
         print -r -- "---- checks --------------------------------------------"
         verify_install "$app" 2>&1 || true
+        print -r -- ""
+
+        print -r -- "---- every game in the bottle --------------------------"
+        verify_games_table "$app" 2>&1 || true
         print -r -- ""
 
         print -r -- "---- bottle settings -----------------------------------"
@@ -4029,6 +4720,66 @@ install_dnscache_standin() {
     return 0
 }
 
+# Takes the named leftover single-game variables (leftover_game_vars) out of
+# cxbottle.conf, after saving it as cxbottle.conf.bak-<time> next to it.
+remove_leftover_game_vars() {
+    local conf="$1" backup tmp v pat; shift
+    backup="$conf.bak-$(date +%Y%m%d-%H%M%S)"
+    if ! { cp -X "$conf" "$backup" 2>/dev/null || cp "$conf" "$backup"; }; then
+        note "could not back up $conf; ${(j: and :)@} left in it"
+        return 0
+    fi
+    pat="^\"(${(j:|:)@})\"[[:space:]]*="
+    tmp="$(mktemp -t a17conf)" || { note "could not remove ${(j: and :)@} from $conf"; return 0; }
+    grep -Ev "$pat" "$conf" > "$tmp"
+    if [ -s "$tmp" ] && cat "$tmp" > "$conf"; then
+        for v in "$@"; do
+            ok "removed $v from this bottle's settings"
+        done
+        say "        An earlier single-game setup put it there. This bottle now holds more"
+        say "        than one game, the games the per-game table lists take their own and"
+        say "        never read it, and all it still did was reach the launchers, WebView2"
+        say "        and .NET helpers here, where CX_TOPDOWN_LIMIT can break large reservations."
+        say "        The old file is kept as $backup"
+    else
+        note "could not remove ${(j: and :)@} from $conf (the backup is $backup)"
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
+# One setting into the bottle's [EnvironmentVariables], in $CONF.
+add_setting() {
+    # A key that is present with the wrong value is not "already set". Left
+    # alone it silently keeps the wrong graphics backend and the game hangs.
+    # -Fx, not a regexp: see the same grep in verify_install. A value
+    # with a backslash in it is a Windows path, not a pattern.
+    if grep -Fqx -- "\"$1\" = \"$2\"" "$CONF"; then
+        ok "$1 — already set"
+    elif grep -q "^\"$1\" = " "$CONF"; then
+        # One of SOFT_SETTINGS: another game set up in this bottle first put
+        # its own value there. With the profile table no game the table lists
+        # reads it, so it is left as that game's setup wrote it -- changing it
+        # would change what the launchers in this bottle run with, and
+        # stopping would make a second game impossible to add.
+        if (( ${SOFT_SETTINGS[(Ie)$1]} )); then
+            note "$1 is $(sed -n "s/^\"$1\" = \"\(.*\)\"$/\1/p" "$CONF" | head -1) in this bottle, from a game set up in it before;"
+            say "        left as it is. $GAME_LABEL gets its own value from the copy's"
+            say "        per-game table, which ignores this one."
+            return 0
+        fi
+        die $E_INCOMPLETE "$1 is set to something else in
+         $CONF
+     It must be \"$2\". To fix:
+       1. Open that file in TextEdit.
+       2. Find the line starting \"$1\" and delete it.
+       3. Save, then run this again."
+    else
+        printf '"%s" = "%s"\n' "$1" "$2" >> "$CONF"
+        ok "$1 = $2"
+    fi
+}
+
 # ------------------------------------------- the bottle, on its own
 # Steps 7 to 9c are everything that lives in the bottle rather than in the
 # CrossOver copy: the settings, the version override, the shortcuts, the
@@ -4060,25 +4811,27 @@ configure_bottle() {
         say "        exists, run:   AURORA_BOTTLE='name' ./setup.sh --bottle"
         say "        or re-run this installer."
     else
-        add_setting() {
-            # A key that is present with the wrong value is not "already set". Left
-            # alone it silently keeps the wrong graphics backend and the game hangs.
-            # -Fx, not a regexp: see the same grep in verify_install. A value
-            # with a backslash in it is a Windows path, not a pattern.
-            if grep -Fqx -- "\"$1\" = \"$2\"" "$CONF"; then
-                ok "$1 — already set"
-            elif grep -q "^\"$1\" = " "$CONF"; then
-                die $E_INCOMPLETE "$1 is set to something else in
-                 $CONF
-             It must be \"$2\". To fix:
-               1. Open that file in TextEdit.
-               2. Find the line starting \"$1\" and delete it.
-               3. Save, then run this again."
-            else
-                printf '"%s" = "%s"\n' "$1" "$2" >> "$CONF"
-                ok "$1 = $2"
+        # See "one bottle, every game" near the top. With the table this
+        # bottle gets only what its games share, and a game that shares it
+        # with another is simply added.
+        if [ "$PROFILES" = 1 ]; then
+            if [ ${#SHARED_WITH} -gt 0 ]; then
+                ok "adding $GAME_LABEL to the $BOTTLE bottle, which already has ${(j: and :)SHARED_WITH}"
             fi
-        }
+            ok "${APP:t} gives each game its own settings (its ntdll.so has the per-game table),"
+            say "        so this bottle gets only the settings every game shares"
+            # See leftover_game_vars. In a bottle that holds another game,
+            # they go (a backup first); in a game's own bottle they stay.
+            local -a stray
+            stray=( ${(f)"$(leftover_game_vars "$CONF")"} )
+            if [ ${#stray} -gt 0 ] && [ ${#SHARED_WITH} -gt 0 ]; then
+                remove_leftover_game_vars "$CONF" $stray
+            elif [ ${#stray} -gt 0 ]; then
+                say "        (${(j: and :)stray} from an earlier setup is left as it is: the games"
+                say "        the table lists ignore it, and every other program in the bottle"
+                say "        -- launchers, WebView2, .NET helpers -- still gets it, as before)"
+            fi
+        fi
         grep -q '^\[EnvironmentVariables\]' "$CONF" || printf '\n[EnvironmentVariables]\n' >> "$CONF"
         for kv in $BOTTLE_SETTINGS; do add_setting "${kv%%=*}" "${kv#*=}"; done
 
@@ -4127,13 +4880,40 @@ configure_bottle() {
         # FIFA 16 needs none of the three user.reg settings below: no redirect
         # DLL, no online C runtime, and no Aurora helper racing a proxy lookup.
         # None of the three was in the bottle its fix was proven in.
+        # The C runtime and dinput8 overrides are per program, version is
+        # bottle-wide (see OVERRIDE_EXES); a per-program one an earlier
+        # setup.sh wrote bottle-wide counts, and is left where it is.
         if [ "$GAME" = fifa16 ]; then
             ok "FIFA 16: no DLL override or proxy setting needed"
+            # See f16_pin_crt: only in a bottle that has FIFA 15's runtime
+            # override bottle-wide. Not a stop: FIFA 16 then loads whichever
+            # msvcr110 it finds, which is how it ran before this existed.
+            if [ -f "$(bottle_user_reg)" ] && f16_crt_pin_needed; then
+                if f16_crt_is_pinned; then
+                    ok "fifa16.exe: ${(j: + :)F16_CRT_PIN} = builtin — already set"
+                elif f16_pin_crt; then
+                    ok "fifa16.exe: ${(j: + :)F16_CRT_PIN} = builtin"
+                    say "        this bottle has them as native,builtin for every program (from"
+                    say "        FIFA 15's setup); FIFA 16's fix was proven on Wine's own"
+                else
+                    note "could not keep fifa16.exe on Wine's own ${(j: and :)F16_CRT_PIN} in $(bottle_user_reg)"
+                    say "        Quit CrossOver completely and run this again."
+                fi
+            fi
         elif [ -f "$(bottle_user_reg)" ]; then
+            if [ "$OVERRIDE_DLL" = version ]; then
+                OVERRIDE_WHERE="for the whole bottle"
+            else
+                OVERRIDE_WHERE="for ${(j:, :)OVERRIDE_EXES}"
+            fi
             if version_override_is_set; then
-                ok "$OVERRIDE_DLL = native,builtin — already set"
+                if [ "$OVERRIDE_DLL" != version ] && dll_override_is_global "$OVERRIDE_DLL"; then
+                    ok "$OVERRIDE_DLL = native,builtin — already set, for the whole bottle by an earlier setup"
+                else
+                    ok "$OVERRIDE_DLL = native,builtin $OVERRIDE_WHERE — already set"
+                fi
             elif set_version_override; then
-                ok "$OVERRIDE_DLL = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
+                ok "$OVERRIDE_DLL = native,builtin $OVERRIDE_WHERE (kept the old user.reg as user.reg.bak-aurora17)"
                 say "        this is what lets Aurora's redirect load at all"
             else
                 die $E_PERMISSION "Could not set the $OVERRIDE_DLL DLL override in
@@ -4148,7 +4928,7 @@ configure_bottle() {
                 if crt_override_is_set; then
                     ok "${(j: + :)CRT_OVERRIDE_DLLS} = native,builtin — already set"
                 elif set_crt_override; then
-                    ok "${(j: + :)CRT_OVERRIDE_DLLS} = native,builtin"
+                    ok "${(j: + :)CRT_OVERRIDE_DLLS} = native,builtin for ${(j:, :)OVERRIDE_EXES}"
                     say "        without this, online matches desync at kick-off"
                 else
                     note "could not point Wine at the game's own C runtime in $(bottle_user_reg)"
@@ -5173,10 +5953,12 @@ if [ "$MODE" = bottle ]; then
             green "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
         fi
         say ""
+        # Named, when it is not the game's own default: in a shared bottle
+        # the plain command would check a different one.
         if [ "$GAME" = fifa15 ]; then
-            say "To check:  ./setup.sh --fifa15 --verify"
+            say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa15 --verify"
         elif [ "$GAME" = fifa16 ]; then
-            say "To check:  ./setup.sh --fifa16 --verify"
+            say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa16 --verify"
         else
             say "To check:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
         fi
@@ -5463,6 +6245,14 @@ if [ "$MODE" = verify ]; then
     if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
+    fi
+    # No game named: every game in the bottle first, then FIFA 17's own
+    # checks as always. Those decide the exit code, as they always have, so
+    # --repair, setup-both.sh and anyone scripting this see no change.
+    if [ "$GAME_EXPLICIT" = 0 ]; then
+        verify_games_table "$TARGET"
+        say ""
+        say "FIFA 17 in detail (./setup.sh --fifa15 --verify and --fifa16 --verify do the others)"
     fi
     verify_install "$TARGET" || exit $E_INCOMPLETE
     exit 0

@@ -258,6 +258,418 @@ def function_source(name):
     return name + "() {" + body + "\n}\n"
 
 
+class SharedBottleTests(unittest.TestCase):
+    """One bottle, every game. With a CrossOver-FIFA whose ntdll.so has the
+    per-game profile table (marker: CX_GAME_PROFILES), a game is added to
+    another game's bottle and the bottle gets only what the games share.
+    Without it the old one-game-one-bottle rule stands, and the stop says why
+    and what would let them share. Nothing here touches a real bottle: every
+    path is under a temporary directory."""
+
+    WINE = "Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix/ntdll.so"
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="fifa-shared-tests-")
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name)
+        self.bottles = self.work / "bottles"
+        self.bottles.mkdir()
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("AURORA_", "FIFA1", "FIFA2", "CX_", "WEBVIEW2_",
+                                         "REBORN_"))}
+        self.env.update(CX_BOTTLE_PATH=str(self.bottles), HOME=str(self.work),
+                        AURORA_RECEIPT_DIR=str(self.work / "receipts"), NO_COLOR="1")
+        # The read-only start of setup.sh, up to where anything could change,
+        # run from the temporary directory so its fixes/ is the test's own.
+        source = (ROOT / "setup.sh").read_text().split(
+            "# --------------------------------------------------------- safety guards", 1)[0]
+        self.probe = self.work / "probe.sh"
+        self.probe.write_text(source + '\nprint -r -- "PROFILES=$PROFILES"\n'
+                              'print -r -- "SHARED=${(j:,:)SHARED_WITH}"\n'
+                              'print -rl -- $BOTTLE_SETTINGS\n')
+
+    def copy(self, marker, name="CrossOver-FIFA.app"):
+        ntdll = self.work / name / self.WINE
+        ntdll.parent.mkdir(parents=True, exist_ok=True)
+        ntdll.write_bytes(b"\x7fELF ntdll" + (b" CX_GAME_PROFILES\x00" if marker else b"\x00"))
+        return self.work / name
+
+    def shipped(self, marker):
+        ntdll = self.work / "fixes/x86_64-unix/ntdll.so"
+        ntdll.parent.mkdir(parents=True, exist_ok=True)
+        ntdll.write_bytes(b"ntdll" + (b" CX_GAME_PROFILES" if marker else b""))
+
+    def bottle(self, name, *settings):
+        folder = self.bottles / name
+        folder.mkdir(parents=True, exist_ok=True)
+        conf = folder / "cxbottle.conf"
+        conf.write_text("[EnvironmentVariables]\n"
+                        + "".join(f'"{k}" = "{v}"\n' for k, v in settings))
+        return conf
+
+    def run_probe(self, *args, **env):
+        result = subprocess.run(["/bin/zsh", str(self.probe), *args],
+                                env={**self.env, **env}, capture_output=True, text=True,
+                                timeout=20)
+        return result, result.stdout.splitlines()
+
+    def test_with_the_table_a_game_is_added_to_another_games_bottle(self):
+        app = self.copy(marker=True)
+        self.bottle("Aurora17", ("CX_GRAPHICS_BACKEND", "d3dmetal"), ("CX_DR_TRAP", "2"))
+        self.bottle("Aurora15", ("CX_TOPDOWN_LIMIT", "0x1ffffffff"))
+        for game, bottle, other, wanted, unwanted in [
+            ("fifa15", "Aurora17", "FIFA 17", [], ["CX_TOPDOWN_LIMIT=", "CX_DR_TRAP="]),
+            ("fifa16", "Aurora17", "FIFA 17", ["CX_PF_PAE=1"],
+             ["CX_DR_TRAP=", "CX_FIFA16_DSTFIX=", "CX_TOPDOWN_LIMIT="]),
+            # FIFA 17 keeps its bare CX_DR_TRAP=2: the launchers were proven with it.
+            ("fifa17", "Aurora15", "FIFA 15", ["CX_DR_TRAP=2"], ["CX_TOPDOWN_LIMIT="]),
+        ]:
+            with self.subTest(game=game):
+                result, lines = self.run_probe("--verify", AURORA_GAME=game,
+                                               AURORA_BOTTLE=bottle, AURORA_TARGET=str(app))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("PROFILES=1", lines)
+                self.assertIn(other, lines[1])
+                for setting in ["CX_GRAPHICS_BACKEND=d3dmetal", "WINE_SIMULATE_WRITECOPY=1", *wanted]:
+                    self.assertIn(setting, lines)
+                for prefix in unwanted:
+                    self.assertFalse(any(line.startswith(prefix) for line in lines[2:]), prefix)
+
+    def test_without_the_table_each_game_still_needs_its_own_bottle_and_is_told_why(self):
+        conf = self.bottle("Aurora17", ("CX_DR_TRAP", "2"))
+        contents = conf.read_text()
+        cases = [
+            # (copy has it, package has it, extra setting, what the stop says)
+            (False, True, None, "./setup.sh --repair"),
+            (False, False, None, "Download the current package"),
+            (None, True, None, "Install it first"),
+            (True, True, ("CX_GAME_PROFILES", "0"), "turns that table off"),
+        ]
+        for copy_marker, shipped_marker, extra, says in cases:
+            with self.subTest(copy=copy_marker, shipped=shipped_marker, extra=extra):
+                self.shipped(shipped_marker)
+                if copy_marker is None:
+                    app = self.work / "missing.app"
+                else:
+                    app = self.copy(copy_marker, name=f"copy-{copy_marker}.app")
+                if extra:
+                    conf.write_text(contents + f'"{extra[0]}" = "{extra[1]}"\n')
+                else:
+                    conf.write_text(contents)
+                before = conf.read_text()
+                result, _ = self.run_probe("--verify", AURORA_GAME="fifa15",
+                                           AURORA_BOTTLE="Aurora17", AURORA_TARGET=str(app))
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("needs its own bottle", result.stdout)
+                self.assertIn("per-game profile table", result.stdout)
+                self.assertIn(says, result.stdout)
+                self.assertEqual(conf.read_text(), before)
+
+    def test_setting_a_game_up_judges_by_the_ntdll_it_will_install(self):
+        # --fifa15 on an existing copy brings the shipped ntdll.so in
+        # (add_game_ntdll), so the package's file is the one that counts.
+        app = self.copy(marker=False)
+        self.shipped(True)
+        self.bottle("Aurora17", ("CX_DR_TRAP", "2"))
+        result, lines = self.run_probe("--fifa15", AURORA_BOTTLE="Aurora17", AURORA_TARGET=str(app))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PROFILES=1", lines)
+        # A mode that leaves the copy alone goes by the copy.
+        result, _ = self.run_probe("--fifa15", "--verify", AURORA_BOTTLE="Aurora17",
+                                   AURORA_TARGET=str(app))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("./setup.sh --repair", result.stdout)
+
+    def test_add_game_ntdll_brings_the_table_into_an_older_copy(self):
+        body = function_source("add_game_ntdll")
+        self.assertIn('ntdll_has_profiles "$wine/$f" || ! ntdll_has_profiles "$HERE/fixes/$f"', body)
+
+    # ------------------------------------------------------- add_setting
+
+    def add_setting(self, conf, soft, key, value):
+        harness = ("set -eu\nE_INCOMPLETE=5\nGAME_LABEL='FIFA 17'\n"
+                   "CONF=" + shlex_quote(str(conf)) + "\n"
+                   f"SOFT_SETTINGS=( {soft} )\n"
+                   'ok() { print -r -- "OK $*"; }\nnote() { print -r -- "NOTE $*"; }\n'
+                   'say() { print -r -- "SAY $*"; }\n'
+                   'die() { print -r -- "DIE $*"; exit "$1"; }\n'
+                   + function_source("add_setting")
+                   + f"add_setting {key} {value}\n")
+        return subprocess.run(["/bin/zsh", "-c", harness], capture_output=True, text=True,
+                              timeout=10)
+
+    def test_adding_a_second_game_never_trips_over_the_first_games_value(self):
+        conf = self.bottle("FIFA16", ("CX_DR_TRAP", "3"), ("CX_FIFA16_DSTFIX", "0"))
+        before = conf.read_text()
+        result = self.add_setting(conf, "CX_DR_TRAP", "CX_DR_TRAP", "2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NOTE CX_DR_TRAP is 3 in this bottle", result.stdout)
+        self.assertEqual(conf.read_text(), before, "the other game's value was changed")
+        # Any other key with a wrong value is still a stop, as it always was.
+        conf.write_text(before + '"CX_GRAPHICS_BACKEND" = "dxvk"\n')
+        result = self.add_setting(conf, "CX_DR_TRAP", "CX_GRAPHICS_BACKEND", "d3dmetal")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        # And without the table CX_DR_TRAP is not soft either.
+        conf.write_text(before)
+        result = self.add_setting(conf, "", "CX_DR_TRAP", "2")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+
+    # ------------------------------------------- FIFA 16 on Wine's own runtime
+
+    def pin_harness(self, reg):
+        source = (ROOT / "setup.sh").read_text()
+        return ("set -u\n"
+                "OVERRIDE_SECTION='[Software\\\\Wine\\\\DllOverrides]'\n"
+                "bottle_user_reg() { print -r -- " + shlex_quote(str(reg)) + "; }\n"
+                + [line for line in source.splitlines() if line.startswith("F16_CRT_PIN=")][0] + "\n"
+                + "appdefaults_section() {" + source.split("appdefaults_section() {", 1)[1].split("\n", 1)[0] + "\n"
+                + function_source("reg_line_is_set") + function_source("set_reg_line")
+                + function_source("f16_crt_pin_needed") + function_source("f16_crt_is_pinned")
+                + function_source("f16_pin_crt"))
+
+    def test_fifa16_is_kept_on_wines_runtime_only_where_fifa15s_is_bottle_wide(self):
+        reg = self.work / "user.reg"
+        plain = ('WINE REGISTRY Version 2\n\n'
+                 '[Software\\\\Wine\\\\DllOverrides] 1758000000\n'
+                 '"version"="native,builtin"\n')
+        reg.write_text(plain)
+        script = self.pin_harness(reg) + 'f16_crt_pin_needed && print -r -- NEEDED\n'
+        result = subprocess.run(["/bin/zsh", "-c", script], capture_output=True, text=True, timeout=10)
+        self.assertNotIn("NEEDED", result.stdout)
+
+        reg.write_text(plain + '"msvcr110"="native,builtin"\n"msvcp110"="native,builtin"\n')
+        script = (self.pin_harness(reg) + 'f16_crt_pin_needed && print -r -- NEEDED\n'
+                  'f16_crt_is_pinned && print -r -- EARLY\n'
+                  'f16_pin_crt && f16_crt_is_pinned && print -r -- PINNED\n')
+        result = subprocess.run(["/bin/zsh", "-c", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NEEDED", result.stdout)
+        self.assertNotIn("EARLY", result.stdout)
+        self.assertIn("PINNED", result.stdout)
+        text = reg.read_text()
+        self.assertIn('[Software\\\\Wine\\\\AppDefaults\\\\fifa16.exe\\\\DllOverrides] 0\n'
+                      '"msvcr110"="builtin"\n"msvcp110"="builtin"\n', text)
+        # The bottle-wide values FIFA 15 relies on are left where they are.
+        self.assertIn('"msvcr110"="native,builtin"', text)
+
+    # --------------------------------------------------- the table in --verify
+
+    def shared_bottle(self):
+        app = self.copy(marker=True)
+        conf = self.bottle("Shared", ("CX_GRAPHICS_BACKEND", "d3dmetal"), ("CX_DR_TRAP", "2"),
+                           ("WINE_SIMULATE_WRITECOPY", "1"), ("CX_PF_PAE", "1"))
+        root = self.bottles / "Shared"
+        local = root / "drive_c/users/crossover/AppData/Local"
+        aurora = local / "Aurora15Connector"
+        aurora.mkdir(parents=True)
+        (aurora / "Aurora15Connector.exe").write_bytes(b"MZ")
+        (aurora / "Aurora15Connector.ini").write_text("FifaPath=\r\nFifa21Path=Y:\\Games\\FIFA 21\r\n")
+        (local / "CAS").mkdir()
+        (local / "CAS/cas.exe").write_bytes(b"MZ")
+        (root / "dosdevices").mkdir()
+        # Resolved: the temporary folder is under /var, which is /private/var,
+        # and the game folder is compared after its symlinks are resolved.
+        (root / "dosdevices/y:").symlink_to(self.work.resolve(), target_is_directory=True)
+        fifa21 = self.work / "Games/FIFA 21"
+        fifa21.mkdir(parents=True)
+        (fifa21 / "FIFA21.exe").write_bytes(b"MZ")
+        fifa16 = self.work / "Downloads/FIFA 16"
+        fifa16.mkdir(parents=True)
+        (fifa16 / "fifa16.exe").write_bytes(b"MZ")
+        (root / "user.reg").write_text(
+            'WINE REGISTRY Version 2\n\n'
+            '[Software\\\\Wine\\\\AppDefaults\\\\fifa16.exe\\\\CrossOver-FIFA] 0\n'
+            '"Profile"="fifa16"\n"DrTrap"="3"\n\n'
+            '[Software\\\\Wine\\\\AppDefaults\\\\FIFA21.exe\\\\DllOverrides] 0\n'
+            '"ucrtbase"="native,builtin"\n')
+        return app, conf
+
+    def verify(self, app, **env):
+        return subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--verify"],
+                              env={**self.env, "AURORA_BOTTLE": "Shared",
+                                   "AURORA_TARGET": str(app), **env},
+                              capture_output=True, text=True, timeout=120)
+
+    @staticmethod
+    def table(stdout):
+        rows = {}
+        for line in stdout.splitlines():
+            if line.startswith("| FIFA "):
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                rows[cells[0]] = cells
+        return rows
+
+    def test_plain_verify_prints_every_game_and_launcher_and_changes_nothing(self):
+        app, conf = self.shared_bottle()
+        before = {p: p.read_bytes() for p in (self.bottles / "Shared").rglob("*") if p.is_file()}
+        result = self.verify(app)
+        self.assertIn(result.returncode, (0, 5), result.stdout + result.stderr)
+        out = result.stdout
+        self.assertIn("Every game in the Shared bottle", out)
+        self.assertIn(f"CrossOver copy   {app.resolve()}", out)
+        self.assertIn("per-game table   yes", out)
+        self.assertIn("CX_PF_PAE        1", out)
+        self.assertIn("| game ", out)
+        rows = self.table(out)
+        self.assertEqual(sorted(rows), ["FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
+        # game | folder | settings | DLL overrides | Aurora.exe | Impulsum17 | CAS | RebornFUT | direct
+        self.assertEqual(rows["FIFA 21"][1:4], ["found", "table", "ucrtbase"])
+        self.assertEqual(rows["FIFA 16"][1:4],
+                         ["found", "AppDefaults (Profile=fifa16, DrTrap=3)", "none needed"])
+        self.assertEqual(rows["FIFA 15"][1], "missing")
+        self.assertEqual(rows["FIFA 13"][2], "bare env")
+        # Which launcher starts which game.
+        for game in ("FIFA 13", "FIFA 15", "FIFA 16", "FIFA 21"):
+            self.assertEqual(rows[game][5:8], ["unsupported"] * 3, game)
+        self.assertEqual(rows["FIFA 13"][8], "unsupported")
+        self.assertEqual(rows["FIFA 21"][8], "unsupported")
+        # Present but not ready, each saying what it lacks first.
+        self.assertEqual(rows["FIFA 15"][4], "missing game folder")
+        self.assertEqual(rows["FIFA 16"][4], "missing proxy setting")
+        self.assertEqual(rows["FIFA 17"][5], "missing Impulsum17")
+        self.assertEqual(rows["FIFA 17"][6], "missing game folder")
+        self.assertEqual(rows["FIFA 17"][7], "missing RebornFUT")
+        # FIFA 16 run by hand: found, and y: reaches it.
+        self.assertEqual(rows["FIFA 16"][8], "ready")
+        # FIFA 17's own checks still follow, as they always did.
+        self.assertIn("FIFA 17 in detail", out)
+        after = {p: p.read_bytes() for p in (self.bottles / "Shared").rglob("*") if p.is_file()}
+        self.assertEqual(after, before, "--verify changed the bottle")
+
+    def test_without_the_table_the_bare_variables_decide(self):
+        app = self.copy(marker=False)
+        self.bottle("Shared", ("CX_DR_TRAP", "2"))
+        result = self.verify(app)
+        rows = self.table(result.stdout)
+        self.assertIn("per-game table   no", result.stdout)
+        self.assertEqual(rows["FIFA 17"][2], "bare env")
+        self.assertEqual(rows["FIFA 21"][2], "bare env")
+        self.assertEqual(rows["FIFA 15"][2], "missing CX_TOPDOWN_LIMIT")
+        self.assertEqual(rows["FIFA 16"][2], "missing CX_DR_TRAP=3 CX_FIFA16_DSTFIX")
+
+    def test_a_named_game_checks_that_game_only(self):
+        app, _ = self.shared_bottle()
+        result = self.verify(app, AURORA_GAME="fifa16")
+        self.assertNotIn("Every game in the", result.stdout)
+        self.assertIn("FIFA 16's own settings: AppDefaults (Profile=fifa16, DrTrap=3)", result.stdout)
+        self.assertIn("ok    CX_PF_PAE", result.stdout)
+
+
+    # ------------------------------------------- PAE from a bare CX_DR_TRAP=3
+
+    def fifa16_bottle(self):
+        app = self.copy(marker=True)
+        conf = self.bottle("FIFA16", ("CX_GRAPHICS_BACKEND", "d3dmetal"),
+                           ("WINE_SIMULATE_WRITECOPY", "1"), ("CX_DR_TRAP", "3"),
+                           ("CX_FIFA16_DSTFIX", "0"))
+        return app, conf
+
+    def test_a_fifa16_bottle_from_before_the_table_already_has_pae(self):
+        # ntdll's cx_pf_pae is true for a bare CX_DR_TRAP=3, so such a bottle
+        # needs no CX_PF_PAE. --fifa16 --verify used to say "BAD CX_PF_PAE is
+        # not set to 1" (exit 5) and "ok ...; missing CX_PF_PAE=1".
+        app, conf = self.fifa16_bottle()
+        result, lines = self.run_probe("--verify", AURORA_GAME="fifa16", AURORA_TARGET=str(app))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PROFILES=1", lines)
+        self.assertFalse(any(l.startswith("CX_PF_PAE=") for l in lines[2:]), lines)
+        before = conf.read_text()
+        result = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--fifa16", "--verify"],
+                                env={**self.env, "AURORA_TARGET": str(app)},
+                                capture_output=True, text=True, timeout=120)
+        out = result.stdout
+        self.assertNotIn("CX_PF_PAE is not set", out)
+        self.assertIn("FIFA 16's own settings: table (", out)
+        for line in out.splitlines():
+            if line.strip().startswith("ok"):
+                self.assertNotIn("missing", line)
+        self.assertEqual(conf.read_text(), before)
+        # Without a bare 3 it is still asked for, and its absence still said.
+        conf.write_text(before.replace('"CX_DR_TRAP" = "3"', '"CX_DR_TRAP" = "2"'))
+        result, lines = self.run_probe("--verify", AURORA_GAME="fifa16", AURORA_TARGET=str(app))
+        self.assertIn("CX_PF_PAE=1", lines)
+        result = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--fifa16", "--verify"],
+                                env={**self.env, "AURORA_TARGET": str(app)},
+                                capture_output=True, text=True, timeout=120)
+        self.assertIn("CX_PF_PAE is not set to 1", result.stdout)
+        self.assertIn("note  FIFA 16's own settings: table; missing CX_PF_PAE=1", result.stdout)
+
+    def test_the_table_counts_a_bare_dr_trap_3_as_pae(self):
+        app, conf = self.fifa16_bottle()
+        result = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--verify"],
+                                env={**self.env, "AURORA_BOTTLE": "FIFA16", "AURORA_TARGET": str(app)},
+                                capture_output=True, text=True, timeout=120)
+        self.assertIn("PAE is on: the bottle's CX_DR_TRAP is 3", result.stdout)
+        self.assertEqual(self.table(result.stdout)["FIFA 16"][2], "table")
+
+    # ------------------------------------- leftover single-game variables
+
+    def removal(self, conf, *names):
+        harness = ('ok() { print -r -- "OK $*"; }\nnote() { print -r -- "NOTE $*"; }\n'
+                   'say() { print -r -- "SAY $*"; }\n'
+                   + function_source("remove_leftover_game_vars")
+                   + 'LEFTOVER_GAME_VARS=( CX_TOPDOWN_LIMIT CX_FIFA16_DSTFIX )\n'
+                   + function_source("leftover_game_vars")
+                   + 'stray=( ${(f)"$(leftover_game_vars ' + shlex_quote(str(conf)) + ')"} )\n'
+                   + 'print -r -- "STRAY ${stray[*]}"\n'
+                   + 'remove_leftover_game_vars ' + shlex_quote(str(conf)) + ' $stray\n')
+        return subprocess.run(["/bin/zsh", "-c", harness], capture_output=True, text=True, timeout=10)
+
+    def test_a_shared_bottle_loses_the_single_game_variables_and_keeps_a_backup(self):
+        conf = self.bottle("FIFA16", ("CX_GRAPHICS_BACKEND", "d3dmetal"), ("CX_DR_TRAP", "3"),
+                           ("CX_FIFA16_DSTFIX", "0"), ("CX_TOPDOWN_LIMIT", "0x1ffffffff"))
+        before = conf.read_text()
+        result = self.removal(conf)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("STRAY CX_TOPDOWN_LIMIT CX_FIFA16_DSTFIX", result.stdout)
+        self.assertIn("OK removed CX_TOPDOWN_LIMIT from this bottle's settings", result.stdout)
+        self.assertIn("OK removed CX_FIFA16_DSTFIX from this bottle's settings", result.stdout)
+        after = conf.read_text()
+        self.assertNotIn("CX_TOPDOWN_LIMIT", after)
+        self.assertNotIn("CX_FIFA16_DSTFIX", after)
+        # CX_DR_TRAP is the launchers' baseline and stays.
+        self.assertIn('"CX_DR_TRAP" = "3"', after)
+        self.assertIn('"CX_GRAPHICS_BACKEND" = "d3dmetal"', after)
+        backups = list(conf.parent.glob("cxbottle.conf.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), before)
+
+    def test_configure_removes_them_only_where_another_game_is(self):
+        body = function_source("configure_bottle")
+        self.assertIn('if [ ${#stray} -gt 0 ] && [ ${#SHARED_WITH} -gt 0 ]; then\n'
+                      '                remove_leftover_game_vars "$CONF" $stray', body)
+        self.assertNotIn("sees it exactly as before", body)
+
+    def test_verify_does_not_call_a_leftover_reaching_launchers_ok(self):
+        app, conf = self.shared_bottle()
+        conf.write_text(conf.read_text().replace('"CX_DR_TRAP" = "2"', '"CX_DR_TRAP" = "3"')
+                        + '"CX_TOPDOWN_LIMIT" = "0x1ffffffff"\n')
+        result = self.verify(app, AURORA_GAME="fifa16")
+        out = result.stdout
+        self.assertIn("note  CX_TOPDOWN_LIMIT = 0x1ffffffff is still bottle-wide here", out)
+        self.assertIn("AURORA_BOTTLE='Shared' ./setup.sh --fifa16", out)
+        for line in out.splitlines():
+            if line.strip().startswith("ok"):
+                self.assertNotIn("CX_TOPDOWN_LIMIT", line)
+        # CX_DR_TRAP=3 is left, and named because the bottle has FIFA 17 launchers (CAS, Aurora.exe).
+        self.assertIn("note  CX_DR_TRAP is 3 bottle-wide here", out)
+        self.assertIn("Aurora.exe, CAS", out)
+
+    # ----------------------------------------------- version stays bottle-wide
+
+    def test_the_launchers_need_version_bottle_wide(self):
+        app, _ = self.shared_bottle()
+        reg = self.bottles / "Shared/user.reg"
+        rows = self.table(self.verify(app).stdout)
+        # Only the bottle-wide override counts for version.
+        self.assertEqual(rows["FIFA 17"][3], "missing version (bottle-wide) msvcr120 msvcp120")
+        reg.write_text(reg.read_text() + '\n[Software\\\\Wine\\\\DllOverrides] 0\n"version"="native,builtin"\n')
+        rows = self.table(self.verify(app).stdout)
+        self.assertEqual(rows["FIFA 17"][3], "missing msvcr120 msvcp120")
+        body = function_source("gt_cell")
+        self.assertIn('aurora|impulsum) dll_native_global version || { print -r -- "missing version override"', body)
+
+
 class RepairTests(unittest.TestCase):
     """--repair is wired end to end, and refresh_fixes replaces exactly what is
     stale and signs only when it has to. The repair itself is never run here:
@@ -530,6 +942,11 @@ class CrtOverrideTests(unittest.TestCase):
                 if line.startswith('if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=')][0] + "\n"
 
     @classmethod
+    def exes_line(cls):
+        return [line for line in cls.source().splitlines()
+                if line.startswith('if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=')][0] + "\n"
+
+    @classmethod
     def block(cls, head):
         """One indented if-block out of setup.sh, ending at its own `fi`."""
         return head + cls.source().split(head, 1)[1].split("\n    fi\n", 1)[0] + "\n    fi\n"
@@ -546,8 +963,12 @@ class CrtOverrideTests(unittest.TestCase):
                 f"OVERRIDE_SECTION='{self.SECTION}'\n"
                 "bottle_user_reg() { print -r -- " + shlex_quote(str(reg)) + "; }\n"
                 + self.array_line()
+                + self.exes_line()
                 + self.function("reg_line_is_set")
                 + self.function("set_reg_line")
+                + "appdefaults_section() {" + self.source().split("appdefaults_section() {", 1)[1].split("\n", 1)[0] + "\n"
+                + self.function("dll_override_is_set")
+                + self.function("set_dll_override")
                 + self.function("crt_override_is_set")
                 + self.function("set_crt_override"))
 
@@ -573,11 +994,12 @@ class CrtOverrideTests(unittest.TestCase):
         reg.write_text(self.REG)
         return reg
 
-    def lines_in_section(self, reg):
+    def lines_in_section(self, reg, section=None):
+        section = section or self.SECTION
         found, out = False, []
         for line in reg.read_text().splitlines():
             if line.startswith("["):
-                found = line.startswith(self.SECTION)
+                found = line.startswith(section)
                 continue
             if found and line.startswith('"'):
                 out.append(line)
@@ -613,10 +1035,18 @@ class CrtOverrideTests(unittest.TestCase):
 
     # --------------------------------------------------------- the registry side
 
-    def test_it_writes_both_lines_into_the_dll_override_section(self):
-        for game, expected in [
-            ("fifa17", ['"msvcp120"="native,builtin"', '"msvcr120"="native,builtin"']),
-            ("fifa15", ['"msvcp110"="native,builtin"', '"msvcr110"="native,builtin"']),
+    @staticmethod
+    def app_section(exe):
+        return r'[Software\\Wine\\AppDefaults' + '\\\\' + exe + r'\\DllOverrides]'
+
+    def test_it_writes_both_lines_for_the_games_own_programs_only(self):
+        # Per program, not bottle-wide: a bottle-wide msvcr110 would put FIFA 16
+        # on Microsoft's runtime in a bottle the two share.
+        for game, exes, expected in [
+            ("fifa17", ["FIFA17.exe", "_fifa17.exe"],
+             ['"msvcp120"="native,builtin"', '"msvcr120"="native,builtin"']),
+            ("fifa15", ["fifa15.exe"],
+             ['"msvcp110"="native,builtin"', '"msvcr110"="native,builtin"']),
         ]:
             with self.subTest(game=game):
                 with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
@@ -629,12 +1059,83 @@ class CrtOverrideTests(unittest.TestCase):
                     self.assertNotIn("BEFORE-SET", result.stdout)
                     self.assertNotIn("WRITE-FAILED", result.stdout)
                     self.assertIn("AFTER-SET", result.stdout)
-                    # Both lines land under the DLL override section, and nothing
-                    # already there -- in it or in the section after -- is lost.
+                    for exe in exes:
+                        self.assertEqual(sorted(self.lines_in_section(reg, self.app_section(exe))),
+                                         expected, exe)
+                    # The bottle-wide section, and the one after it, are as they were.
                     self.assertEqual(sorted(self.lines_in_section(reg)),
-                                     ['"*d3dcompiler_47"="native"', *expected,
-                                      '"version"="native,builtin"'])
+                                     ['"*d3dcompiler_47"="native"', '"version"="native,builtin"'])
                     self.assertIn('"Decorated"="Y"', reg.read_text())
+
+    def test_a_bottle_wide_override_from_an_earlier_setup_still_counts(self):
+        with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
+            reg = self.fixture(directory)
+            reg.write_text(self.REG.replace('"version"="native,builtin"\n',
+                                            '"version"="native,builtin"\n'
+                                            '"msvcr120"="native,builtin"\n'
+                                            '"msvcp120"="native,builtin"\n'))
+            before = reg.read_text()
+            result = self.run_zsh(self.harness("fifa17", reg)
+                                  + 'crt_override_is_set && print -r -- SET\n')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SET", result.stdout)
+            self.assertEqual(reg.read_text(), before)
+
+    def version_harness(self, game, reg):
+        source = self.source()
+        line = [l for l in source.splitlines()
+                if l.startswith('if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=')][0]
+        return (self.harness(game, reg) + line + "\n"
+                + self.function("dll_override_is_global")
+                + self.function("version_override_is_set")
+                + [l for l in source.splitlines() if l.startswith("set_version_override()")][0]
+                + "\n")
+
+    def test_version_stays_bottle_wide_and_only_bottle_wide_counts(self):
+        # The launchers' proxy version.dll files sit beside other programs
+        # (Impulsum17Launcher.exe, FIFA 13/16/21 for Aurora.exe), so a
+        # per-program override for FIFA17.exe would not reach them.
+        with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
+            reg = self.fixture(directory)
+            reg.write_text(self.REG.replace('"version"="native,builtin"\n', '')
+                           + '\n[Software\\\\Wine\\\\AppDefaults\\\\FIFA17.exe\\\\DllOverrides] 0\n'
+                           '"version"="native,builtin"\n')
+            result = self.run_zsh(self.version_harness("fifa17", reg)
+                                  + 'version_override_is_set && print -r -- EARLY\n'
+                                  'set_version_override && version_override_is_set && print -r -- SET\n')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("EARLY", result.stdout)
+            self.assertIn("SET", result.stdout)
+            self.assertIn('"version"="native,builtin"', self.lines_in_section(reg))
+        # FIFA 15's dinput8 stays per program.
+        with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
+            reg = self.fixture(directory)
+            result = self.run_zsh(self.version_harness("fifa15", reg)
+                                  + 'set_version_override && version_override_is_set && print -r -- SET\n')
+            self.assertIn("SET", result.stdout)
+            self.assertNotIn('"dinput8"="native,builtin"', self.lines_in_section(reg))
+            self.assertEqual(self.lines_in_section(reg, self.app_section("fifa15.exe")),
+                             ['"dinput8"="native,builtin"'])
+
+    def test_an_existing_section_in_another_case_is_reused(self):
+        # wineserver compares key names without case and keeps the first
+        # spelling; a second [..fifa17.exe..] section would be a duplicate key.
+        with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
+            reg = self.fixture(directory)
+            reg.write_text(self.REG + '\n[Software\\\\Wine\\\\AppDefaults\\\\fifa17.exe\\\\DllOverrides] 0\n'
+                           '"MSVCR120"="builtin"\n'
+                           '\n[Software\\\\Wine\\\\AppDefaults\\\\_FIFA17.EXE\\\\DllOverrides] 0\n'
+                           '"msvcp120"="native,builtin"\n"msvcr120"="native,builtin"\n')
+            result = self.run_zsh(self.harness("fifa17", reg)
+                                  + 'set_crt_override && crt_override_is_set && print -r -- SET\n')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SET", result.stdout)
+            text = reg.read_text()
+            self.assertEqual(text.lower().count("appdefaults\\\\fifa17.exe\\\\dlloverrides]"), 1, text)
+            self.assertEqual(text.lower().count("appdefaults\\\\_fifa17.exe\\\\dlloverrides]"), 1, text)
+            # The old value under the other spelling of its name is replaced.
+            self.assertEqual(sorted(self.lines_in_section(reg, self.app_section("fifa17.exe"))),
+                             ['"msvcp120"="native,builtin"', '"msvcr120"="native,builtin"'])
 
     def test_setting_it_twice_changes_nothing_the_second_time(self):
         with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
@@ -860,9 +1361,8 @@ class WebView2RuntimeTests(unittest.TestCase):
 
     @classmethod
     def add_setting(cls):
-        """The writer itself, lifted out of configure_bottle."""
-        body = cls.source().split("        add_setting() {", 1)[1].split("\n        }\n", 1)[0]
-        return "add_setting() {" + body + "\n}\n"
+        """The writer itself, which configure_bottle calls."""
+        return "SOFT_SETTINGS=()\n" + cls.function("add_setting")
 
     @classmethod
     def block(cls, head, script="setup.sh"):
