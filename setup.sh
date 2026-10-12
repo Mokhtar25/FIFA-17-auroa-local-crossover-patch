@@ -92,6 +92,8 @@
 #                                         PowerShell and DNS Client stand-ins. The
 #                                         bottle (Aurora17 by default) must exist
 #   ./setup.sh --fifa21 --verify          check the FIFA 21 setup, change nothing
+#   ./setup.sh --choose-folder fifa15 [path]   remember a game's folder
+#   ./setup.sh --forget-folder fifa15          forget only that folder choice
 #   AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15   (or --fifa16, --fifa21) add the game to
 #                                         another game's bottle. Needs a copy whose
 #                                         ntdll.so gives each game its own settings;
@@ -131,10 +133,33 @@ E_PERMISSION=3
 E_PAYLOAD=4
 E_INCOMPLETE=5
 
+CHOICES_FILE="$HOME/Library/Application Support/FIFA-CrossOver/choices.conf"
+game_exe_of() {
+    case "$1" in
+        fifa13) print -r -- fifa13.exe ;; fifa15) print -r -- fifa15.exe ;;
+        fifa16) print -r -- fifa16.exe ;; fifa17) print -r -- FIFA17.exe ;;
+        fifa21) print -r -- FIFA21.exe ;;
+        *) return 1 ;;
+    esac
+}
+
 MODE=install
+CHOICE_GAME=""; CHOICE_PATH=""; CHOICE_PATH_SET=0
 # --offline: install everything the game itself needs and nothing Aurora17's.
 NO_AURORA=0
 case "${1:-}" in
+    --choose-folder|--forget-folder)
+        MODE="${1#--}"; shift
+        if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] \
+           || { [ "$MODE" = forget-folder ] && [ "$#" -ne 1 ]; } \
+           || ! game_exe_of "${1:-}" >/dev/null; then
+            print -r -- "Use --choose-folder <fifa13|fifa15|fifa16|fifa17|fifa21> [path]"
+            print -r -- " or --forget-folder <game>"
+            exit $E_UNSUPPORTED
+        fi
+        CHOICE_GAME="$1"
+        if [ "$#" -eq 2 ]; then CHOICE_PATH="$2"; CHOICE_PATH_SET=1; fi
+        shift "$#" ;;
     --resign) MODE=resign; shift ;;
     --verify) MODE=verify; shift ;;
     --report) MODE=report; shift ;;
@@ -233,6 +258,85 @@ fail() {
     exit "${EXIT_AS:-1}"
 }
 die()  { EXIT_AS="$1"; shift; fail "$@"; }
+
+# The chooser changes only choices.conf: no CrossOver, bottle or payload is
+# needed. Keep it before all install discovery and platform checks.
+choice_folder_validated() {
+    local g="$1" d="$2" exe child
+    local -a matches
+    exe="$(game_exe_of "$g")" || return $E_UNSUPPORTED
+    if [ -d "$d" ] && [ ! -f "$d/$exe" ]; then
+        matches=()
+        for child in "$d"/*(N/); do
+            [ -f "$child/$exe" ] && matches+=( "$child" )
+        done
+        if (( ${#matches} > 1 )); then
+            print -u2 -r -- "That folder contains more than one $exe. Choose the game folder itself."
+            return $E_UNSUPPORTED
+        fi
+        (( ${#matches} == 1 )) && d="$matches[1]"
+    fi
+    if [ ! -d "$d" ] || [ ! -f "$d/$exe" ]; then
+        print -u2 -r -- "That folder has no $exe. Choose the folder that contains it."
+        return $E_UNSUPPORTED
+    fi
+    d="${d:A}"
+    if [[ "$d" == *$'\t'* || "$d" == *$'\r'* || "$d" == *$'\n'* ]]; then
+        print -u2 -r -- "The folder name contains a tab or line break. Rename it before saving the choice."
+        return $E_UNSUPPORTED
+    fi
+    print -r -- "$d"
+}
+
+choice_write() {
+    local game="$1" folder="${2:-}" dir="${CHOICES_FILE:h}" tmp
+    if [ -e "$CHOICES_FILE" ] && [ ! -f "$CHOICES_FILE" ]; then
+        die $E_PERMISSION "$CHOICES_FILE is not a file. Move it aside and try again."
+    fi
+    [ -n "$folder" ] || [ -f "$CHOICES_FILE" ] || return 0
+    mkdir -p "$dir" || die $E_PERMISSION "Could not create $dir. Check its permissions."
+    tmp="$(mktemp "$dir/.choices-XXXXXX")" \
+        || die $E_PERMISSION "Could not save a choice in $dir. Check permissions and free disk space."
+    if [ -f "$CHOICES_FILE" ]; then
+        if ! LC_ALL=C awk -v key="$game.folder=" 'index($0,key)!=1' "$CHOICES_FILE" > "$tmp"; then
+            rm -f "$tmp"
+            die $E_PERMISSION "Could not read $CHOICES_FILE. The previous choices were kept."
+        fi
+    else
+        print -r -- "# Your choices for the FIFA CrossOver fixes. Delete a line to forget it." > "$tmp"
+    fi
+    if [ -n "$folder" ]; then print -r -- "$game.folder=$folder" >> "$tmp"; fi
+    if cmp -s "$tmp" "$CHOICES_FILE"; then
+        rm -f "$tmp"
+    elif ! mv -f "$tmp" "$CHOICES_FILE"; then
+        rm -f "$tmp"
+        die $E_PERMISSION "Could not save $CHOICES_FILE. The previous choices were kept.
+         Check permissions and free disk space, then try again."
+    fi
+}
+
+if [ "$MODE" = choose-folder ] || [ "$MODE" = forget-folder ]; then
+    if [ "$MODE" = choose-folder ]; then
+        if [ "$CHOICE_PATH_SET" != 1 ]; then
+            source "$HERE/lib/ui.zsh"
+            CX_DIALOGS=1
+            ui_gui_ok || die $E_UNSUPPORTED "No desktop dialog is available. Give the folder path:
+         ./setup.sh --choose-folder $CHOICE_GAME '/path/to/FIFA ${CHOICE_GAME#fifa}'"
+            CHOICE_EXE="$(game_exe_of "$CHOICE_GAME")"
+            if ! CHOICE_PATH="$(ui_choose_folder "Choose your FIFA ${CHOICE_GAME#fifa} folder (the one with $CHOICE_EXE in it)" /Volumes)"; then
+                say "No folder chosen. Your previous choice was kept."
+                exit 0
+            fi
+        fi
+        CHOICE_PATH="$(choice_folder_validated "$CHOICE_GAME" "$CHOICE_PATH")" || exit $E_UNSUPPORTED
+        choice_write "$CHOICE_GAME" "$CHOICE_PATH"
+        ok "saved FIFA ${CHOICE_GAME#fifa}: $CHOICE_PATH"
+    else
+        choice_write "$CHOICE_GAME"
+        ok "forgot FIFA ${CHOICE_GAME#fifa}'s folder choice"
+    fi
+    exit 0
+fi
 
 # Two tools from Apple's command line tools are needed to fit the files in.
 # Without them /usr/bin/otool and install_name_tool are stubs that fail, and
@@ -2797,14 +2901,6 @@ gt_launcher_label() {
         cas) print -r -- CAS ;; reborn) print -r -- RebornFUT ;; *) print -r -- "$1" ;;
     esac
 }
-game_exe_of() {
-    case "$1" in
-        fifa13) print -r -- fifa13.exe ;; fifa15) print -r -- fifa15.exe ;;
-        fifa16) print -r -- fifa16.exe ;; fifa17) print -r -- FIFA17.exe ;;
-        fifa21) print -r -- FIFA21.exe ;;
-    esac
-}
-
 # The value NAME has under SECTION in REG, quotes taken off. SECTION is in
 # the file's own spelling, brackets and doubled backslashes included, and is
 # compared without case, as Windows does: the launchers write FIFA21.exe and
@@ -2846,7 +2942,6 @@ aurora_ini_dir() {
 # fifa15.folder=/Volumes/Untitled/FIFA 15. It lives outside the package, so a
 # new zip keeps it, and uninstall.sh removes it with the rest of the folder.
 # Only read here: --choose-folder writes it.
-CHOICES_FILE="$HOME/Library/Application Support/FIFA-CrossOver/choices.conf"
 # Where external drives are mounted. Tests point it at a folder of their own,
 # because a real Mac may well have a FIFA folder on a real drive.
 VOLUMES_DIR="${CX_VOLUMES_DIR:-/Volumes}"

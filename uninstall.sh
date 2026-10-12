@@ -463,7 +463,7 @@ if [ -f "$HOME/Library/LaunchAgents/com.fifa-crossover-cleanup.plist" ]; then
 fi
 if [ -d "$HOME/Library/Application Support/FIFA-CrossOver" ]; then
     rm -rf "$HOME/Library/Application Support/FIFA-CrossOver"
-    ok "removed the background cleanup helper and its log"
+    ok "removed saved game-folder choices and the old background cleanup files"
     undone=$((undone+1))
 fi
 

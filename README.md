@@ -36,9 +36,15 @@ details.
 
 ## Before you install
 
-**FIFA 15 only?** Put your game folder in Downloads, quit CrossOver, and
-double-click **FIFA 15.command**. **FIFA 16?** The same, with your **FIFA 16**
-folder and **FIFA 16.command**. The steps below are for FIFA 17 or both games.
+**Game on an external drive or somewhere else?** Double-click
+**Choose game folders.command**, select the game and its folder, then choose
+**Later** to save it or **Apply and quit CrossOver** to run that game's setup.
+The choice survives downloading a new package.
+
+**FIFA 15 only?** Quit CrossOver and double-click **FIFA 15.command**; it uses
+Aurora's common bottle. **FIFA 16?** Use **FIFA 16.command**. Folders already
+recorded by Aurora are found automatically. The steps below are for FIFA 17
+or both games.
 
 1. Put the **FIFA 17** folder and the **Aurora17** folder in your Downloads folder.
    Doing FIFA 15 too? Put the **FIFA 15** folder there as well.
@@ -52,8 +58,9 @@ folder and **FIFA 16.command**. The steps below are for FIFA 17 or both games.
 The normal install stops if the bottle is not there. SETUP.md explains each step.
 
 Steps 2 and 3 are only for the normal install. The offline install makes the
-`Aurora17` bottle for you if it is not there, and FIFA 15 makes its `Aurora15`
-bottle for you as well. Quit CrossOver first either way.
+`Aurora17` bottle for you if it is not there. FIFA 15 makes its selected
+bottle if needed (`Aurora17` by default, or the installed old connector's
+`Aurora15`). Quit CrossOver first either way.
 
 ## Install
 

@@ -30,6 +30,13 @@ class ScriptTests(unittest.TestCase):
     def test_cli_validation(self):
         cases = [
             ("setup.sh", ["--help"], 0),
+            ("setup.sh", ["--choose-folder"], 2),
+            ("setup.sh", ["--choose-folder", "fifa99", "/tmp"], 2),
+            ("setup.sh", ["--choose-folder", "fifa15"], 2),
+            ("setup.sh", ["--choose-folder", "fifa15", "/tmp", "extra"], 2),
+            ("setup.sh", ["--forget-folder"], 2),
+            ("setup.sh", ["--forget-folder", "fifa99"], 2),
+            ("setup.sh", ["--forget-folder", "fifa15", "extra"], 2),
             ("setup.sh", ["--verify", "--offline"], 2),
             ("setup.sh", ["one.app", "two.app"], 2),
             ("setup.sh", ["--fifa15", "--unknown"], 2),
@@ -64,6 +71,7 @@ class ScriptTests(unittest.TestCase):
                 with self.subTest(shell=shell, script=script, args=args):
                     result = subprocess.run(
                         [shell, str(ROOT / script), *args],
+                        env={**os.environ, "CX_NO_DIALOGS": "1"},
                         capture_output=True, text=True, timeout=10,
                     )
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -285,6 +293,250 @@ def resolver_source():
                                  "bottle_user_reg()", "bottle_system_reg()"))]
     return ("\n".join(lines) + "\nsource " + shlex_quote(str(GATE_SCRIPT)) + "\n"
             + "".join(function_source(n) for n in RESOLVER_FUNCTIONS))
+
+
+class FolderChoiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="fifa-choices-")
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name)
+        self.choices = self.work / "Library/Application Support/FIFA-CrossOver/choices.conf"
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("AURORA_", "FIFA", "CX_", "SSH_"))}
+        self.env.update(HOME=str(self.work), CX_NO_DIALOGS="1",
+                        CX_BOTTLE_PATH=str(self.work / "no-bottles"),
+                        AURORA_TARGET=str(self.work / "no-app.app"))
+
+    def run_setup(self, *args, **env):
+        return subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), *args],
+                              cwd=self.work, env={**self.env, **env},
+                              capture_output=True, text=True, timeout=10)
+
+    def game(self, path, exe="fifa15.exe"):
+        folder = self.work / path
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / exe).write_bytes(b"MZ")
+        return folder
+
+    def test_save_and_forget_change_only_the_selected_choice(self):
+        self.choices.parent.mkdir(parents=True)
+        original = "# My choices\nbottle.shared=yes\nfifa16.shared_pae=no\nfifa17.folder=/other\n"
+        self.choices.write_text(original + "fifa15.folder=/old\n")
+        folder = self.game('Games/$(touch PWNED) " FIFA 15')
+        result = self.run_setup("--choose-folder", "fifa15", str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.choices.read_text(), original + f"fifa15.folder={folder.resolve()}\n")
+        self.assertFalse((self.work / "PWNED").exists())
+        before = self.choices.stat().st_mtime_ns
+        again = self.run_setup("--choose-folder", "fifa15", str(folder))
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(self.choices.stat().st_mtime_ns, before)
+        forgotten = self.run_setup("--forget-folder", "fifa15")
+        self.assertEqual(forgotten.returncode, 0, forgotten.stdout + forgotten.stderr)
+        self.assertEqual(self.choices.read_text(), original)
+        self.assertFalse((self.work / "no-bottles").exists())
+        self.assertFalse((self.work / "no-app.app").exists())
+
+    def test_parent_folder_is_accepted_only_when_the_game_is_unambiguous(self):
+        folder = self.game("Disc/FIFA 15")
+        result = self.run_setup("--choose-folder", "fifa15", str(folder.parent))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"fifa15.folder={folder.resolve()}\n", self.choices.read_text())
+        before = self.choices.read_bytes()
+        self.game("Disc/Another FIFA 15")
+        result = self.run_setup("--choose-folder", "fifa15", str(folder.parent))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("more than one", result.stdout + result.stderr)
+        self.assertEqual(self.choices.read_bytes(), before)
+
+    def test_each_game_requires_its_own_executable(self):
+        for game, exe in [("fifa13", "fifa13.exe"), ("fifa15", "fifa15.exe"),
+                          ("fifa16", "fifa16.exe"), ("fifa17", "FIFA17.exe"),
+                          ("fifa21", "FIFA21.exe")]:
+            with self.subTest(game=game):
+                folder = self.game(game, exe)
+                result = self.run_setup("--choose-folder", game, str(folder))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"{game}.folder={folder.resolve()}\n", self.choices.read_text())
+        before = self.choices.read_bytes()
+        result = self.run_setup("--choose-folder", "fifa15", str(self.work / "fifa21"))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("no fifa15.exe", result.stdout + result.stderr)
+        self.assertEqual(self.choices.read_bytes(), before)
+
+    def test_invalid_arguments_and_control_characters_never_save_a_choice(self):
+        for args in [("--choose-folder",), ("--forget-folder",),
+                     ("--choose-folder", "fifa99", str(self.work)),
+                     ("--forget-folder", "fifa99"),
+                     ("--forget-folder", "fifa15", "extra"),
+                     ("--choose-folder", "fifa15", str(self.work), "extra")]:
+            with self.subTest(args=args):
+                result = self.run_setup(*args)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertFalse(self.choices.exists())
+        for control in ("\t", "\n", "\r"):
+            folder = self.game("Games/FIFA" + control + "15")
+            result = self.run_setup("--choose-folder", "fifa15", str(folder))
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertFalse(self.choices.exists())
+        result = self.run_setup("--forget-folder", "fifa15")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.choices.parent.exists())
+
+    def test_a_failed_atomic_replace_preserves_the_previous_choices(self):
+        self.choices.parent.mkdir(parents=True)
+        original = b"fifa15.folder=/old\nfifa17.folder=/other\n"
+        self.choices.write_bytes(original)
+        folder = self.game("FIFA 15")
+        bin_dir = self.work / "bin"
+        bin_dir.mkdir()
+        move = bin_dir / "mv"
+        move.write_text("#!/bin/sh\nexit 1\n")
+        move.chmod(0o755)
+        result = self.run_setup("--choose-folder", "fifa15", str(folder),
+                                PATH=str(bin_dir) + ":" + self.env["PATH"])
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(self.choices.read_bytes(), original)
+        self.assertEqual(list(self.choices.parent.glob(".choices-*")), [])
+
+
+class DialogTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="fifa-dialogs-")
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name)
+        self.bin = self.work / "bin"
+        self.bin.mkdir()
+        self.log = self.work / "dialogs.jsonl"
+        self.calls = self.work / "setup.jsonl"
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("AURORA_", "FIFA", "CX_", "SSH_"))}
+        self.env.update(HOME=str(self.work), CX_DIALOGS="1", UI_LOG=str(self.log),
+                        SETUP_LOG=str(self.calls), PATH=str(self.bin) + ":" + self.env["PATH"],
+                        CX_BOTTLE_PATH=str(self.work / "no-bottles"),
+                        AURORA_TARGET=str(self.work / "no-app.app"))
+        launcher = self.bin / "launchctl"
+        launcher.write_text("#!/bin/sh\necho Aqua\n")
+        launcher.chmod(0o755)
+        osa = self.bin / "osascript"
+        osa.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+log = Path(os.environ['UI_LOG'])
+count = len(log.read_text().splitlines()) if log.exists() else 0
+with log.open('a') as out:
+    out.write(json.dumps({'args': sys.argv[1:], 'script': sys.stdin.read()}) + '\\n')
+replies = json.loads(os.environ.get('UI_REPLIES', '[]'))
+reply = replies[count] if count < len(replies) else ''
+if reply == '__cancel__': sys.exit(1)
+print(reply)
+''')
+        osa.chmod(0o755)
+        self.package = self.work / "package"
+        (self.package / "lib").mkdir(parents=True)
+        shutil.copy2(ROOT / "lib/ui.zsh", self.package / "lib/ui.zsh")
+        shutil.copy2(ROOT / "Choose game folders.command", self.package / "Choose game folders.command")
+        stub = self.package / "setup.sh"
+        stub.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with Path(os.environ['SETUP_LOG']).open('a') as out:
+    out.write(json.dumps(args) + '\\n')
+if args and args[0] == '--shutdown': sys.exit(int(os.environ.get('SHUTDOWN_RC', '0')))
+if args and args[0] == '--choose-folder' and os.environ.get('VALID_FOLDER'):
+    sys.exit(0 if args[-1] == os.environ['VALID_FOLDER'] else 2)
+sys.exit(0)
+''')
+        # The command deliberately invokes setup.sh through zsh; use a shell
+        # stub that forwards its arguments to the Python fixture.
+        stub.rename(self.package / "setup-fixture.py")
+        stub.write_text('#!/bin/zsh\nexec python3 "${0:A:h}/setup-fixture.py" "$@"\n')
+
+    def run_shell(self, command, replies=(), **env):
+        return subprocess.run(["/bin/zsh", "-c", command], cwd=self.work,
+                              env={**self.env, "UI_REPLIES": json.dumps(replies), **env},
+                              capture_output=True, text=True, timeout=15)
+
+    def run_chooser(self, replies, **env):
+        self.log.unlink(missing_ok=True)
+        self.calls.unlink(missing_ok=True)
+        return self.run_shell('/bin/zsh ' + shlex_quote(str(self.package / "Choose game folders.command")),
+                              replies, **env)
+
+    def setup_calls(self):
+        return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def test_disabled_dialogs_and_ssh_never_call_osascript(self):
+        command = ('source ' + shlex_quote(str(ROOT / "lib/ui.zsh"))
+                   + '; ui_ask Title Text Yes No no; ask=$?; '
+                   'ui_choose_folder Prompt /Volumes; folder=$?; print -r -- "$ask $folder"')
+        for env in ({"CX_NO_DIALOGS": "1"}, {"SSH_CONNECTION": "test"},
+                    {"SSH_TTY": "/dev/test"}, {"CX_DIALOGS": "0"}):
+            with self.subTest(env=env):
+                result = self.run_shell(command, **env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), "1 1")
+                self.assertFalse(self.log.exists())
+
+    def test_prompt_text_and_paths_are_arguments_not_applescript(self):
+        location = self.work / 'Drive " with $(touch PWNED)'
+        location.mkdir()
+        prompt = 'Choose "this" folder; $(touch PWNED)'
+        command = ('source ' + shlex_quote(str(ROOT / "lib/ui.zsh"))
+                   + '; ui_choose_folder ' + shlex_quote(prompt) + ' ' + shlex_quote(str(location)))
+        result = self.run_shell(command, [str(location)])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads(self.log.read_text())
+        self.assertEqual(record['args'], ['-', prompt, str(location)])
+        self.assertNotIn(prompt, record['script'])
+        self.assertNotIn(str(location), record['script'])
+        self.assertFalse((self.work / "PWNED").exists())
+
+    def test_later_cancel_and_timeout_never_apply_or_quit_crossover(self):
+        for replies, wanted in [
+            ([''], []), (['FIFA 15', '__cancel__'], []),
+            (['FIFA 15', '/game/FIFA 15', 'Later'], [['--choose-folder', 'fifa15', '/game/FIFA 15']]),
+            (['FIFA 15', '/game/FIFA 15', 'timeout'], [['--choose-folder', 'fifa15', '/game/FIFA 15']]),
+        ]:
+            with self.subTest(replies=replies):
+                result = self.run_chooser(replies)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.setup_calls(), wanted)
+
+    def test_apply_requires_the_button_and_a_successful_shutdown(self):
+        for shutdown_rc, expected_rc, count in [("0", 0, 3), ("3", 3, 2)]:
+            with self.subTest(shutdown_rc=shutdown_rc):
+                result = self.run_chooser(['FIFA 16', '/game/FIFA 16', 'Apply and quit CrossOver', ''],
+                                          SHUTDOWN_RC=shutdown_rc)
+                self.assertEqual(result.returncode, expected_rc, result.stdout + result.stderr)
+                expected = [['--choose-folder', 'fifa16', '/game/FIFA 16'],
+                            ['--shutdown'], ['--fifa16']]
+                self.assertEqual(self.setup_calls(), expected[:count])
+
+    def test_choose_again_and_forget_do_not_apply_settings(self):
+        result = self.run_chooser(['FIFA 15', '/wrong', 'Choose again', '/valid', 'Later'],
+                                  VALID_FOLDER='/valid')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.setup_calls(), [['--choose-folder', 'fifa15', '/wrong'],
+                                             ['--choose-folder', 'fifa15', '/valid']])
+        result = self.run_chooser(['Forget a choice…', 'FIFA 17', ''])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.setup_calls(), [['--forget-folder', 'fifa17']])
+
+    def test_cli_folder_dialog_saves_a_choice_but_cancel_keeps_it(self):
+        folder = self.work / 'FIFA 15'
+        folder.mkdir()
+        (folder / 'fifa15.exe').write_bytes(b'MZ')
+        command = '/bin/zsh ' + shlex_quote(str(ROOT / 'setup.sh')) + ' --choose-folder fifa15'
+        result = self.run_shell(command, [str(folder)])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        before = choices.read_bytes()
+        self.log.unlink()
+        result = self.run_shell(command, ['__cancel__'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(choices.read_bytes(), before)
 
 
 class SharedBottleTests(unittest.TestCase):

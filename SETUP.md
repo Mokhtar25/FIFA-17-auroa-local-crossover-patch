@@ -148,6 +148,40 @@ the tables each folder is printed in full with the same source.
   RebornFUT   FIFA 17  ready
 ```
 
+### Choose your game folders
+
+Double-click **Choose game folders.command** to remember a game on an
+external drive or anywhere else. Choose FIFA 15, 16, 17 or 21, then select its
+folder. The folder must contain that game's executable. Selecting its parent
+also works when exactly one child contains the game; otherwise the chooser
+asks you to choose again.
+
+After saving, choose **Later** to stop there, or **Apply and quit CrossOver**
+to quit CrossOver and any running game and apply that game's setup. Canceling
+a picker preserves your previous choice; Later keeps the newly saved choice.
+Neither stops a game. Choose **Forget a choice…** to remove one saved folder
+and return to automatic discovery.
+
+Choices are stored in
+`~/Library/Application Support/FIFA-CrossOver/choices.conf`, so downloading a
+new package keeps them. Uninstall removes them. A folder variable you set for
+a run takes precedence, then your saved choice, then the launcher's record,
+then guesses. `--verify` says **found (chosen)** when it uses your choice. If
+its drive is unplugged, it reports that choice as unreachable and explains
+any fallback.
+
+The Terminal equivalents are:
+
+```sh
+./setup.sh --choose-folder fifa15 '/Volumes/My Drive/FIFA 15'
+./setup.sh --forget-folder fifa15
+```
+
+Use `fifa16`, `fifa17` or `fifa21` for another game (`fifa13` is also accepted
+by the folder commands). Leave the path out of `--choose-folder` to open the
+native picker. Over SSH, or with `CX_NO_DIALOGS=1`, provide the path explicitly.
+Saving a choice changes no CrossOver app, bottle or game file.
+
 ### Separate bottles still work
 
 Each game can still have a bottle of its own. **Both games.command** keeps
