@@ -291,7 +291,7 @@ choice_folder_validated() {
 }
 
 choice_write() {
-    local game="$1" folder="${2:-}" dir="${CHOICES_FILE:h}" tmp
+    local game="$1" folder="${2:-}" dir="${CHOICES_FILE:h}" tmp src=/dev/null header=""
     if [ -e "$CHOICES_FILE" ] && [ ! -f "$CHOICES_FILE" ]; then
         die $E_PERMISSION "$CHOICES_FILE is not a file. Move it aside and try again."
     fi
@@ -300,14 +300,24 @@ choice_write() {
     tmp="$(mktemp "$dir/.choices-XXXXXX")" \
         || die $E_PERMISSION "Could not save a choice in $dir. Check permissions and free disk space."
     if [ -f "$CHOICES_FILE" ]; then
-        if ! LC_ALL=C awk -v key="$game.folder=" 'index($0,key)!=1' "$CHOICES_FILE" > "$tmp"; then
-            rm -f "$tmp"
-            die $E_PERMISSION "Could not read $CHOICES_FILE. The previous choices were kept."
-        fi
+        src="$CHOICES_FILE"
     else
-        print -r -- "# Your choices for the FIFA CrossOver fixes. Delete a line to forget it." > "$tmp"
+        header="# Your choices for the FIFA CrossOver fixes. Delete a line to forget it."
     fi
-    if [ -n "$folder" ]; then print -r -- "$game.folder=$folder" >> "$tmp"; fi
+    # The whole new file in one write that is checked: this also runs from
+    # the missing-files prompt, where set -e is off, and a short file moved
+    # into place would lose every other choice. ENVIRON, not -v, so a
+    # backslash in a folder name is kept as it is.
+    if ! CHOICE_HEADER="$header" CHOICE_KEY="$game.folder=" \
+         CHOICE_LINE="${folder:+$game.folder=$folder}" LC_ALL=C awk '
+             BEGIN { if (ENVIRON["CHOICE_HEADER"] != "") print ENVIRON["CHOICE_HEADER"] }
+             index($0, ENVIRON["CHOICE_KEY"]) != 1
+             END { if (ENVIRON["CHOICE_LINE"] != "") print ENVIRON["CHOICE_LINE"] }' \
+             "$src" > "$tmp"; then
+        rm -f "$tmp"
+        die $E_PERMISSION "Could not save $CHOICES_FILE. The previous choices were kept.
+         Check permissions and free disk space, then try again."
+    fi
     if cmp -s "$tmp" "$CHOICES_FILE"; then
         rm -f "$tmp"
     elif ! mv -f "$tmp" "$CHOICES_FILE"; then
@@ -5475,12 +5485,15 @@ DNSCACHE_LINES=(
     '"Start"=dword:00000002'
     '"Type"=dword:00000010'
 )
+# Returns 1 when the stand-in is not in place; only FIFA 21's setup counts
+# that against its verdict (DNSCACHE_OK).
 install_dnscache_standin() {
-    local reg line missing=0
+    local reg line missing=0 again=--bottle
+    [ "$GAME" = fifa21 ] && again=--fifa21
     reg="$(bottle_system_reg)"
     if [ ! -f "$reg" ]; then
         note "no bottle called '$BOTTLE' yet, so there is nowhere to add it"
-        return 0
+        return 1
     fi
     for line in "${DNSCACHE_LINES[@]}"; do
         reg_line_is_set "$reg" "$DNSCACHE_SECTION" "$line" || { missing=1; break; }
@@ -5493,13 +5506,21 @@ install_dnscache_standin() {
         set_reg_line "$reg" "$DNSCACHE_SECTION" "$line" "${line%%=*}" || {
             note "could not add the DNS Client stand-in to the $BOTTLE bottle"
             say "        FIFA 21's Aurora launcher will stop before the game starts."
-            say "        Quit CrossOver completely and run ./setup.sh --bottle again."
-            return 0
+            say "        Quit CrossOver completely and run ./setup.sh $again again."
+            return 1
         }
     done
     ok "FIFA 21's Aurora launcher will find a DNS Client running in the $BOTTLE bottle"
     say "        (Wine's print spooler, registered as Dnscache; it starts with the bottle)"
     return 0
+}
+
+# "Done" has to mean the game will start: the bottle's settings, a stand-in
+# where PLAY will find it, the EA names, and for FIFA 21 the DNS Client its
+# launcher asks about before it starts anything.
+setup_steps_ok() {
+    [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ] \
+        && { [ "$GAME" != fifa21 ] || [ "${DNSCACHE_OK:-0}" = 1 ]; }
 }
 
 # What FIFA 21 needs that is not the bottle's to give: the Aurora launcher
@@ -5649,6 +5670,7 @@ configure_bottle() {
     say ""
     say "7. Adding the settings to your bottle"
     BOTTLE_OK=0
+    DNSCACHE_OK=1
     CONF="$BOTTLE_DIR/$BOTTLE/cxbottle.conf"
     if [ ! -f "$CONF" ]; then
         note "no bottle called '$BOTTLE' found at"
@@ -5900,7 +5922,8 @@ configure_bottle() {
         HOSTS_OK=1; LICENCE_OK=1
         say ""
         say "9d. Letting the Aurora launcher start FIFA 21"
-        install_dnscache_standin
+        DNSCACHE_OK=0
+        install_dnscache_standin && DNSCACHE_OK=1
         return 0
     fi
 
@@ -6054,7 +6077,7 @@ configure_bottle() {
     # Aurora launcher to ask.
     say ""
     say "9d. Letting the Aurora launcher start FIFA 21"
-    install_dnscache_standin
+    install_dnscache_standin || true
 
     # ------------------------------------------- 9e. the FIFA 17 game folder
     # See fix_fifa17_folders. Only keeps copies; the gate does the rest.
@@ -6826,7 +6849,7 @@ if [ "$MODE" = bottle ]; then
     [ "$GAME" = fifa21 ] && f21_check_game
     end_own_wine_session
     say ""
-    if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
+    if setup_steps_ok; then
         remove_cleanup_agent && note "removed the old background cleanup agent; use Stop.command instead"
         if [ "$GAME" = fifa15 ]; then
             if [ "$(aurora_bottle_kind "$BOTTLE" 2>/dev/null || true)" = modern ]; then
@@ -7914,7 +7937,7 @@ mkdir -p "$RECEIPT_DIR"
 # "Done" has to mean the game will start. A missing bottle or a missing
 # stand-in means PLAY does nothing, and saying Done to that wastes an evening.
 say ""
-if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
+if setup_steps_ok; then
     green "Done."
     say ""
     if [ "$NO_AURORA" = 1 ]; then
@@ -7994,6 +8017,10 @@ if [ "$HOSTS_OK" != 1 ]; then
     say "  * the six EA name mappings are not in the bottle's hosts file, so the"
     say "    launcher will try to elevate on PLAY and stop with"
     say "    'The elevated setup step exited with code 1'"
+fi
+if [ "$GAME" = fifa21 ] && [ "${DNSCACHE_OK:-0}" != 1 ]; then
+    say "  * the DNS Client stand-in is not in the bottle, so the Aurora launcher"
+    say "    will stop before FIFA 21 starts"
 fi
 say ""
 say "Fix whichever is listed above, then run this again. ./setup.sh --verify"

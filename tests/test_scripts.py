@@ -270,6 +270,12 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
                 self.assertIn("FIFA 17", result.stdout)
 
 
+def file_size_limit(blocks):
+    """A shell prefix after which a write past blocks x 512 bytes fails with
+    EFBIG (SIGXFSZ ignored, so it is an error, not a kill)."""
+    return f"trap '' XFSZ; ulimit -f {blocks}; "
+
+
 def function_source(name):
     """One shell function out of setup.sh, for running against stubs."""
     source = (ROOT / "setup.sh").read_text()
@@ -399,6 +405,34 @@ class FolderChoiceTests(unittest.TestCase):
         self.assertEqual(self.choices.read_bytes(), original)
         self.assertEqual(list(self.choices.parent.glob(".choices-*")), [])
 
+    def test_a_failed_write_of_the_new_choices_keeps_the_previous_ones(self):
+        # The old choices fit under the limit and the new line does not, so
+        # the temporary file would be the old file minus this game's line.
+        self.choices.parent.mkdir(parents=True)
+        original = ("# My choices\nfifa17.folder=/other\n"
+                    + "fifa16.shared_pae=no\n" * 20 + "fifa15.folder=/old\n").encode()
+        self.assertLess(len(original), 512)
+        self.choices.write_bytes(original)
+        folder = self.game("FIFA 15 " + "x" * 40)
+        result = subprocess.run(
+            ["/bin/zsh", "-c", file_size_limit(1) + "exec /bin/zsh \"$0\" \"$@\"",
+             str(ROOT / "setup.sh"), "--choose-folder", "fifa15", str(folder)],
+            cwd=self.work, env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("The previous choices were kept", result.stdout)
+        self.assertNotIn("saved", result.stdout)
+        self.assertEqual(self.choices.read_bytes(), original)
+        self.assertEqual(list(self.choices.parent.glob(".choices-*")), [])
+        # And with no choices yet, nothing is left behind.
+        self.choices.unlink()
+        result = subprocess.run(
+            ["/bin/zsh", "-c", file_size_limit(0) + "exec /bin/zsh \"$0\" \"$@\"",
+             str(ROOT / "setup.sh"), "--choose-folder", "fifa15", str(folder)],
+            cwd=self.work, env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertFalse(self.choices.exists())
+        self.assertEqual(list(self.choices.parent.glob(".choices-*")), [])
+
 
 class DialogTests(unittest.TestCase):
     def setUp(self):
@@ -470,7 +504,7 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
     def setup_calls(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
 
-    def run_setup_preflight(self, args=(), replies=(), **env):
+    def run_setup_preflight(self, args=(), replies=(), prefix='', **env):
         # Run the actual initialization, resolver, and folder preflight. Stop
         # before install actions so fixtures never reach real apps/processes.
         fixes = self.package / "fixes/x86_64-unix"
@@ -481,7 +515,7 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
             "# ------------------------------------------------- the launch that is watched", 1)[0]
         script = self.package / "preflight.sh"
         script.write_text(source + '\nprint -r -- "CONTINUED folder=$(game_dir_of "$GAME" || true)"\n')
-        command = '/bin/zsh ' + shlex_quote(str(script))
+        command = prefix + '/bin/zsh ' + shlex_quote(str(script))
         command += ''.join(' ' + shlex_quote(arg) for arg in args)
         return self.run_shell(command, replies, CX_VOLUMES_DIR=str(self.work / 'no-volumes'), **env)
 
@@ -506,6 +540,30 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
                 self.assertIn(f'{game}.folder={folder.resolve()}\n', choices.read_text())
                 self.assertFalse((self.work / 'no-app.app').exists())
                 self.assertFalse((self.work / 'no-bottles').exists())
+
+    def test_missing_files_prompt_stops_when_the_choice_cannot_be_saved(self):
+        # The prompt runs with set -e off (prompt_for_missing_game_files ||
+        # exit): a failed write must stop setup, not move a short file into
+        # place and carry on.
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        choices.parent.mkdir(parents=True)
+        original = ('# My choices\nfifa17.folder=/other\n'
+                    + 'fifa16.shared_pae=no\n' * 22).encode()
+        self.assertLess(len(original), 512)
+        choices.write_bytes(original)
+        folder = self.work / ('Selected FIFA 15 ' + 'x' * 60)
+        folder.mkdir()
+        (folder / 'fifa15.exe').write_bytes(b'MZ')
+        result = self.run_setup_preflight(['--fifa15'], [str(folder)],
+                                          prefix=file_size_limit(1))
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('The previous choices were kept', result.stdout)
+        self.assertNotIn('CONTINUED', result.stdout)
+        self.assertNotIn('saved FIFA 15', result.stdout)
+        self.assertEqual(choices.read_bytes(), original)
+        self.assertEqual(list(choices.parent.glob('.choices-*')), [])
+        self.assertFalse((self.work / 'no-app.app').exists())
+        self.assertFalse((self.work / 'no-bottles').exists())
 
     def test_missing_files_cancel_or_disabled_dialogs_never_save_a_choice(self):
         choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
@@ -1368,7 +1426,9 @@ class SharedBottleTests(unittest.TestCase):
         script = self.work / "setup21.sh"
         script.write_text(source + '\nconfigure_bottle "$TARGET"\nf21_check_game\n'
                           'print -r -- "MODE=$MODE OK=$BOTTLE_OK$PS_OK$HOSTS_OK '
-                          'SHARED=${(j:,:)SHARED_WITH}"\n')
+                          'SHARED=${(j:,:)SHARED_WITH}"\n'
+                          'if setup_steps_ok; then print -r -- "VERDICT=done"; '
+                          'else print -r -- "VERDICT=incomplete"; fi\n')
         return subprocess.run(["/bin/zsh", str(script), "--fifa21"],
                               env={**self.env, "AURORA_TARGET": str(app),
                                    "TMPDIR": str(self.work), **env},
@@ -1403,6 +1463,7 @@ class SharedBottleTests(unittest.TestCase):
         out = result.stdout
         self.assertEqual(result.returncode, 0, out + result.stderr)
         self.assertIn("MODE=bottle OK=111 SHARED=FIFA 15", out)
+        self.assertIn("VERDICT=done", out)
         self.assertEqual(self.section_lines(root / "system.reg", self.DNSCACHE), sorted([
             '"DisplayName"="DNS Client"', '"ErrorControl"=dword:00000001',
             r'"ImagePath"=str(2):"C:\\windows\\system32\\spoolsv.exe"',
@@ -1454,6 +1515,31 @@ class SharedBottleTests(unittest.TestCase):
                      "ok    FIFA 21: no Aurora ports to check"):
             self.assertIn(line, named.stdout)
         self.assertEqual(self.snapshot("Aurora15"), before, "--verify changed the bottle")
+
+    def test_fifa21_is_not_done_without_the_dns_client_stand_in(self):
+        # Every other step works; the bottle's system.reg cannot be written.
+        app = self.copy(marker=True)
+        self.shipped(True)
+        self.fifa21_bottle("Aurora15", ("CX_GRAPHICS_BACKEND", "d3dmetal"),
+                           ("WINE_SIMULATE_WRITECOPY", "1"))
+        system = self.bottles / "Aurora15/system.reg"
+        before = system.read_bytes()
+        system.chmod(0o444)
+        self.addCleanup(system.chmod, 0o644)
+        result = self.set_up_fifa21(app, AURORA_BOTTLE="Aurora15")
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn("MODE=bottle OK=111", out)
+        self.assertIn("could not add the DNS Client stand-in to the Aurora15 bottle", out)
+        self.assertIn("run ./setup.sh --fifa21 again", out)
+        self.assertIn("VERDICT=incomplete", out)
+        self.assertEqual(system.read_bytes(), before)
+        # Writable again (and the backup the first run made of it), it is done.
+        for reg in system.parent.glob("system.reg*"):
+            reg.chmod(0o644)
+        result = self.set_up_fifa21(app, AURORA_BOTTLE="Aurora15")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VERDICT=done", result.stdout)
 
     def test_fifa21_leaves_cas_its_device_check(self):
         # In a bottle CAS is set up in, powershell.exe is CAS's stand-in and

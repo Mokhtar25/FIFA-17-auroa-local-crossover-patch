@@ -105,6 +105,11 @@ class RemovalTests(unittest.TestCase):
             self.assertFalse((work / 'agent.plist').exists())
 
 
+def steps_ok_source():
+    """The real verdict, which bottle mode calls after configure_bottle."""
+    return 'setup_steps_ok() {' + section('setup_steps_ok() {', '\n}\n') + '\n}\n'
+
+
 class InstallPathTests(unittest.TestCase):
     def test_fifa15_bottle_setup_takes_an_old_agent_off(self):
         body = section('if [ "$MODE" = bottle ]; then', '\n# Replaces the EA licence file')
@@ -124,7 +129,7 @@ crossovers_running() { :; }; wineserver_pids() { :; }
 take_setup_lock() { :; }; require_bottle_free() { :; }; end_own_wine_session() { :; }
 remove_cleanup_agent() { touch "$BOTTLE_DIR/agent-removed"; }
 '''
-            harness += '\nif [ "$MODE" = bottle ]; then' + body
+            harness += steps_ok_source() + '\nif [ "$MODE" = bottle ]; then' + body
             result = subprocess.run(['/bin/zsh', '-c', harness], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue((work / 'agent-removed').exists(),
@@ -156,7 +161,7 @@ class BottleGuardTests(unittest.TestCase):
             harness += 'take_setup_lock() { :; }; end_own_wine_session() { :; }\n'
             harness += 'remove_cleanup_agent() { return 1; }; f15_check_game() { :; }\n'
             harness += 'configure_bottle() { touch "$BOTTLE_DIR/configured"; BOTTLE_OK=1; PS_OK=1; HOSTS_OK=1; }\n'
-            harness += guard + '\nif [ "$MODE" = bottle ]; then' + body
+            harness += guard + steps_ok_source() + '\nif [ "$MODE" = bottle ]; then' + body
             result = subprocess.run(['/bin/zsh', '-c', harness], capture_output=True, text=True, timeout=10)
             return result, (work / 'configured').exists()
 
