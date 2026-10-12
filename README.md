@@ -1,5 +1,8 @@
 # FIFA 15, FIFA 16 + FIFA 17 on a Mac (Apple silicon)
 
+**Need support?** Join the [Discord](https://discord.gg/DCxSt8herJ).
+The patch is updated regularly — check back for the latest version.
+
 FIFA 17 and its Aurora17 server do not run in stock CrossOver on an Apple
 silicon Mac. This package fixes that.
 
