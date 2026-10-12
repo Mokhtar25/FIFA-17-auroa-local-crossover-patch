@@ -1,0 +1,2 @@
+# git archive writes the commit into VERSION, so a zip names its build.
+VERSION export-subst

@@ -25,7 +25,8 @@
 # drive letter that reaches the folder, it gives the bottle one.)
 #
 #   ./setup.sh [/path/to/CrossOver.app]   install
-#   ./setup.sh --resign                   repair the signature, no re-copy
+#   ./setup.sh --version                  this package's version (VERSION)
+#   ./setup.sh --resign                  repair the signature, no re-copy
 #   ./setup.sh --verify                   check an install, change nothing. Starts
 #                                         with a table of every game (FIFA 13-21)
 #                                         and launcher in the bottle, then FIFA 17
@@ -128,6 +129,24 @@ HERE="${0:A:h}"
 # bottle's shortcuts, where getting it wrong is silent.
 SELF="${0:A}"
 
+# This package's own version: line 1 of VERSION, bumped for every release and
+# tester zip. A zip made with git archive also has the commit it was made
+# from on line 2 (.gitattributes); a git checkout has the placeholder there.
+patch_version() {
+    local v="" id=""
+    { IFS= read -r v; IFS= read -r id; } 2>/dev/null < "$HERE/VERSION" || true
+    [[ "$id" == *'$Format'* ]] && id=""
+    print -r -- "${v:-unknown}${id:+ ($id)}"
+}
+PATCH_VERSION="$(patch_version)"
+# What the last full install or repair recorded, for --verify and --report.
+installed_patch_version() {
+    local v
+    [ -f "$RECEIPT" ] || return 1
+    v="$(sed -n 's/^patch_version=//p' "$RECEIPT" 2>/dev/null | head -1)"
+    print -r -- "${v:-a package from before version numbers}"
+}
+
 E_UNSUPPORTED=2
 E_PERMISSION=3
 E_PAYLOAD=4
@@ -217,6 +236,9 @@ case "${1:-}" in
         esac ;;
     --help|-h)
         sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0 ;;
+    --version)
+        print -r -- "FIFA CrossOver patch $PATCH_VERSION"
         exit 0 ;;
     -*) print -r -- "Unknown option: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
 esac
@@ -3335,6 +3357,8 @@ verify_games_table() {
     say "Every game in the $BOTTLE bottle"
     say ""
     say "  CrossOver copy   $app"
+    say "  patch version    this package $PATCH_VERSION; last install or repair:" \
+        "$(installed_patch_version || print -r -- none recorded)"
     case "$PROFILES:$PROFILES_WHY" in
         1:*)       table_line="yes (its ntdll.so has $PROFILE_MARKER): games can share a bottle" ;;
         0:off)     table_line="turned off in this bottle (\"CX_GAME_PROFILES\" = \"0\")" ;;
@@ -4441,6 +4465,7 @@ verify_install() {
 say ""
 say "FIFA 17 fixes — setup"
 say "====================="
+say "Patch version $PATCH_VERSION"
 
 # Everything a diagnosis needs, in one output, so a broken install on somebody
 # else's Mac is one paste instead of a dozen rounds of "now run this". The rule
@@ -4516,6 +4541,7 @@ report_mode() {
         local rev; rev="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || true)"
         if [ -n "$rev" ] && [ -n "$(git -C "$HERE" status --porcelain -- setup.sh 2>/dev/null)" ]; then rev="$rev-dirty"; fi
         print -r -- "tools     setup.sh of $(date -r "$HERE/setup.sh" '+%Y-%m-%d' 2>/dev/null), ${rev:-not a git checkout}"
+        print -r -- "patch     $PATCH_VERSION; last install or repair: $(installed_patch_version || print -r -- none recorded)"
         print -r -- ""
 
         print -r -- "---- which CrossOver is actually running ----------------"
@@ -7930,6 +7956,7 @@ mkdir -p "$RECEIPT_DIR"
     print -r -- "offline=$NO_AURORA"
     print -r -- "bottle_powershell=$PS_BOTTLE_ACTION"
     print -r -- "version=$VER"
+    print -r -- "patch_version=$PATCH_VERSION"
     print -r -- "installed=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 } > "$RECEIPT"
 

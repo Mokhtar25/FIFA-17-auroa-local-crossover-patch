@@ -2,6 +2,7 @@
 
 **Need support?** Join the [Discord](https://discord.gg/DCxSt8herJ).
 The patch is updated regularly — check back for the latest version.
+This package's version is in the **VERSION** file (`./setup.sh --version`).
 
 FIFA 17 and its Aurora17 server do not run in stock CrossOver on an Apple
 silicon Mac. This package fixes that.
@@ -185,6 +186,10 @@ Note: closing a bottle window does not quit CrossOver. It stays in the menu
 bar. Press **⌘Q** to quit it properly.
 
 ## Something wrong?
+
+Say which version you have. Setup prints it under its title, and
+**Check the install** shows the package's version next to the one that last
+installed or repaired your copy.
 
 For FIFA 17, double-click **Diagnostics.command**. It collects the logs a bug report needs
 into one zip in the **diagnostics** folder and opens that folder for you.

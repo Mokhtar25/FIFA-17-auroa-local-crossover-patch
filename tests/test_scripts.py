@@ -301,6 +301,36 @@ def resolver_source():
             + "".join(function_source(n) for n in RESOLVER_FUNCTIONS))
 
 
+class VersionTests(unittest.TestCase):
+    """Every output a tester sends back names the package that made it."""
+
+    def version_of(self, version_text):
+        with tempfile.TemporaryDirectory(prefix="fifa-version-") as directory:
+            package = Path(directory)
+            shutil.copy2(ROOT / "setup.sh", package / "setup.sh")
+            if version_text is not None:
+                (package / "VERSION").write_text(version_text)
+            result = subprocess.run(["/bin/zsh", str(package / "setup.sh"), "--version"],
+                                    env={"PATH": os.environ["PATH"], "HOME": directory},
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return result.stdout.strip()
+
+    def test_version_file_is_a_number_and_a_git_archive_placeholder(self):
+        lines = (ROOT / "VERSION").read_text().splitlines()
+        self.assertRegex(lines[0], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(lines[1], "$Format:%h$")
+        self.assertIn("VERSION export-subst", (ROOT / ".gitattributes").read_text().splitlines())
+
+    def test_version_names_the_commit_only_when_a_zip_carries_one(self):
+        number = (ROOT / "VERSION").read_text().splitlines()[0]
+        self.assertEqual(self.version_of((ROOT / "VERSION").read_text()),
+                         f"FIFA CrossOver patch {number}")
+        self.assertEqual(self.version_of("2.3.4\nabc1234\n"), "FIFA CrossOver patch 2.3.4 (abc1234)")
+        self.assertEqual(self.version_of("2.3.4"), "FIFA CrossOver patch 2.3.4")
+        self.assertEqual(self.version_of(None), "FIFA CrossOver patch unknown")
+
+
 class FolderChoiceTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="fifa-choices-")
@@ -985,6 +1015,17 @@ class SharedBottleTests(unittest.TestCase):
     def table(stdout):
         return SharedBottleTests.tables(stdout)[0]
 
+    def test_verify_names_the_package_that_last_installed(self):
+        app, _ = self.shared_bottle()
+        receipt = self.work / "receipts/install-receipt.conf"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("mode=copy\nversion=26.3.0\npatch_version=0.9.0 (1234abc)\n")
+        out = self.verify(app).stdout
+        self.assertIn("last install or repair: 0.9.0 (1234abc)", out)
+        receipt.write_text("mode=copy\nversion=26.3.0\n")
+        out = self.verify(app).stdout
+        self.assertIn("last install or repair: a package from before version numbers", out)
+
     def test_plain_verify_prints_every_game_and_launcher_and_changes_nothing(self):
         app, conf = self.shared_bottle()
         before = {p: p.read_bytes() for p in (self.bottles / "Shared").rglob("*") if p.is_file()}
@@ -993,6 +1034,9 @@ class SharedBottleTests(unittest.TestCase):
         out = result.stdout
         self.assertIn("Every game in the Shared bottle", out)
         self.assertIn(f"CrossOver copy   {app.resolve()}", out)
+        number = (ROOT / "VERSION").read_text().splitlines()[0]
+        self.assertIn(f"patch version    this package {number}; last install or repair: none recorded",
+                      out)
         self.assertIn("per-game table   yes", out)
         self.assertIn("CX_PF_PAE        1", out)
         self.assertIn("  game ", out)
