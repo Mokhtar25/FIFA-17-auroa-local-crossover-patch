@@ -1405,15 +1405,12 @@ $APP_MGMT_HINT"
     resign_app "$app"
 }
 
-# Where the game is. Aurora15Connector is pointed at the folder from its own
-# window; this only needs it to say which ItsAMe_Origin.dll is in there.
+# Where the game is (game_dir_candidates: FIFA15_DIR, the player's choice,
+# Aurora.exe's FifaPath, then the usual places). Aurora15Connector is pointed
+# at the folder from its own window; this only needs it to say which
+# ItsAMe_Origin.dll is in there.
 f15_game_dir() {
-    local d
-    for d in "${FIFA15_DIR:-}" "$HOME/Downloads/FIFA 15" "$HOME/Desktop/FIFA 15" "$HOME/Games/FIFA 15" "$HOME/FIFA 15"; do
-        [ -n "$d" ] || continue
-        if [ -f "$d/fifa15.exe" ]; then print -r -- "$d"; return 0; fi
-    done
-    return 1
+    game_dir_of fifa15
 }
 
 # The crack's Origin emulator decides how the game starts, and it comes in
@@ -1422,16 +1419,22 @@ f15_game_dir() {
 # runs on its own, the connector refuses it), and the connector's own. None of
 # them is wrong; this says which one is there so PLAY is not a surprise.
 f15_check_game() {
-    local d off="$HERE/fifa15/fifa15-offline.sh" out rc
+    local d l off="$HERE/fifa15/fifa15-offline.sh" out rc
     say ""
     say "The FIFA 15 game folder"
-    if ! d="$(f15_game_dir)"; then
-        note "no FIFA 15 folder found (looked in ~/Downloads, ~/Desktop, ~/Games, ~)"
-        say "        Nothing to do: the game is never modified. If it is elsewhere and"
-        say "        you want this check:   FIFA15_DIR='/path/to/FIFA 15' ./setup.sh --fifa15"
+    if d="$(game_dir_choice_lost fifa15)"; then
+        note "your choice $d is not reachable (drive not connected?)"
+    fi
+    if ! l="$(game_dir_line fifa15)"; then
+        note "no FIFA 15 folder found (looked at Aurora.exe's record in the $BOTTLE bottle,"
+        say "        ~/Downloads, ~/Desktop, ~/Games, ~/Documents, ~, /Applications and"
+        say "        each drive in /Volumes). Nothing to do: the game is never modified."
+        say "        If it is elsewhere and you want this check:"
+        say "            FIFA15_DIR='/path/to/FIFA 15' ./setup.sh --fifa15"
         return 0
     fi
-    ok "fifa15.exe in $d"
+    d="${l#*$'\t'}"
+    ok "fifa15.exe in $d  ($(game_dir_source_says "$l"))"
     [ -x "$off" ] || { note "fifa15/fifa15-offline.sh is not here, so ItsAMe_Origin.dll was not checked"; return 0; }
     # "if VAR=$(...)": under set -e a failing substitution in a bare assignment
     # ends the script, and "not the CPY file" is exit 3 there, not a failure.
@@ -1462,14 +1465,7 @@ f15_check_game() {
 # proved the fix used Y:\Downloads\FIFA 16). A folder outside ~, or a bottle
 # whose y: has gone, is given a letter of its own.
 f16_game_dir() {
-    local d
-    for d in "${FIFA16_DIR:-}" "$HOME/Downloads/FIFA 16" "$HOME/Desktop/FIFA 16" \
-             "$HOME/Games/FIFA 16" "$HOME/Documents/FIFA 16" "$HOME/FIFA 16" \
-             "/Applications/FIFA 16"; do
-        [ -n "$d" ] || continue
-        if [ -f "$d/fifa16.exe" ]; then print -r -- "${d:A}"; return 0; fi
-    done
-    return 1
+    game_dir_of fifa16
 }
 
 # Says where the game is and how the bottle reaches it. "f16_check_game map"
@@ -1478,20 +1474,25 @@ f16_game_dir() {
 # in F16_EXE_WIN for the closing message.
 F16_EXE_WIN=""
 f16_check_game() {
-    local mode="${1:-check}" d gwin dd="$BOTTLE_DIR/$BOTTLE/dosdevices" letter=""
+    local mode="${1:-check}" d l gwin dd="$BOTTLE_DIR/$BOTTLE/dosdevices" letter=""
     say ""
     say "The FIFA 16 game folder"
     if [ -n "${FIFA16_DIR:-}" ] && [ ! -f "$FIFA16_DIR/fifa16.exe" ]; then
         note "FIFA16_DIR is $FIFA16_DIR, and there is no fifa16.exe in it"
     fi
-    if ! d="$(f16_game_dir)"; then
-        note "no FIFA 16 folder found (looked in ~/Downloads, ~/Desktop, ~/Games,"
-        say "        ~/Documents, ~ and /Applications). The game is never modified, but"
-        say "        the bottle needs a drive letter that reaches it. If it is elsewhere:"
+    if d="$(game_dir_choice_lost fifa16)"; then
+        note "your choice $d is not reachable (drive not connected?)"
+    fi
+    if ! l="$(game_dir_line fifa16)"; then
+        note "no FIFA 16 folder found (looked at Aurora.exe's record in the $BOTTLE bottle,"
+        say "        ~/Downloads, ~/Desktop, ~/Games, ~/Documents, ~, /Applications and"
+        say "        each drive in /Volumes). The game is never modified, but the bottle"
+        say "        needs a drive letter that reaches it. If it is elsewhere:"
         say "            FIFA16_DIR='/path/to/FIFA 16' ./setup.sh --fifa16"
         return 0
     fi
-    ok "fifa16.exe in $d"
+    d="${l#*$'\t'}"
+    ok "fifa16.exe in $d  ($(game_dir_source_says "$l"))"
     if [ ! -d "$dd" ]; then
         note "the $BOTTLE bottle has no dosdevices folder, so no drive letter was checked"
         return 0
@@ -1921,14 +1922,14 @@ f15_crt_native_dir() {
 
 # A FIFA 17 install is the cheapest source of the pair FIFA 15 needs: its game
 # folder ships Microsoft's own msvcr110/msvcp110 as well as the 120 pair FIFA 17
-# itself loads. The same places game_dir_find looks, but asking for the DLLs
-# rather than for the loader -- this runs under GAME=fifa15, where nothing has
-# been told where FIFA 17 is.
+# itself loads. Every FIFA 17 folder game_dir_candidates knows of, a drive in
+# /Volumes and the launchers' records included, but asking for the DLLs rather
+# than for the loader -- this runs under GAME=fifa15, where nothing has been
+# told where FIFA 17 is.
 f15_crt_donor_dir() {
-    local d
-    for d in "${AURORA_GAME_DIR:-}" "$HOME/Downloads/FIFA 17" "$HOME/FIFA 17" "$HOME/Desktop/FIFA 17"; do
-        [ -n "$d" ] || continue
-        crt_dlls_are_microsoft_in "$d" && { print -r -- "$d"; return 0; }
+    local l
+    for l in ${(f)"$(game_dir_candidates fifa17)"}; do
+        crt_dlls_are_microsoft_in "${l#*$'\t'}" && { print -r -- "${l#*$'\t'}"; return 0; }
     done
     return 1
 }
@@ -2733,29 +2734,122 @@ aurora_ini_dir() {
     win_path_to_unix "$w"
 }
 
-# Where a game is: what this script already knows for it, then the folder the
-# Aurora launcher was given, then the usual places. Printed as a Mac path.
-game_dir_of() {
-    local g="$1" exe key d n="${1#fifa}" var
+# ------------------------------------------------- where each game is
+# The folders the player picked in "Choose game folders", one line per game as
+# fifa15.folder=/Volumes/Untitled/FIFA 15. It lives outside the package, so a
+# new zip keeps it, and uninstall.sh removes it with the rest of the folder.
+# Only read here: --choose-folder writes it.
+CHOICES_FILE="$HOME/Library/Application Support/FIFA-CrossOver/choices.conf"
+# Where external drives are mounted. Tests point it at a folder of their own,
+# because a real Mac may well have a FIFA folder on a real drive.
+VOLUMES_DIR="${CX_VOLUMES_DIR:-/Volumes}"
+
+# The folder the player chose for GAME, whether or not it is there today.
+# Read line by line, never sourced: a path is only ever a value.
+game_dir_choice() {
+    local d
+    [ -f "$CHOICES_FILE" ] || return 1
+    d="$(sed -n "s/^$1\.folder=//p" "$CHOICES_FILE" | tr -d '\r' | tail -1)"
+    [ -n "$d" ] || return 1
+    print -r -- "$d"
+}
+
+# The chosen folder when it has no game in it today: an unplugged drive, most
+# likely. The search goes on without it, and --verify says so rather than
+# quietly using another folder in its place.
+game_dir_choice_lost() {
+    local d
+    d="$(game_dir_choice "$1")" || return 1
+    [ -f "$d/$(game_exe_of "$1")" ] && return 1
+    print -r -- "$d"
+}
+
+# Every folder GAME might be played from, one per line as "sources<TAB>Mac
+# path", best first, each with the game's exe in it. The order:
+#   FIFAnn_DIR        said outright for this run, always first (FIFA 17's is
+#                     AURORA_GAME_DIR, as it always was)
+#   chosen            the player's choice in choices.conf
+#   the launchers     what they recorded in this bottle: for FIFA 17 every
+#                     record fifa17_dir_candidates reads (gate log, CAS,
+#                     Impulsum17, Aurora.exe, Aurora17, EA registry); for the
+#                     others the Aurora launcher's ini (Aurora.exe): FifaPath
+#                     for FIFA 15, Fifa13Path, Fifa16Path, Fifa21Path
+#   guess             ~/Downloads, ~/Desktop, ~/Games, ~/Documents, ~,
+#                     /Applications, then each drive in /Volumes, one level
+#                     down (FIFA 15, FIFA-15 or FIFA_15)
+# FIFA 15 and 16 used to look only in the home folders, and those guesses came
+# before the launcher's record: a game kept on an external drive was "not
+# found" by --fifa15, and a stray ~/Downloads/FIFA 15 beat the folder Aurora.exe
+# plays. FIFA 17 had the same fault until fifa17_dir_candidates; this is that
+# order for every game. The same folder named by several sources is one line.
+game_dir_candidates() {
+    local g="$1" n="${1#fifa}" exe var key l s
+    local -A GC_SRC; local -a GC_ORDER
+    GC_SRC=(); GC_ORDER=()
     exe="$(game_exe_of "$g")"
-    case "$g" in
-        fifa15) d="$(f15_game_dir 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
-        fifa16) d="$(f16_game_dir 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
-        fifa17)
-            # The folder the launchers really use (fifa17_dir_candidates).
-            d="$(fifa17_dir_candidates | head -1)"
-            d="${d#*$'\t'}"
-            [ -n "$d" ] && { print -r -- "$d"; return 0; } ;;
-    esac
-    case "$g" in fifa15) key=FifaPath ;; *) key="Fifa${n}Path" ;; esac
-    d="$(aurora_ini_dir "$key" 2>/dev/null)" && [ -f "$d/$exe" ] && { print -r -- "${d:A}"; return 0; }
-    var="FIFA${n}_DIR"
-    for d in "${(P)var:-}" "$HOME/Downloads/FIFA $n" "$HOME/Desktop/FIFA $n" \
-             "$HOME/Games/FIFA $n" "$HOME/FIFA $n"; do
-        [ -n "$d" ] || continue
-        [ -f "$d/$exe" ] && { print -r -- "${d:A}"; return 0; }
+    [ -n "$exe" ] || return 1
+    _game_cand() {
+        local d="$2"
+        [ -n "$d" ] || return 0
+        [ -f "$d/$exe" ] || return 0
+        d="${d:A}"
+        if (( ${+GC_SRC[$d]} )); then
+            [[ ", ${GC_SRC[$d]}, " == *", $1, "* ]] || GC_SRC[$d]="${GC_SRC[$d]}, $1"
+        else
+            GC_SRC[$d]="$1"; GC_ORDER+=( "$d" )
+        fi
+    }
+    if [ "$g" = fifa17 ]; then var=AURORA_GAME_DIR; else var="FIFA${n}_DIR"; fi
+    _game_cand "$var" "${(P)var:-}"
+    _game_cand chosen "$(game_dir_choice "$g" 2>/dev/null || true)"
+    if [ "$g" = fifa17 ]; then
+        # Its own list already ends with the home-folder guesses; the drives
+        # below come after them.
+        for l in ${(f)"$(fifa17_dir_candidates)"}; do
+            for s in "${(@s:, :)l%%$'\t'*}"; do _game_cand "$s" "${l#*$'\t'}"; done
+        done
+    else
+        case "$g" in fifa15) key=FifaPath ;; *) key="Fifa${n}Path" ;; esac
+        _game_cand Aurora.exe "$(aurora_ini_dir "$key" 2>/dev/null || true)"
+    fi
+    for l in "$HOME/Downloads/FIFA $n" "$HOME/Desktop/FIFA $n" "$HOME/Games/FIFA $n" \
+             "$HOME/Documents/FIFA $n" "$HOME/FIFA $n" "/Applications/FIFA $n" \
+             "$VOLUMES_DIR"/*/FIFA(\ |-|_)$n(N/); do
+        _game_cand guess "$l"
     done
-    return 1
+    for l in $GC_ORDER; do print -r -- "${GC_SRC[$l]}	$l"; done
+    return 0
+}
+
+# The folder a game is played from, as "sources<TAB>Mac path": the first of
+# game_dir_candidates.
+game_dir_line() {
+    local l
+    l="$(game_dir_candidates "$1" | head -1)"
+    [ -n "$l" ] || return 1
+    print -r -- "$l"
+}
+
+# Where a game is, as a Mac path.
+game_dir_of() {
+    local l
+    l="$(game_dir_line "$1")" || return 1
+    print -r -- "${l#*$'\t'}"
+}
+
+# How the first source of a game_dir_candidates line reads beside the folder:
+# "Aurora.exe's record", "your choice", "guess", or the variable that named it.
+game_dir_source_says() {
+    local s="${1%%$'\t'*}"
+    s="${s%%,*}"
+    case "$s" in
+        chosen)        print -r -- "your choice" ;;
+        guess)         print -r -- "guess" ;;
+        *_DIR)         print -r -- "$s" ;;
+        "gate log")    print -r -- "where it last started" ;;
+        "EA registry") print -r -- "EA's registry" ;;
+        *)             print -r -- "$s's record" ;;
+    esac
 }
 
 # Where the game's own Wine settings come from in this bottle:
@@ -3018,7 +3112,7 @@ gt_cell() {
 
 verify_games_table() {
     local app="$1" g l pae table_line w
-    local -A GT_DIR GT_SET GT_DLL
+    local -A GT_DIR GT_SRC GT_SET GT_DLL
     local -a row head rows
     say ""
     say "Every game in the $BOTTLE bottle"
@@ -3041,7 +3135,10 @@ verify_games_table() {
     fi
     say ""
     for g in $GT_GAMES; do
-        GT_DIR[$g]="$(game_dir_of "$g" 2>/dev/null || true)"
+        # The folder, and which source named it (game_dir_candidates).
+        l="$(game_dir_line "$g" 2>/dev/null || true)"
+        GT_DIR[$g]="${l#*$'\t'}"
+        GT_SRC[$g]="${l%%$'\t'*}"
         GT_SET[$g]="$(game_settings_source "$g" 2>/dev/null || true)"
         GT_DLL[$g]="$(game_dlls "$g" 2>/dev/null || true)"
     done
@@ -3065,7 +3162,9 @@ verify_games_table() {
     }
     rows=( "game	folder	settings	DLL overrides	offline" )
     for g in $GT_GAMES; do
-        row=( "$(game_label_of "$g")" "${${GT_DIR[$g]:+found}:-missing}" "${GT_SET[$g]:-?}" "${GT_DLL[$g]:-?}" )
+        w="missing"
+        [ -n "${GT_DIR[$g]}" ] && w="found (${GT_SRC[$g]%%,*})"
+        row=( "$(game_label_of "$g")" "$w" "${GT_SET[$g]:-?}" "${GT_DLL[$g]:-?}" )
         w="$(gt_cell "$g" direct 2>/dev/null || print -r -- '?')"
         [ "$w" = unsupported ] && w="-"
         row+=( "$w" )
@@ -3088,8 +3187,16 @@ verify_games_table() {
     done
     gt_print_table $rows
     say ""
+    # Each folder with what named it. A chosen folder that is not there today
+    # is said, with what was used instead, never swapped for a guess unsaid.
     for g in $GT_GAMES; do
-        [ -n "${GT_DIR[$g]}" ] && say "  $(game_label_of "$g"): ${GT_DIR[$g]}"
+        w=""
+        if l="$(game_dir_choice_lost "$g" 2>/dev/null)"; then
+            w="your choice $l is not reachable (drive not connected?); using "
+            [ -n "${GT_DIR[$g]}" ] || { say "  $(game_label_of "$g"): ${w}none"; continue; }
+        fi
+        [ -n "${GT_DIR[$g]}" ] || continue
+        say "  $(game_label_of "$g"): $w${GT_DIR[$g]}  ($(game_dir_source_says "${GT_SRC[$g]}"))"
     done
     say "  settings: table = the copy's own per-game settings; AppDefaults = this"
     say "  bottle's choice for that program; bare env = the bottle's variables."
@@ -3729,7 +3836,7 @@ verify_install() {
             say "        the override above has nothing to prefer and online matches"
             say "        still desync at kick-off. Quit CrossOver fully, then re-run"
             say "        ./setup.sh --fifa15  (with FIFA15_DIR='/path/to/FIFA 15' in"
-            say "        front of it if the game is not in ~/Downloads)"
+            say "        front of it if its game folder is not found below)"
             problems=$((problems+1))
         fi
     fi

@@ -132,6 +132,11 @@ class OfflineTests(unittest.TestCase):
         harness = 'set -eu\nHERE=' + shlex.quote(str(self.work)) + '\n'
         harness += 'FIFA15_DIR=' + shlex.quote(str(self.game)) + '\n'
         harness += 'say() { print -r -- "$*"; }; ok() { say "$@"; }; note() { say "$@"; }\n'
+        # Where the game is comes from setup.sh's folder resolver, tested in
+        # test_scripts; here it is FIFA15_DIR and nothing else.
+        harness += 'BOTTLE=Aurora15\ngame_dir_choice_lost() { return 1; }\n'
+        harness += 'game_dir_line() { print -r -- "FIFA15_DIR\t$FIFA15_DIR"; }\n'
+        harness += 'game_dir_source_says() { print -r -- FIFA15_DIR; }\n'
         harness += 'f15_game_dir() {' + functions + '\nf15_check_game\n'
         result = subprocess.run(['/bin/zsh', '-c', harness], env=self.env,
                                 capture_output=True, text=True, timeout=10)

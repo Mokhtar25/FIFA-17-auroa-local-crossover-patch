@@ -123,11 +123,21 @@ game has no row for it. Each state is `ready`, `missing` and the first thing
 it lacks, or `not installed`. It changes nothing, and it pastes as it is into
 a bug report.
 
+The folder column says what found each game's folder: the variable you set
+for this run (`FIFA15_DIR`, `FIFA16_DIR`, `FIFA21_DIR`, or `AURORA_GAME_DIR`
+for FIFA 17), the launcher whose own record names it (`Aurora.exe` for its
+ini, `CAS`, `Impulsum17`, or `gate log` for where FIFA 17 last started), or
+`guess`: one of `~/Downloads`, `~/Desktop`, `~/Games`, `~/Documents`, your
+home folder, `/Applications`, and each drive in `/Volumes` (`FIFA 15`,
+`FIFA-15` or `FIFA_15` at its top). A launcher's record beats a guess, so a
+stray copy in `~/Downloads` does not hide the folder the launcher plays. Below
+the tables each folder is printed in full with the same source.
+
 ```
-  game     folder  settings  DLL overrides              offline
-  ─────────────────────────────────────────────────────────────
-  FIFA 17  found   table     version msvcr120 msvcp120  ready
-  FIFA 21  found   table     ucrtbase                   -
+  game     folder              settings  DLL overrides              offline
+  ─────────────────────────────────────────────────────────────────────────
+  FIFA 17  found (gate log)    table     version msvcr120 msvcp120  ready
+  FIFA 21  found (Aurora.exe)  table     ucrtbase                   -
 
   launcher    game     state
   ───────────────────────────────
@@ -1422,8 +1432,9 @@ FIFA 17 is not affected.
 It makes the copy if needed, adds `gdiplus.dll`, makes the `Aurora15` bottle
 (CrossOver must be closed), sets the bottle settings including the `dinput8`
 override that Aurora15Connector needs, and reports which `ItsAMe_Origin.dll`
-your game folder has. Game folder: `~/Downloads/FIFA 15` by default, or
-`FIFA15_DIR=/path ./setup.sh --fifa15`.
+your game folder has. Game folder: the one the Aurora launcher was given (its
+`FifaPath`), else `~/Downloads/FIFA 15` and the other usual places, a drive in
+`/Volumes` included; for anywhere else, `FIFA15_DIR=/path ./setup.sh --fifa15`.
 
 Two ways to play:
 
@@ -1506,10 +1517,11 @@ launcher program and no online play here, and none of the three was in the
 bottle the fix was proven in. The PlayStation controller fix (`DisableHidraw`)
 is set, as for the other two games.
 
-Last, it finds the game folder and makes sure the bottle can reach it. It looks
-in `~/Downloads/FIFA 16`, then `~/Desktop`, `~/Games`, `~/Documents`, your home
-folder and `/Applications`; for anywhere else, `FIFA16_DIR=/path ./setup.sh
---fifa16`. A new bottle has drive `Y:` on your home folder, so a game under it
+Last, it finds the game folder and makes sure the bottle can reach it. It takes
+the folder the Aurora launcher was given in that bottle (its `Fifa16Path`),
+else it looks in `~/Downloads/FIFA 16`, then `~/Desktop`, `~/Games`,
+`~/Documents`, your home folder, `/Applications` and each drive in `/Volumes`;
+for anywhere else, `FIFA16_DIR=/path ./setup.sh --fifa16`. A new bottle has drive `Y:` on your home folder, so a game under it
 is reachable already (`Y:\Downloads\FIFA 16`). Anywhere else, the bottle is
 given a drive letter of its own for the folder.
 

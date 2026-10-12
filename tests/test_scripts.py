@@ -262,6 +262,24 @@ def function_source(name):
     return name + "() {" + body + "\n}\n"
 
 
+# What game_dir_candidates needs out of setup.sh, for a harness that runs it
+# against a fake bottle. The path mapping is the folder gate's own.
+RESOLVER_FUNCTIONS = ["game_exe_of", "reg_value", "bottle_appdata", "aurora_launcher_dir",
+                      "aurora_ini_dir", "connector_game_dir", "win_path_to_unix",
+                      "fifa17_dir_candidates", "game_dir_choice", "game_dir_choice_lost",
+                      "game_dir_candidates", "game_dir_line", "game_dir_of",
+                      "game_dir_source_says"]
+
+
+def resolver_source():
+    source = (ROOT / "setup.sh").read_text()
+    lines = [line for line in source.splitlines()
+             if line.startswith(("IMPULSUM_UNINSTALL_KEY=", "CHOICES_FILE=", "VOLUMES_DIR=",
+                                 "bottle_user_reg()", "bottle_system_reg()"))]
+    return ("\n".join(lines) + "\nsource " + shlex_quote(str(GATE_SCRIPT)) + "\n"
+            + "".join(function_source(n) for n in RESOLVER_FUNCTIONS))
+
+
 class SharedBottleTests(unittest.TestCase):
     """One bottle, every game. With a CrossOver-FIFA whose ntdll.so has the
     per-game profile table (marker: CX_GAME_PROFILES), a game is added to
@@ -281,8 +299,11 @@ class SharedBottleTests(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(("AURORA_", "FIFA1", "FIFA2", "CX_", "WEBVIEW2_",
                                          "REBORN_"))}
+        # The drives are the test's own: this Mac may have FIFA folders on a
+        # real one, and game_dir_candidates looks there.
         self.env.update(CX_BOTTLE_PATH=str(self.bottles), HOME=str(self.work),
-                        AURORA_RECEIPT_DIR=str(self.work / "receipts"), NO_COLOR="1")
+                        AURORA_RECEIPT_DIR=str(self.work / "receipts"), NO_COLOR="1",
+                        CX_VOLUMES_DIR=str(self.work / "Volumes"))
         # The read-only start of setup.sh, up to where anything could change,
         # run from the temporary directory so its fixes/ is the test's own.
         source = (ROOT / "setup.sh").read_text().split(
@@ -537,9 +558,9 @@ class SharedBottleTests(unittest.TestCase):
         rows, launchers = self.tables(out)
         self.assertEqual(sorted(rows), ["FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
         # game | folder | settings | DLL overrides | offline
-        self.assertEqual(rows["FIFA 21"][1:4], ["found", "table", "ucrtbase"])
+        self.assertEqual(rows["FIFA 21"][1:4], ["found (Aurora.exe)", "table", "ucrtbase"])
         self.assertEqual(rows["FIFA 16"][1:4],
-                         ["found", "AppDefaults (Profile=fifa16, DrTrap=3)", "none needed"])
+                         ["found (guess)", "AppDefaults (Profile=fifa16, DrTrap=3)", "none needed"])
         self.assertEqual(rows["FIFA 15"][1], "missing")
         self.assertEqual(rows["FIFA 13"][2], "bare env")
         # No offline start for FIFA 13 and 21; FIFA 16 run by hand: found,
@@ -696,6 +717,125 @@ class SharedBottleTests(unittest.TestCase):
         self.assertEqual(rows["FIFA 17"][3], "missing msvcr120 msvcp120")
         body = function_source("gt_cell")
         self.assertIn('aurora|impulsum) dll_native_global version || { print -r -- "missing version override"', body)
+
+    # ---------------------------------------------------- where each game is
+
+    def game_folder(self, path, exe="fifa15.exe"):
+        folder = self.work / path
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / exe).write_bytes(b"MZ")
+        return folder
+
+    def choose(self, game, folder):
+        """The player's choice, as choices.conf holds it."""
+        choices = self.work / "Library/Application Support/FIFA-CrossOver/choices.conf"
+        choices.parent.mkdir(parents=True, exist_ok=True)
+        choices.write_text("# Your choices for the FIFA CrossOver fixes. Delete a line to forget it.\n"
+                           f"{game}.folder={folder}\n")
+        return choices
+
+    def aurora_bottle(self, name, ini):
+        """A bottle with the Aurora launcher in it, its ini as given, and z: on
+        the temporary folder, so Z:\\Volumes\\Untitled is the fake drive."""
+        self.bottle(name, ("CX_GRAPHICS_BACKEND", "d3dmetal"), ("CX_DR_TRAP", "2"),
+                    ("WINE_SIMULATE_WRITECOPY", "1"))
+        root = self.bottles / name
+        aurora = root / "drive_c/users/crossover/AppData/Local/Aurora15Connector"
+        aurora.mkdir(parents=True)
+        (aurora / "Aurora15Connector.exe").write_bytes(b"MZ")
+        (aurora / "Aurora15Connector.ini").write_text(ini)
+        (root / "dosdevices").mkdir()
+        (root / "dosdevices/z:").symlink_to(self.work.resolve(), target_is_directory=True)
+        return aurora / "Aurora15Connector.ini"
+
+    def candidates(self, game, bottle, **env):
+        script = ("set -eu\nBOTTLE_DIR=" + shlex_quote(str(self.bottles)) + f"\nBOTTLE={bottle}\n"
+                  + resolver_source() + f"game_dir_candidates {game}\n")
+        result = subprocess.run(["/bin/zsh", "-f", "-c", script], env={**self.env, **env},
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return [tuple(line.split("\t")) for line in result.stdout.splitlines()]
+
+    def test_a_folder_is_what_was_said_then_chosen_then_recorded_then_guessed(self):
+        app = self.copy(marker=True)
+        on_drive = self.game_folder("Volumes/Untitled/FIFA 15")
+        stray = self.game_folder("Downloads/FIFA 15")
+        chosen = self.game_folder("Chosen/FIFA 15")
+        given = self.game_folder("Given/FIFA 15")
+        self.aurora_bottle("Aurora17", "FifaPath=Z:\\Volumes\\Untitled\\FIFA 15\r\n"
+                                       "Fifa17Path=Z:\\Volumes\\Untitled\\FIFA 17\r\n")
+        choices = self.choose("fifa15", chosen)
+        r = lambda p: str(p.resolve())
+        self.assertEqual(self.candidates("fifa15", "Aurora17", FIFA15_DIR=str(given)), [
+            ("FIFA15_DIR", r(given)), ("chosen", r(chosen)),
+            # The drive is a guess too; one folder is one line.
+            ("Aurora.exe, guess", r(on_drive)), ("guess", r(stray))])
+        # The folder Aurora.exe plays beats a stray copy in ~/Downloads, and
+        # --verify says where it came from.
+        choices.unlink()
+        result = self.verify(app, AURORA_BOTTLE="Aurora17")
+        self.assertEqual(self.table(result.stdout)["FIFA 15"][1], "found (Aurora.exe)")
+        self.assertIn(f"  FIFA 15: {r(on_drive)}  (Aurora.exe's record)", result.stdout)
+        self.choose("fifa15", chosen)
+        result = self.verify(app, AURORA_BOTTLE="Aurora17")
+        self.assertEqual(self.table(result.stdout)["FIFA 15"][1], "found (chosen)")
+        self.assertIn(f"  FIFA 15: {r(chosen)}  (your choice)", result.stdout)
+        # FIFA 17 keeps its own order of records, after AURORA_GAME_DIR and
+        # the player's choice.
+        fifa17 = self.game_folder("Volumes/Untitled/FIFA 17", "FIFA17.exe")
+        own = self.game_folder("Chosen/FIFA 17", "FIFA17.exe")
+        self.choose("fifa17", own)
+        self.assertEqual(self.candidates("fifa17", "Aurora17"), [
+            ("chosen", r(own)), ("Aurora.exe, guess", r(fifa17))])
+        self.assertEqual(self.candidates("fifa17", "Aurora17", AURORA_GAME_DIR=str(fifa17)), [
+            ("AURORA_GAME_DIR, Aurora.exe, guess", r(fifa17)), ("chosen", r(own))])
+
+    def test_fifa15_in_aurora_exes_bottle_is_found_where_aurora_exe_recorded_it(self):
+        # The tester's case: AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15 --verify
+        # said "no FIFA 15 folder found" and that every C runtime FIFA 15 can
+        # reach is Wine's own, for a game on an external drive that only
+        # Aurora.exe's ini names and that has Microsoft's pair beside it.
+        app = self.copy(marker=True)
+        game = self.game_folder("Volumes/Untitled/FIFA 15")
+        for dll in ("msvcr110", "msvcp110"):
+            (game / f"{dll}.dll").write_bytes(CrtOverrideTests.MICROSOFT)
+        self.aurora_bottle("Aurora17", "FifaPath=Z:\\Volumes\\Untitled\\FIFA 15\r\n")
+        self.game_folder("Downloads/FIFA 15")   # a stray copy with no pair in it
+        result = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--fifa15", "--verify"],
+                                env={**self.env, "AURORA_BOTTLE": "Aurora17",
+                                     "AURORA_TARGET": str(app),
+                                     # Only the ini can find it, not a drive guess.
+                                     "CX_VOLUMES_DIR": str(self.work / "no-drives")},
+                                capture_output=True, text=True, timeout=120)
+        out = result.stdout
+        self.assertNotIn("no FIFA 15 folder found", out)
+        self.assertIn(f"fifa15.exe in {game.resolve()}  (Aurora.exe's record)", out)
+        self.assertIn(f"msvcr110 + msvcp110 — Microsoft's own, in {game.resolve()}", out)
+        self.assertNotIn("every copy of the C runtime FIFA 15 can reach is Wine's own", out)
+
+    def test_a_chosen_folder_that_is_not_there_is_said_and_not_quietly_replaced(self):
+        app = self.copy(marker=True)
+        on_drive = self.game_folder("Volumes/Untitled/FIFA 15")
+        ini = self.aurora_bottle("Aurora17", "FifaPath=Z:\\Volumes\\Untitled\\FIFA 15\r\n")
+        lost = self.work / "Volumes/X/FIFA 15"
+        self.choose("fifa15", lost)
+        says = f"your choice {lost} is not reachable (drive not connected?); using "
+        result = self.verify(app, AURORA_BOTTLE="Aurora17")
+        self.assertEqual(self.table(result.stdout)["FIFA 15"][1], "found (Aurora.exe)")
+        self.assertIn(f"  FIFA 15: {says}{on_drive.resolve()}  (Aurora.exe's record)",
+                      result.stdout)
+        # With nothing else to go by the game is missing, and the line says why.
+        ini.write_text("FifaPath=\r\n")
+        nothing = {"AURORA_BOTTLE": "Aurora17", "CX_VOLUMES_DIR": str(self.work / "no-drives")}
+        result = self.verify(app, **nothing)
+        self.assertEqual(self.table(result.stdout)["FIFA 15"][1], "missing")
+        self.assertIn(f"  FIFA 15: {says}none", result.stdout)
+        result = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--fifa15", "--verify"],
+                                env={**self.env, "AURORA_TARGET": str(app), **nothing},
+                                capture_output=True, text=True, timeout=120)
+        self.assertIn(f"note  your choice {lost} is not reachable (drive not connected?)",
+                      result.stdout)
+        self.assertIn("no FIFA 15 folder found", result.stdout)
 
 
 class RepairTests(unittest.TestCase):
@@ -1013,8 +1153,9 @@ class CrtOverrideTests(unittest.TestCase):
                 + self.function("f15_game_dir")
                 + self.function("f15_crt_native_dir")
                 + self.function("f15_crt_donor_dir")
-                # unix_path_to_win is the folder gate's mapping (one copy).
-                + "source " + shlex_quote(str(ROOT / "fixes/x86_64-unix/cx-fifa17-gate")) + "\n"
+                # Where each game is, with the folder gate's path mapping
+                # (unix_path_to_win's too: one copy).
+                + resolver_source()
                 + self.function("unix_path_to_win")
                 + self.function("f15_ensure_crt_dlls"))
 
@@ -1043,7 +1184,7 @@ class CrtOverrideTests(unittest.TestCase):
         a test must never find (or write into) the real game folders."""
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("AURORA_", "FIFA15_", "FIFA17_", "CX_"))}
-        env.update(HOME=str(work), **extra)
+        env.update(HOME=str(work), CX_VOLUMES_DIR=str(work / "Volumes"), **extra)
         return env
 
     def plant_pair(self, directory, game, content):
@@ -1222,7 +1363,9 @@ class CrtOverrideTests(unittest.TestCase):
         bottles = work / "bottles"
         (bottles / "Aurora15" / "drive_c" / "windows" / "system32").mkdir(parents=True)
         (bottles / "Aurora15" / "dosdevices").mkdir(parents=True)
-        (bottles / "Aurora15" / "dosdevices" / "y:").symlink_to(work, target_is_directory=True)
+        # Resolved, as CrossOver writes it: the temporary folder is under
+        # /var, which is /private/var, and a game folder is resolved too.
+        (bottles / "Aurora15" / "dosdevices" / "y:").symlink_to(work.resolve(), target_is_directory=True)
         return bottles
 
     def test_it_copies_the_pair_out_of_a_fifa_17_folder(self):
@@ -1234,6 +1377,7 @@ class CrtOverrideTests(unittest.TestCase):
             (game / "fifa15.exe").write_bytes(b"MZ")
             donor = work / "Downloads" / "FIFA 17"
             self.plant_pair(donor, "fifa15", self.MICROSOFT)
+            (donor / "FIFA17.exe").write_bytes(b"MZ")
             script = self.files_harness("fifa15", work / "bottles") + self.STUBS \
                 + 'f15_ensure_crt_dlls ' + shlex_quote(str(work / "app")) + '\n'
             env = self.game_env(work, FIFA15_DIR=str(game))
@@ -1248,6 +1392,33 @@ class CrtOverrideTests(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertIn("already beside fifa15.exe", again.stdout)
             self.assertEqual((game / "fifa15.exe").read_bytes(), b"MZ")
+
+    def test_a_fifa_17_on_an_external_drive_is_a_donor_too(self):
+        # Only the home folders used to be asked, so a FIFA 17 on a drive was
+        # never found and the redistributable ran in the bottle instead.
+        with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
+            work = Path(directory)
+            self.bottle_tree(work)
+            game = work / "FIFA 15"
+            (game / "_Redist").mkdir(parents=True)
+            (game / "fifa15.exe").write_bytes(b"MZ")
+            (game / "_Redist" / "vcredist_x64_2012_x64.exe").write_bytes(b"MZ")
+            donor = work / "Volumes" / "Untitled" / "FIFA 17"
+            self.plant_pair(donor, "fifa15", self.MICROSOFT)
+            (donor / "FIFA17.exe").write_bytes(b"MZ")
+            wine = work / "app" / "Contents" / "SharedSupport" / "CrossOver" / "bin" / "wine"
+            wine.parent.mkdir(parents=True)
+            wine.write_text("#!/bin/zsh\nprint -r -- \"$@\" >> " + shlex_quote(str(work / "wine.log")) + "\n")
+            wine.chmod(0o755)
+            script = self.files_harness("fifa15", work / "bottles") + self.STUBS \
+                + 'f15_ensure_crt_dlls ' + shlex_quote(str(work / "app")) + '\n'
+            result = self.run_zsh(script, env=self.game_env(work, FIFA15_DIR=str(game)))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("copied Microsoft's own beside fifa15.exe", result.stdout)
+            self.assertIn(f"from {donor.resolve()}", result.stdout)
+            for dll in ("msvcr110.dll", "msvcp110.dll"):
+                self.assertEqual((game / dll).read_bytes(), self.MICROSOFT)
+            self.assertFalse((work / "wine.log").exists(), "the redistributable was run")
 
     def test_it_falls_back_to_the_games_own_redistributable(self):
         with tempfile.TemporaryDirectory(prefix="fifa-crt-") as directory:
@@ -1351,7 +1522,8 @@ class CrtOverrideTests(unittest.TestCase):
             # Beside the game wins: that is where the loader looks first.
             self.plant_pair(game, "fifa15", self.MICROSOFT)
             beside = self.run_zsh(script, env=env)
-            self.assertIn(f"OK msvcr110 + msvcp110 — Microsoft's own, in {game}", beside.stdout)
+            self.assertIn(f"OK msvcr110 + msvcp110 — Microsoft's own, in {game.resolve()}",
+                          beside.stdout)
             self.assertIn("problems=0", beside.stdout)
 
         # FIFA 17 skips this check entirely: its game folder ships the pair.
@@ -2249,6 +2421,7 @@ class FolderGateTests(unittest.TestCase):
                if not k.startswith(("AURORA_", "FIFA1", "FIFA2", "CX_", "WEBVIEW2_", "REBORN_"))}
         env.update(self.env(), CX_BOTTLE_PATH=str(self.prefix.parent), HOME=str(self.work),
                    AURORA_RECEIPT_DIR=str(self.work / "receipts"), NO_COLOR="1",
+                   CX_VOLUMES_DIR=str(self.work / "Volumes"),
                    AURORA_BOTTLE="Aurora17", AURORA_TARGET=str(app), **extra)
         return subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), mode], env=env,
                               capture_output=True, text=True, timeout=120)
@@ -2284,8 +2457,8 @@ class FolderGateTests(unittest.TestCase):
         # The launcher table's Impulsum17 row says what its PLAY would stop at.
         rows, launchers = SharedBottleTests.tables(result.stdout)
         self.assertEqual(launchers[("Impulsum17", "FIFA 17")], "missing Impulsum DLL")
-        self.assertEqual(rows["FIFA 17"][1], "found")
-        self.assertIn(f"  FIFA 17: {self.game}", result.stdout)
+        self.assertEqual(rows["FIFA 17"][1], "found (gate log)")
+        self.assertIn(f"  FIFA 17: {self.game}  (where it last started)", result.stdout)
 
     def test_verify_calls_the_gate_off_bad_with_several_launchers(self):
         app, _ = self.shared_bottle()
