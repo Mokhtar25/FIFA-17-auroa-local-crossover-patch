@@ -467,6 +467,23 @@ sys.exit(0)
     def setup_calls(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
 
+    def test_native_game_selection_handles_a_pick_and_cancel(self):
+        # Execute the real AppleScript through its assignment and return path.
+        # Replace only the interactive command, so no GUI interaction is needed.
+        helper = (ROOT / "lib/ui.zsh").read_text().split("ui_pick_game() {", 1)[1]
+        script = re.search(r"<<'EOS'\n(.*?)\nEOS", helper, re.S).group(1)
+        for selection, expected in [('{"FIFA 17"}', "FIFA 17"), ('false', '')]:
+            with self.subTest(selection=selection):
+                runtime_script, replaced = re.subn(
+                    r'(set \w+ to) choose from list[^\n]+',
+                    lambda match: match.group(1) + ' ' + selection, script)
+                self.assertEqual(replaced, 1)
+                result = subprocess.run(
+                    ["/usr/bin/osascript", "-", "Choose game folders", "1"],
+                    input=runtime_script, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
     def test_disabled_dialogs_and_ssh_never_call_osascript(self):
         command = ('source ' + shlex_quote(str(ROOT / "lib/ui.zsh"))
                    + '; ui_ask Title Text Yes No no; ask=$?; '

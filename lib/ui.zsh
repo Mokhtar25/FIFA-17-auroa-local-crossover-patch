@@ -57,9 +57,9 @@ ui_pick_game() {
 on run argv
     set games to {"FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"}
     if item 2 of argv is "1" then set end of games to "Forget a choice…"
-    set selection to choose from list games with title (item 1 of argv) with prompt "Choose a game" without multiple selections allowed
-    if selection is false then return ""
-    return item 1 of selection
+    set pickedGames to choose from list games with title (item 1 of argv) with prompt "Choose a game" without multiple selections allowed
+    if pickedGames is false then return ""
+    return item 1 of pickedGames
 end run
 EOS
 )" || return 1
