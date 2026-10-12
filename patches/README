@@ -1,9 +1,9 @@
-Thirteen build patches against pristine crossover-sources-26.3.0.tar.gz, published by
+Fourteen build patches against pristine crossover-sources-26.3.0.tar.gz, published by
 CodeWeavers. They are modifications to Wine and are LGPL-2.1-or-later; the full
 text is in ../fixes/LICENSE.LGPL, and ../NOTICE.md says what belongs to whom.
 
 build.sh APPLIES FOUR FIFA 17 ONES, TWO FOR FIFA 15, THE TWO LAUNCHER ONES,
-FOUR FOR FIFA 16, THEN THE GAME PROFILES
+FOUR FOR FIFA 16, THE GAME PROFILES, THEN THE FOLDER GATE
 
 The fifth, crossover-26.3-topdown-alloc-limit.patch, is FIFA 15's start-up fix.
 It changes nothing unless the bottle sets CX_TOPDOWN_LIMIT, and only the FIFA 15
@@ -76,8 +76,19 @@ and CX_FIFA16_DSTFIX for that process, so one launcher bottle can start every
 FIFA with its own; AppDefaults\<exe>\CrossOver-FIFA in the registry overrides
 or aliases it. Processes it does not name keep the bottle's variables, and
 CX_GAME_PROFILES=0 switches it off. It rewires the readers the patches above
-added, so it applies last. README-game-profiles.md has the rules and the
-tests (../tests/profiles).
+added, so it applies after them. README-game-profiles.md has the rules and
+the tests (../tests/profiles).
+
+The fourteenth, crossover-26.3-fifa17-folder-gate.patch, is for the launchers
+that share one FIFA 17 folder (Aurora.exe, CAS, Impulsum17). Before
+FIFA17.exe or Impulsum17Launcher.exe runs any code of its own, the unix ntdll
+runs the zsh script cx-fifa17-gate beside ntdll.so with the exe, its image
+path, its parent's image name and the names (never the values) of its
+environment, and waits for it; exit 10 ends the process with 0xC0F17A7E,
+anything else lets it run. Every other exe pays one name compare.
+CX_FIFA_GATE=0 switches it off. It hooks in right after the game profiles'
+call, so it applies last. README-folder-gate.md has the interface and the
+tests (../tests/gate).
 
 APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
 
@@ -94,7 +105,8 @@ APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
    11. crossover-26.3-fifa16-dst-complement.patch  (ntdll/unix/signal_x86_64.c)
    12. crossover-26.3-drtrap-syscall-stub.patch  (ntdll/unix/signal_x86_64.c,
                                                   win32u/message.c)
-   13. crossover-26.3-game-profiles.patch        (ntdll/unix; last)
+   13. crossover-26.3-game-profiles.patch        (ntdll/unix)
+   14. crossover-26.3-fifa17-folder-gate.patch   (ntdll/unix/loader.c; last)
 
 cng must go last of the four: it builds on online, and both touch dlls/crypt32/pfx.c.
 Applying them in directory order -- the obvious thing to do with a folder of
@@ -145,6 +157,11 @@ WHAT EACH ONE COVERS
                           CX_FIFA16_DSTFIX, CX_PF_PAE=1, CX_GAME_PROFILES=0;
                           ntdll/unix (loader.c, signal_x86_64.c, virtual.c,
                           system.c, unix_private.h); README-game-profiles.md
+    fifa17-folder-gate
+              FIFA 17     runs cx-fifa17-gate before FIFA17.exe and
+                          Impulsum17Launcher.exe start; exit 10 refuses
+                          (0xC0F17A7E), CX_FIFA_GATE=0, CX_FIFA_GATE_TIMEOUT;
+                          ntdll/unix/loader.c; README-folder-gate.md
 
 Each patch carries its own header explaining what it changes and why, including
 the reasoning and the measurements behind it. Read the top of the file before

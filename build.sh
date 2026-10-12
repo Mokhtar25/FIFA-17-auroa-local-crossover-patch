@@ -134,6 +134,14 @@ PATCHES=(
 # it goes after all of them. See patches/README-game-profiles.md.
 [ -f "$HERE/patches/crossover-26.3-game-profiles.patch" ] \
     && PATCHES+=( crossover-26.3-game-profiles.patch )
+# After it, the FIFA 17 folder gate: before FIFA17.exe or
+# Impulsum17Launcher.exe runs any code, ntdll runs the cx-fifa17-gate script
+# beside ntdll.so, which puts the game folder in the state of the launcher
+# that started it. It hooks in right after the game profiles' call in
+# start_main_thread, so it goes after that patch. See
+# patches/README-folder-gate.md.
+[ -f "$HERE/patches/crossover-26.3-fifa17-folder-gate.patch" ] \
+    && PATCHES+=( crossover-26.3-fifa17-folder-gate.patch )
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(
@@ -576,7 +584,11 @@ say ""
 #
 # * The fixes/x86_64-unix/ntdll.so and win32u.so that ship were built by this
 #   script on 2026-09-30 from a pristine crossover-sources-26.3.0 tarball, all
-#   twelve patches applied in order. The other files in fixes/ are older
+#   twelve patches applied in order. ntdll.so has been rebuilt since, in that
+#   same tree with this script's compiler and SDK settings: on 2026-10-11 with
+#   the game profiles, and on 2026-10-12 with the folder gate on top (the
+#   fourteen patches applied in order to a pristine tree give the same
+#   loader.c). The other files in fixes/ are older
 #   builds and were not replaced. Rerunning on a tree that already carries
 #   the patches fails at the rosetta patch: once the emulation patch has
 #   edited its lines, the "already applied" test cannot recognise it. Start

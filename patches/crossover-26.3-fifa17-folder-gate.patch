@@ -1,0 +1,372 @@
+FIFA 17 folder gate: run cx-fifa17-gate before FIFA17.exe or
+Impulsum17Launcher.exe runs any code of its own.
+
+Aurora.exe, CAS and Impulsum17 each change files in the one FIFA 17 folder
+and leave it in a state the others cannot run from. All of them start
+FIFA17.exe with CreateProcess inside Wine, so process start is the one moment
+every path shares. cx_folder_gate (unix/loader.c) runs once, in
+start_main_thread right after cx_profile_init: the image path, the process
+parameters (environment included) and the server connection exist, and no
+guest code or DLL has loaded.
+
+For any other exe it returns after one case-insensitive name compare.
+CX_FIFA_GATE=0 turns it off. Otherwise it posix_spawns
+
+  /bin/zsh -f <dir of ntdll.so>/cx-fifa17-gate --exe <exe> --image <Windows
+  image path> --parent <parent image basename or -> --envnames <names of the
+  Windows environment block, comma-separated, no values> --prefix
+  <config_dir> --winpid <pid>
+
+with POSIX_SPAWN_CLOEXEC_DEFAULT (no descriptor of Wine's, the wineserver
+socket above all, reaches it), stdio on /dev/null, cwd /, its own process
+group, default signal actions, and an environment of PATH, HOME, LANG and
+CX_FIFA_GATE_FROM_WINE=1 only. The parent image comes from
+InheritedFromUniqueProcessId, NtOpenProcess and ProcessImageFileNameWin32.
+It polls waitpid every 20 ms for up to CX_FIFA_GATE_TIMEOUT seconds
+(default 60), then SIGTERMs the script's process group and goes on.
+
+Exit status 10 ends the process with 0xC0F17A7E before its first
+instruction; the launcher's CreateProcess fails with that status. Anything
+else -- another status, a signal, no script, a failed spawn, a timeout --
+goes on as before (fail open). WINEDEBUG=+cxgate logs one CXGATE line per
+gated process, plus a warning for a missing script, a failed spawn or a
+timeout. The string CX_FOLDER_GATE_V1 marks a gated ntdll.so for setup.sh.
+
+Applies after crossover-26.3-game-profiles.patch (dlls/ntdll/unix only).
+See patches/README-folder-gate.md.
+
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -98,6 +98,7 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(module);
+ WINE_DECLARE_DEBUG_CHANNEL(syscall);
+ WINE_DECLARE_DEBUG_CHANNEL(cxprofile);
++WINE_DECLARE_DEBUG_CHANNEL(cxgate);
+ 
+ #if defined __i386__ || defined __x86_64__
+ #define SO_DLLS_SUPPORTED
+@@ -2549,9 +2550,316 @@
+ 
+     if (val && val[0] == '1') return TRUE;
+     return cx_env_get()->dr_trap == 3;
++}
++
++/***********************************************************************
++ *           CrossOver-FIFA folder gate  (CX_FIFA_GATE)
++ *
++ * Several community launchers (Aurora.exe, CAS, Impulsum17) change files in
++ * the one FIFA 17 folder, and each leaves it in a state the others cannot
++ * run from.  Every one of them starts FIFA17.exe itself with CreateProcess,
++ * inside Wine, so this is the one moment all of them share.  Before any
++ * guest code of FIFA17.exe or Impulsum17Launcher.exe runs, ntdll runs the
++ * script cx-fifa17-gate (beside ntdll.so), which works out which launcher
++ * started the game and puts the folder in that launcher's state.  The policy
++ * lives in the script; this part only hands it the facts and waits:
++ *
++ *   /bin/zsh <script> --exe <exe> --image <Windows image path>
++ *            --parent <parent image basename, or -> --envnames <NAME,NAME,...>
++ *            --prefix <WINEPREFIX> --winpid <pid>
++ *
++ * The script sees the names of the Windows environment, never a value, and
++ * none of this process's file descriptors (the wineserver socket included).
++ * Exit 10 means "this launch would be wrong and cannot be fixed": the process
++ * ends with CX_FOLDER_GATE_REFUSED before its first instruction.  Anything
++ * else -- another status, a signal, no script, a failed spawn, a timeout
++ * (CX_FIFA_GATE_TIMEOUT seconds, default 60) -- goes on as if there were no
++ * gate.  CX_FIFA_GATE=0 turns it off.  WINEDEBUG=+cxgate logs one CXGATE
++ * line per gated process.
++ */
++
++#define CX_FOLDER_GATE_REFUSED 0xC0F17A7E
++#define CX_FOLDER_GATE_REFUSE_EXIT 10
++#define CX_FOLDER_GATE_TIMEOUT 60
++
++/* What setup.sh looks for to tell a gated ntdll.so from an older one. */
++static const char cx_folder_gate_marker[] __attribute__((used)) = "CX_FOLDER_GATE_V1";
++
++static const char * const cx_gate_exes[] = { "FIFA17.exe", "Impulsum17Launcher.exe" };
++
++/* A Windows string as UTF-8, in a buffer the caller frees; NULL on failure. */
++static char *cx_gate_utf8( const WCHAR *str, DWORD len )
++{
++    char *ret = malloc( len * 3 + 1 );
++    int n;
++
++    if (!ret) return NULL;
++    if ((n = ntdll_wcstoumbs( str, len, ret, len * 3, FALSE )) < 0) n = 0;
++    ret[n] = 0;
++    return ret;
++}
++
++static const WCHAR *cx_gate_basename( const WCHAR *path, const WCHAR *end )
++{
++    const WCHAR *p, *ret = path;
++
++    for (p = path; p < end; p++) if (*p == '\\' || *p == '/') ret = p + 1;
++    return ret;
++}
++
++/* The image file name of the process that created this one, "-" if it has
++ * none (started from unix) or it cannot be asked (gone, or no access). */
++static void cx_gate_parent( char *buf, size_t size )
++{
++    PROCESS_BASIC_INFORMATION pbi;
++    OBJECT_ATTRIBUTES attr;
++    CLIENT_ID cid;
++    HANDLE handle;
++    union
++    {
++        UNICODE_STRING str;
++        BYTE bytes[sizeof(UNICODE_STRING) + 1024 * sizeof(WCHAR)];
++    } image;
++    const WCHAR *name, *end;
++    NTSTATUS status;
++    int n;
++
++    snprintf( buf, size, "-" );
++    if (NtQueryInformationProcess( NtCurrentProcess(), ProcessBasicInformation, &pbi, sizeof(pbi), NULL ))
++        return;
++    if (!pbi.InheritedFromUniqueProcessId) return;
++    cid.UniqueProcess = (HANDLE)pbi.InheritedFromUniqueProcessId;
++    cid.UniqueThread = 0;
++    InitializeObjectAttributes( &attr, NULL, 0, NULL, NULL );
++    if (NtOpenProcess( &handle, PROCESS_QUERY_LIMITED_INFORMATION, &attr, &cid )) return;
++    status = NtQueryInformationProcess( handle, ProcessImageFileNameWin32, &image, sizeof(image), NULL );
++    NtClose( handle );
++    if (status || !image.str.Length) return;
++    end = image.str.Buffer + image.str.Length / sizeof(WCHAR);
++    name = cx_gate_basename( image.str.Buffer, end );
++    if ((n = ntdll_wcstoumbs( name, end - name, buf, size - 1, FALSE )) <= 0) snprintf( buf, size, "-" );
++    else buf[n] = 0;
+ }
+ 
++/* The names in the process's Windows environment block, comma-separated,
++ * never a value.  The per-drive "=C:" entries are not variables and are left
++ * out, and so is a name with a comma in it, which the list could not carry. */
++static char *cx_gate_envnames( unsigned int *count )
++{
++    const WCHAR *env = peb->ProcessParameters ? peb->ProcessParameters->Environment : NULL;
++    const WCHAR *p, *eq;
++    size_t len = 0, size = 1024;
++    char *ret = malloc( size ), *name;
++
++    *count = 0;
++    if (!ret) return NULL;
++    ret[0] = 0;
++    for (p = env; p && *p; p += wcslen( p ) + 1)
++    {
++        if (*p == '=' || !(eq = wcschr( p, '=' ))) continue;
++        if (!(name = cx_gate_utf8( p, eq - p ))) continue;
++        if (name[0] && !strchr( name, ',' ))
++        {
++            size_t n = strlen( name );
++
++            if (len + n + 2 > size)
++            {
++                char *grown = realloc( ret, size = (len + n + 2) * 2 );
++                if (!grown) { free( name ); break; }
++                ret = grown;
++            }
++            if (len) ret[len++] = ',';
++            memcpy( ret + len, name, n + 1 );
++            len += n;
++            (*count)++;
++        }
++        free( name );
++    }
++    return ret;
++}
++
++static unsigned int cx_gate_ms_since( const struct timespec *start )
++{
++    struct timespec now;
++
++    clock_gettime( CLOCK_MONOTONIC, &now );
++    return (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
++}
++
+ /***********************************************************************
++ *           cx_folder_gate
++ *
++ * Called once, from start_main_thread, right after cx_profile_init: the
++ * exe's path, the process parameters (environment included) and the server
++ * connection exist, and no guest code or DLL has loaded.  The parent's
++ * CreateProcess waits for this process to finish its init, so it waits for
++ * the script too.
++ */
++static void cx_folder_gate(void)
++{
++    const UNICODE_STRING *image = &peb->ProcessParameters->ImagePathName;
++    const WCHAR *exe, *end = image->Buffer + image->Length / sizeof(WCHAR);
++    const char *val;
++    char exe_a[64], parent[256], winpid[16], status_s[32];
++    char *script = NULL, *image_a = NULL, *envnames = NULL, *home = NULL, *lang = NULL;
++    char *argv[20], *envp[5];
++    WCHAR nameW[32];
++    struct timespec start;
++    unsigned int i, nenv = 0, ms;
++    int timeout, n, status = 0, gated = 0;
++    posix_spawn_file_actions_t actions;
++    posix_spawnattr_t attr;
++    sigset_t sigs;
++    pid_t pid = 0, got;
++    struct stat st;
++
++    exe = cx_gate_basename( image->Buffer, end );
++    if (end - exe >= ARRAY_SIZE(nameW)) return;
++    memcpy( nameW, exe, (end - exe) * sizeof(WCHAR) );
++    nameW[end - exe] = 0;
++    for (i = 0; i < ARRAY_SIZE(cx_gate_exes); i++)
++    {
++        WCHAR gateW[32];
++
++        ascii_to_unicode( gateW, cx_gate_exes[i], strlen( cx_gate_exes[i] ) + 1 );
++        if (!ntdll_wcsicmp( nameW, gateW )) gated = 1;
++    }
++    if (!gated) return;
++    if ((val = getenv( "CX_FIFA_GATE" )) && val[0] == '0') return;
++
++    clock_gettime( CLOCK_MONOTONIC, &start );
++    n = ntdll_wcstoumbs( nameW, wcslen( nameW ), exe_a, sizeof(exe_a) - 1, FALSE );
++    exe_a[n > 0 ? n : 0] = 0;
++
++    if (asprintf( &script, "%s/cx-fifa17-gate", ntdll_dir ) < 0) script = NULL;
++    if (!script || stat( script, &st ) || !S_ISREG( st.st_mode ))
++    {
++        WARN_(cxgate)( "CXGATE exe=%s no script at %s, going on\n", exe_a, debugstr_a(script) );
++        free( script );
++        return;
++    }
++
++    cx_gate_parent( parent, sizeof(parent) );
++    envnames = cx_gate_envnames( &nenv );
++    image_a = cx_gate_utf8( image->Buffer, image->Length / sizeof(WCHAR) );
++    snprintf( winpid, sizeof(winpid), "%u", (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ));
++    timeout = (val = getenv( "CX_FIFA_GATE_TIMEOUT" )) ? atoi( val ) : 0;
++    if (timeout <= 0) timeout = CX_FOLDER_GATE_TIMEOUT;
++
++    n = 0;
++    argv[n++] = (char *)"/bin/zsh";
++    argv[n++] = (char *)"-f";  /* no ~/.zshenv: it would undo the envp below */
++    argv[n++] = script;
++    argv[n++] = (char *)"--exe";      argv[n++] = exe_a;
++    argv[n++] = (char *)"--image";    argv[n++] = image_a ? image_a : (char *)"";
++    argv[n++] = (char *)"--parent";   argv[n++] = parent;
++    argv[n++] = (char *)"--envnames"; argv[n++] = envnames ? envnames : (char *)"";
++    argv[n++] = (char *)"--prefix";   argv[n++] = (char *)config_dir;
++    argv[n++] = (char *)"--winpid";   argv[n++] = winpid;
++    argv[n] = NULL;
++
++    /* Nothing of this process's environment but these: no secrets, no
++     * WINE* variables that would make a child tool talk to the server. */
++    n = 0;
++    envp[n++] = (char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin";
++    if ((val = getenv( "HOME" )) && asprintf( &home, "HOME=%s", val ) >= 0) envp[n++] = home;
++    if ((val = getenv( "LANG" )) && asprintf( &lang, "LANG=%s", val ) >= 0) envp[n++] = lang;
++    envp[n++] = (char *)"CX_FIFA_GATE_FROM_WINE=1";
++    envp[n] = NULL;
++
++    posix_spawn_file_actions_init( &actions );
++    posix_spawn_file_actions_addopen( &actions, 0, "/dev/null", O_RDONLY, 0 );
++    posix_spawn_file_actions_addopen( &actions, 1, "/dev/null", O_WRONLY, 0 );
++    posix_spawn_file_actions_addopen( &actions, 2, "/dev/null", O_WRONLY, 0 );
++    posix_spawnattr_init( &attr );
++    /* Its own process group, so a timeout can stop whatever it started; the
++     * default signal actions and an empty mask, not Wine's. */
++    sigemptyset( &sigs );
++    posix_spawnattr_setsigmask( &attr, &sigs );
++    for (i = 1; i < NSIG; i++) if (i != SIGKILL && i != SIGSTOP) sigaddset( &sigs, i );
++    posix_spawnattr_setsigdefault( &attr, &sigs );
++    posix_spawnattr_setpgroup( &attr, 0 );
++#ifdef __APPLE__
++    /* No descriptor of ours, the wineserver socket above all, may reach it:
++     * only the three the file actions open survive CLOEXEC_DEFAULT. */
++    posix_spawnattr_setflags( &attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP |
++                                     POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF );
++    posix_spawn_file_actions_addchdir_np( &actions, "/" );
++#else
++    {
++        int fd;
++
++        posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF );
++        /* no CLOEXEC_DEFAULT here: close every descriptor by hand */
++        for (fd = 3; fd < 256; fd++)
++            if (fcntl( fd, F_GETFD ) >= 0) posix_spawn_file_actions_addclose( &actions, fd );
++    }
++#endif
++
++    if ((n = posix_spawn( &pid, "/bin/zsh", &actions, &attr, argv, envp )))
++    {
++        WARN_(cxgate)( "CXGATE exe=%s cannot start %s: %s, going on\n", exe_a, script, strerror( n ));
++        snprintf( status_s, sizeof(status_s), "spawn-failed" );
++        pid = 0;
++    }
++    posix_spawn_file_actions_destroy( &actions );
++    posix_spawnattr_destroy( &attr );
++
++    if (pid)
++    {
++        for (;;)
++        {
++            got = waitpid( pid, &status, WNOHANG );
++            if (got == pid) break;
++            if (got < 0 && errno != EINTR)
++            {
++                snprintf( status_s, sizeof(status_s), "lost" );
++                WARN_(cxgate)( "CXGATE exe=%s waitpid: %s, going on\n", exe_a, strerror( errno ));
++                pid = 0;
++                break;
++            }
++            if (cx_gate_ms_since( &start ) >= timeout * 1000u)
++            {
++                WARN_(cxgate)( "CXGATE exe=%s script still running after %d s, stopped, going on\n",
++                               exe_a, timeout );
++                kill( -pid, SIGTERM );
++                for (i = 0; i < 50 && waitpid( pid, &status, WNOHANG ) != pid; i++) usleep( 20000 );
++                if (i == 50)
++                {
++                    kill( -pid, SIGKILL );
++                    waitpid( pid, &status, 0 );
++                }
++                snprintf( status_s, sizeof(status_s), "timeout=%ds", timeout );
++                pid = 0;
++                break;
++            }
++            usleep( 20000 );
++        }
++    }
++    if (pid)
++    {
++        if (WIFEXITED( status )) snprintf( status_s, sizeof(status_s), "exit=%d", WEXITSTATUS( status ));
++        else if (WIFSIGNALED( status )) snprintf( status_s, sizeof(status_s), "signal=%d", WTERMSIG( status ));
++        else snprintf( status_s, sizeof(status_s), "status=0x%x", status );
++    }
++    ms = cx_gate_ms_since( &start );
++    TRACE_(cxgate)( "CXGATE exe=%s parent=%s envnames=%u status=%s ms=%u\n", exe_a, parent, nenv,
++                    status_s, ms );
++
++    free( script );
++    free( image_a );
++    free( envnames );
++    free( home );
++    free( lang );
++    if (pid && WIFEXITED( status ) && WEXITSTATUS( status ) == CX_FOLDER_GATE_REFUSE_EXIT)
++    {
++        WARN_(cxgate)( "CXGATE exe=%s refused by the folder gate, exiting with 0x%08x\n",
++                       exe_a, CX_FOLDER_GATE_REFUSED );
++        NtTerminateProcess( NtCurrentProcess(), CX_FOLDER_GATE_REFUSED );
++    }
++}
++
++/***********************************************************************
+  *           start_main_thread
+  */
+ static void start_main_thread(void)
+@@ -2570,6 +2878,7 @@
+     init_files();
+     init_startup_info();
+     cx_profile_init();
++    cx_folder_gate();
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
+     init_thread_stack( teb, 0, 0, 0 );

@@ -34,6 +34,8 @@ class ScriptTests(unittest.TestCase):
             ("setup.sh", ["--fifa15", "--unknown"], 2),
             ("setup.sh", ["--fifa15", "one.app", "two.app"], 2),
             ("setup.sh", ["--repair", "--offline"], 2),
+            ("setup.sh", ["--fix-folder", "--offline"], 2),
+            ("setup.sh", ["--fifa15", "--fix-folder"], 2),
             ("setup.sh", ["--fifa15", "--repair"], 2),
             ("setup.sh", ["--fifa16", "--unknown"], 2),
             ("setup.sh", ["--fifa16", "one.app", "two.app"], 2),
@@ -78,6 +80,7 @@ BOTTLE=missing
 RECEIPT="$PWD/missing-receipt"
 FILES=()
 RESOLVER=missing
+GATE=missing
 say() { :; }
 date() { print -r -- 20260905-120000; }
 diagnostics_dir() { print -r -- "$PWD/diagnostics"; }
@@ -696,6 +699,7 @@ class RepairTests(unittest.TestCase):
                 "x86_64-windows/version.dll": b"fixed version.dll",
                 "x86_64-unix/ntdll.so": b"fixed ntdll.so",
                 "x86_64-unix/a17hosts.dylib": b"resolver",
+                "x86_64-unix/cx-fifa17-gate": b"#!/bin/zsh\n# gate\n",
             }
             sums = []
             for rel, data in shipped.items():
@@ -709,12 +713,14 @@ class RepairTests(unittest.TestCase):
                 b"stock version.dll" if stale_dll else shipped["x86_64-windows/version.dll"])
             (wine / "x86_64-unix/ntdll.so").write_bytes(shipped["x86_64-unix/ntdll.so"])
             (wine / "x86_64-unix/a17hosts.dylib").write_bytes(shipped["x86_64-unix/a17hosts.dylib"])
+            (wine / "x86_64-unix/cx-fifa17-gate").write_bytes(shipped["x86_64-unix/cx-fifa17-gate"])
             (wine / "x86_64-unix/ws2_32.so").write_bytes(b"ws2_32")
             harness = r"""
 set -eu
 HERE="$PWD"
 FILES=( x86_64-windows/version.dll x86_64-unix/ntdll.so )
 RESOLVER=x86_64-unix/a17hosts.dylib
+GATE=x86_64-unix/cx-fifa17-gate
 RECEIPT="$PWD/no-receipt"
 E_PAYLOAD=4; E_PERMISSION=3
 APP_MGMT_HINT=hint
@@ -982,6 +988,8 @@ class CrtOverrideTests(unittest.TestCase):
                 + self.function("f15_game_dir")
                 + self.function("f15_crt_native_dir")
                 + self.function("f15_crt_donor_dir")
+                # unix_path_to_win is the folder gate's mapping (one copy).
+                + "source " + shlex_quote(str(ROOT / "fixes/x86_64-unix/cx-fifa17-gate")) + "\n"
                 + self.function("unix_path_to_win")
                 + self.function("f15_ensure_crt_dlls"))
 
@@ -1624,6 +1632,641 @@ class WebView2RuntimeTests(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertEqual(conf.read_text(), kept)
             self.assertIn("undone=0", again.stdout)
+
+
+
+GATE_SCRIPT = ROOT / "fixes/x86_64-unix/cx-fifa17-gate"
+
+
+def fake_pe(stamp):
+    """The few bytes of FIFA17.exe the gate reads: e_lfanew and the PE timestamp."""
+    head = bytearray(b"MZ" + b"\0" * 0x3a) + (0x40).to_bytes(4, "little")
+    head += b"PE\0\0" + b"\x4c\x01\x01\x00" + stamp.to_bytes(4, "little") + b"\0" * 64
+    return bytes(head)
+
+
+class FolderGateTests(unittest.TestCase):
+    """The FIFA 17 folder gate (fixes/x86_64-unix/cx-fifa17-gate): which
+    launcher started the game, and the folder put the way that launcher needs
+    it. Every folder, bottle and app here is a small fake under a temporary
+    directory; the table of the game's own files is the test's, through the
+    gate's test hooks, so nothing needs 75 MB."""
+
+    STAMP = 0x1234ABCD
+    DATA = "Update/Patch/Data"
+    # path as the table spells it, the game's own bytes, CAS's bytes
+    FILES = {
+        "Update/Patch/Data/layout.toc": (b"vanilla layout.toc", b"cas-mod layout.toc"),  # same size
+        "Update/Patch/Data/Win32/chunks0.toc": (b"vanilla chunks", b"cas chunks, longer than that"),
+        "Update/Patch/Data/Win32/storysba.sb": (b"vanilla story", b"cas story data"),
+    }
+    ADDED = "Update/Patch/Data/Win32/superbundlelayout/fifa_installpackage_00/cas_03.cas"
+    # How CAS's own manifest spells them: Win32 and win32 both.
+    CAS_SPELLING = {
+        "Update/Patch/Data/layout.toc": "Update/Patch/Data/layout.toc",
+        "Update/Patch/Data/Win32/chunks0.toc": "Update/Patch/Data/Win32/chunks0.toc",
+        "Update/Patch/Data/Win32/storysba.sb": "Update/Patch/Data/win32/storysba.sb",
+    }
+    CAS_DLL = b"MZ\0\0cas-fifa-redirect.dll\0CASBRDG1\0"
+    IMPULSUM_DLL = b"MZ\0\0IMPULSUM_AUTH_TOKEN\0IMPULSUM_SERVER_HOST\0v1"
+    AURORA_DLL = b"MZ\0\0FUT17_GAME_CODE\0FUT17_LSX_PORT\0"
+    OLD = 1497019336
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="fifa-gate-tests-")
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name).resolve()
+        self.game = self.work / "Games/FIFA 17"
+        self.prefix = self.work / "bottles/Aurora17"
+        self.local = self.prefix / "drive_c/users/crossover/AppData/Local"
+        self.stash = self.game / ".crossover-fifa"
+        self.log = self.prefix / "cxfifa-gate.log"
+        exe = fake_pe(self.STAMP)
+        self.game.mkdir(parents=True)
+        (self.game / "FIFA17.exe").write_bytes(exe)
+        for rel, (vanilla, _) in self.FILES.items():
+            self.put(self.game / rel, vanilla, self.OLD)
+        (self.prefix / "dosdevices").mkdir(parents=True)
+        (self.prefix / "dosdevices/z:").symlink_to("/", target_is_directory=True)
+        (self.prefix / "dosdevices/c:").symlink_to("../drive_c", target_is_directory=True)
+        self.table = self.work / "table"
+        self.table.write_text("".join(
+            f"{rel}  {len(v)}  {hashlib.sha256(v).hexdigest()}\n" for rel, (v, _) in self.FILES.items()))
+        self.builds = self.work / "builds"
+        self.builds.write_text(f"{len(exe)}  {self.STAMP:08X}\n")
+        self.ps = self.work / "ps.txt"
+        self.ps.write_text("")
+
+    # ------------------------------------------------------------ the world
+    @staticmethod
+    def put(path, data, mtime=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        if mtime:
+            os.utime(path, (mtime, mtime))
+
+    def win(self, path):
+        return "Z:" + str(path).replace("/", "\\")
+
+    def install_cas(self):
+        """CAS in the bottle: cas.exe, its manifest, its copies of the originals."""
+        (self.local / "CAS").mkdir(parents=True, exist_ok=True)
+        (self.local / "CAS/cas.exe").write_bytes(b"MZ")
+        content = self.local / "CAS/content/FIFA17-test"
+        files = [{"path": self.CAS_SPELLING[rel], "bytes": len(c), "replaces": True}
+                 for rel, (_, c) in self.FILES.items()]
+        files.insert(0, {"path": self.ADDED, "bytes": 9, "replaces": False})
+        self.put(content / "installed.json", json.dumps(
+            {"game": "fifa17", "mods": [{"name": "CAS Custom Players", "version": "123"}],
+             "files": files}, indent=2).encode())
+        for rel, (vanilla, _) in self.FILES.items():
+            self.put(content / "original" / self.CAS_SPELLING[rel], vanilla, 1700000000)
+        return content
+
+    def cas_plays(self):
+        """What a CAS PLAY leaves: its data, cas_03.cas and its DLL."""
+        content = self.local / "CAS/content/FIFA17-test"
+        for rel, (_, cas) in self.FILES.items():
+            self.put(self.game / rel, cas)
+        self.put(self.game / self.ADDED, b"cas-added")
+        (self.game / "version.dll").write_bytes(self.CAS_DLL)
+        if (content / "installed.json").exists():
+            # CAS rewrites its manifest on every PLAY; each play here is a
+            # little later than the last.
+            self.plays = getattr(self, "plays", 0) + 1
+            stamp = 1800000000 + self.plays
+            os.utime(content / "installed.json", (stamp, stamp))
+
+    def is_vanilla(self):
+        return all((self.game / rel).read_bytes() == v for rel, (v, _) in self.FILES.items())
+
+    def is_cas(self):
+        return (all((self.game / rel).read_bytes() == c for rel, (_, c) in self.FILES.items())
+                and (self.game / self.ADDED).exists())
+
+    def env(self, **extra):
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.work), "LANG": "C",
+               "CX_FIFA_GATE_TEST_TABLE": str(self.table),
+               "CX_FIFA_GATE_TEST_BUILDS": str(self.builds),
+               "CX_FIFA_GATE_TEST_PS": str(self.ps)}
+        env.update(extra)
+        return env
+
+    def argv(self, exe, parent, envnames):
+        return ["/bin/zsh", "-f", str(GATE_SCRIPT), "--exe", exe,
+                "--image", self.win(self.game / exe), "--parent", parent,
+                "--envnames", envnames, "--prefix", str(self.prefix), "--winpid", "42"]
+
+    def gate(self, exe="FIFA17.exe", parent="-", envnames="PATH,TEMP", **extra):
+        result = subprocess.run(self.argv(exe, parent, envnames), env=self.env(**extra),
+                                capture_output=True, text=True, timeout=60, cwd="/")
+        self.assertEqual(result.stderr, "", result.stderr)
+        return result.returncode, self.last_log()
+
+    def last_log(self):
+        if not self.log.exists():
+            return None
+        return self.log.read_text().splitlines()[-1].split("\t")
+
+    def source(self, body):
+        script = "source " + shlex_quote(str(GATE_SCRIPT)) + "\n" + body
+        return subprocess.run(["/bin/zsh", "-f", "-c", script], env=self.env(),
+                              capture_output=True, text=True, timeout=30)
+
+    # ------------------------------------------------------- who started it
+    def test_identification_follows_the_table_first_match_wins(self):
+        cases = [
+            # exe, parent, env names, live dll, CasBridge running -> launcher
+            ("FIFA17.exe", "FIFA17.exe", "FUT17_GAME_CODE", "aurora", "0", "skip"),
+            ("FIFA17.exe", "Aurora15Connector.exe", "PATH,FUT17_GAME_CODE", "cas", "1", "aurora"),
+            ("FIFA17.exe", "cas.exe", "IMPULSUM_SERVER_HOST,PATH", "cas", "0", "impulsum"),
+            ("FIFA17.exe", "-", "CAS_DEBUG", "aurora", "0", "cas"),
+            ("FIFA17.exe", "Aurora.exe", "PATH", "cas", "1", "aurora"),
+            ("FIFA17.exe", "AURORA15CLIENT.EXE", "PATH", "cas", "1", "aurora"),
+            ("FIFA17.exe", "Impulsum17Launcher.exe", "PATH", "cas", "1", "impulsum"),
+            ("FIFA17.exe", "cas.exe", "PATH", "aurora", "0", "cas"),
+            ("FIFA17.exe", "CasBridge.exe", "PATH", "impulsum", "0", "cas"),
+            ("FIFA17.exe", "_fifa17.exe", "PATH", "cas", "1", "cas"),
+            ("FIFA17.exe", "RebornFUT.exe", "PATH", "reborn", "0", "reborn"),
+            ("FIFA17.exe", "_fifa17.exe", "PATH", "aurora", "0", "direct"),
+            ("FIFA17.exe", "winewrapper.exe", "PATH", "cas", "0", "direct"),
+            ("FIFA17.exe", "start.exe", "PATH", "impulsum", "0", "direct"),
+            ("FIFA17.exe", "explorer.exe", "PATH", "missing", "0", "direct"),
+            ("FIFA17.exe", "cmd.exe", "PATH", "unknown", "0", "direct"),
+            ("FIFA17.exe", "-", "PATH", "aurora", "0", "direct"),
+            ("FIFA17.exe", "launcher.exe", "PATH", "aurora", "0", "other"),
+            # The safety rule: CAS's DLL live and no known parent -> CAS.
+            ("FIFA17.exe", "-", "PATH", "cas", "0", "cas"),
+            ("FIFA17.exe", "launcher.exe", "PATH", "cas", "0", "cas"),
+        ]
+        body = "".join(
+            f"cxg_identify {' '.join(shlex_quote(x) for x in c[:5])}; print -r -- '|'\n"
+            for c in cases)
+        result = self.source(body)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        answers = [a.strip() for a in result.stdout.split("|")[:-1]]
+        for case, answer in zip(cases, answers):
+            with self.subTest(case=case):
+                self.assertEqual(answer.split("\t")[0], case[5], answer)
+                self.assertNotIn("\n", answer)
+
+    def test_a_dll_is_known_by_its_content_never_by_its_name(self):
+        for name, data, kind in [("version.dll.cas-backup", self.AURORA_DLL, "aurora"),
+                                 ("version.dll.before-impulsum", self.CAS_DLL, "cas"),
+                                 ("version.dll.aurora17", self.IMPULSUM_DLL, "impulsum"),
+                                 ("x.dll", b"MZ crumpet.ini", "reborn"),
+                                 ("y.dll", b"MZ Aurora17RedirectShim.dll", "aurora17"),
+                                 ("verorig.dll", (ROOT / "fixes/x86_64-windows/version.dll").read_bytes(), "wine"),
+                                 ("z.dll", b"MZ nothing", "unknown")]:
+            (self.game / name).write_bytes(data)
+            result = self.source(f"cxg_dll_kind {shlex_quote(str(self.game / name))}")
+            self.assertEqual(result.stdout.strip(), kind, name)
+
+    # --------------------------------------------- the game's own files back
+    def test_a_launch_that_is_not_cas_after_cas_gets_the_games_own_files(self):
+        for launcher, parent, envnames, dll in [
+                ("aurora", "-", "PATH,FUT17_GAME_CODE,FUT17_LSX_PORT", self.AURORA_DLL),
+                ("impulsum", "Impulsum17Launcher.exe", "PATH", self.IMPULSUM_DLL),
+                ("direct", "_fifa17.exe", "PATH", self.CAS_DLL)]:
+            with self.subTest(launcher=launcher):
+                self.install_cas()
+                self.cas_plays()
+                (self.game / "version.dll").write_bytes(dll)
+                rc, line = self.gate(parent=parent, envnames=envnames)
+                self.assertEqual(rc, 0)
+                self.assertTrue(self.is_vanilla(), line)
+                self.assertFalse((self.game / self.ADDED).exists())
+                self.assertEqual((self.stash / "parked" / self.ADDED).read_bytes(), b"cas-added")
+                self.assertTrue(line[3].startswith(launcher + "("), line)
+                self.assertIn("3 file(s) restored", line[4])
+                self.assertIn("cas_03.cas parked", line[4])
+                self.assertEqual(line[5], "ok")
+                self.assertEqual(line[2], str(self.game))
+                # The version.dll is left as that launcher put it.
+                self.assertEqual((self.game / "version.dll").read_bytes(), dll)
+                # Kept once, from CAS's copies (the live files were CAS's).
+                for rel, (vanilla, _) in self.FILES.items():
+                    self.assertEqual((self.stash / "vanilla" / rel).read_bytes(), vanilla)
+                self.assertEqual(list(self.game.rglob("*.cxtmp")), [])
+                self.assertFalse((self.stash / "journal").exists())
+                self.assertFalse((self.stash / "lock").exists())
+
+    def test_a_cas_launch_keeps_its_data(self):
+        self.install_cas()
+        self.cas_plays()
+        for parent, reason in [("cas.exe", "parent cas.exe"),
+                               ("-", "CAS's version.dll live")]:
+            rc, line = self.gate(parent=parent)
+            self.assertEqual(rc, 0)
+            self.assertTrue(self.is_cas(), line)
+            self.assertTrue(line[3].startswith("cas(" + reason), line)
+        # Its originals are kept all the same, from CAS's own copies.
+        self.assertIn("kept 3 original file(s)", self.log.read_text())
+
+    def test_the_fast_path_changes_nothing_when_the_files_are_the_games_own(self):
+        self.install_cas()
+        self.cas_plays()
+        self.gate(envnames="FUT17_GAME_CODE")
+        self.assertTrue(self.is_vanilla())
+        before = {p: (p.stat().st_mtime_ns, p.stat().st_ino) for p in self.game.rglob("*")
+                  if p.is_file() and ".crossover-fifa" not in p.parts}
+        kept = {p: p.stat().st_mtime_ns for p in (self.stash / "vanilla").rglob("*") if p.is_file()}
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(rc, 0)
+        self.assertEqual(line[4], "nothing to do")
+        after = {p: (p.stat().st_mtime_ns, p.stat().st_ino) for p in self.game.rglob("*")
+                 if p.is_file() and ".crossover-fifa" not in p.parts}
+        self.assertEqual(after, before)
+        self.assertEqual({p: p.stat().st_mtime_ns for p in (self.stash / "vanilla").rglob("*")
+                          if p.is_file()}, kept)
+
+    def test_without_cas_nothing_is_kept_or_hashed(self):
+        rc, line = self.gate(parent="Aurora.exe")
+        self.assertEqual(rc, 0)
+        self.assertEqual(line[4], "nothing to do")
+        self.assertFalse((self.stash / "vanilla").exists())
+
+    def test_a_cas_file_with_the_games_size_is_still_put_back_after_a_cas_play(self):
+        # layout.toc is the same size in both; only the time and the manifest tell.
+        self.install_cas()
+        self.gate(envnames="FUT17_GAME_CODE")          # keeps the originals
+        rel = "Update/Patch/Data/layout.toc"
+        self.cas_plays()
+        os.utime(self.game / rel, (self.OLD, self.OLD))   # as if CAS kept the time
+        self.gate(envnames="FUT17_GAME_CODE")
+        self.assertTrue(self.is_vanilla())
+
+    def test_a_file_outside_the_table_comes_back_only_when_cas_recorded_its_hash(self):
+        # A newer CAS pack replaces files the built-in table does not know.
+        # CAS's own original/ copy is trusted only when CAS's base-hashes.json
+        # gives the same size and sha256 for it.
+        content = self.install_cas()
+        vouched = ("Update/Patch/Data/win32/globals.sb", b"vanilla globals", b"cas globals!")
+        unvouched = ("Update/Patch/Data/win32/ui.sb", b"vanilla ui", b"cas ui data")
+        wrong = ("Update/Patch/Data/win32/chants_full.sb", b"vanilla chants", b"cas chants")
+        manifest = json.loads((content / "installed.json").read_text())
+        entries = {}
+        for rel, vanilla, _ in (vouched, unvouched, wrong):
+            self.put(self.game / rel, vanilla, self.OLD)
+            self.put(content / "original" / rel, vanilla, 1700000000)
+            manifest["files"].append({"path": rel, "bytes": len(vanilla), "replaces": True})
+        for rel, vanilla, _ in (vouched, wrong):
+            sha = hashlib.sha256(vanilla if rel == vouched[0] else b"something else").hexdigest()
+            entries["Z:\\Games\\FIFA 17\\" + rel] = {"bytes": len(vanilla), "modified": 1,
+                                                       "sha256": sha}
+        self.put(content / "installed.json", json.dumps(manifest).encode())
+        self.put(content / "base-hashes.json", json.dumps({"entries": entries}).encode())
+        self.cas_plays()
+        for rel, _, cas in (vouched, unvouched, wrong):
+            self.put(self.game / rel, cas)
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.is_vanilla(), line)
+        self.assertEqual((self.game / vouched[0]).read_bytes(), vouched[1], line)
+        self.assertEqual((self.stash / "vanilla" / vouched[0]).read_bytes(), vouched[1])
+        for rel, _, cas in (unvouched, wrong):
+            self.assertEqual((self.game / rel).read_bytes(), cas, line)
+            self.assertFalse((self.stash / "vanilla" / rel).exists())
+        self.assertIn("4 file(s) restored", line[4])
+        self.assertIn("ui.sb", line[4])
+        self.assertIn("chants_full.sb", line[4])
+
+    # ---------------------------------------------------------- Impulsum17
+    def test_impulsums_dll_is_kept_and_put_back_by_content(self):
+        (self.game / "Impulsum17Launcher.exe").write_bytes(b"MZ")
+        (self.game / "version.dll").write_bytes(self.IMPULSUM_DLL)
+        rc, line = self.gate(exe="Impulsum17Launcher.exe", parent="explorer.exe")
+        self.assertEqual(rc, 0)
+        self.assertIn("kept Impulsum17's version.dll", line[4])
+        self.assertEqual((self.stash / "impulsum/version.dll").read_bytes(), self.IMPULSUM_DLL)
+        # Aurora plays and puts its own in.
+        (self.game / "version.dll").write_bytes(self.AURORA_DLL)
+        # Impulsum17's launcher starts: its own DLL goes back before it loads one.
+        rc, line = self.gate(exe="Impulsum17Launcher.exe", parent="explorer.exe")
+        self.assertEqual(rc, 0)
+        self.assertEqual((self.game / "version.dll").read_bytes(), self.IMPULSUM_DLL)
+        self.assertIn("it was Aurora.exe's shim", line[4])
+        # And at game start too, when another launcher played in between.
+        (self.game / "version.dll").write_bytes(self.CAS_DLL)
+        rc, line = self.gate(parent="Impulsum17Launcher.exe", envnames="IMPULSUM_AUTH_TOKEN")
+        self.assertEqual(rc, 0)
+        self.assertEqual((self.game / "version.dll").read_bytes(), self.IMPULSUM_DLL)
+        self.assertTrue(line[3].startswith("impulsum(env"), line)
+
+    def test_a_new_impulsum_dll_replaces_the_kept_one_which_is_kept_once(self):
+        self.put(self.stash / "impulsum/version.dll", self.IMPULSUM_DLL)
+        newer = self.IMPULSUM_DLL + b" v2"
+        (self.game / "version.dll").write_bytes(newer)
+        self.gate(exe="Impulsum17Launcher.exe")
+        self.assertEqual((self.stash / "impulsum/version.dll").read_bytes(), newer)
+        self.assertEqual((self.stash / "impulsum/version.dll.prev").read_bytes(), self.IMPULSUM_DLL)
+
+    def test_an_impulsum_dll_kept_only_as_a_backup_is_found_by_its_content(self):
+        (self.game / "version.dll").write_bytes(self.CAS_DLL)
+        (self.game / "version.dll.cas-backup").write_bytes(self.IMPULSUM_DLL)
+        (self.game / "version.dll.before-impulsum").write_bytes(self.AURORA_DLL)
+        rc, _ = self.gate(envnames="IMPULSUM_SERVER_HOST")
+        self.assertEqual(rc, 0)
+        self.assertEqual((self.game / "version.dll").read_bytes(), self.IMPULSUM_DLL)
+
+    def test_impulsum_is_refused_when_its_dll_is_gone_and_none_is_kept(self):
+        self.install_cas()
+        self.cas_plays()
+        rc, line = self.gate(parent="Impulsum17Launcher.exe")
+        self.assertEqual(rc, 10)
+        self.assertEqual(line[5], "refused")
+        # Nothing was changed for a launch that does not happen.
+        self.assertTrue(self.is_cas())
+        self.assertEqual((self.game / "version.dll").read_bytes(), self.CAS_DLL)
+        # The launcher itself is never stopped.
+        rc, line = self.gate(exe="Impulsum17Launcher.exe", parent="explorer.exe")
+        self.assertEqual(rc, 0)
+        self.assertIn("no Impulsum17 version.dll kept", line[4])
+
+    # ------------------------------------------------- crashes and the lock
+    def test_an_interrupted_run_is_finished_by_the_next(self):
+        self.install_cas()
+        self.gate(envnames="FUT17_GAME_CODE")   # originals kept
+        self.cas_plays()
+        proc = subprocess.Popen(self.argv("FIFA17.exe", "-", "FUT17_GAME_CODE"),
+                                env=self.env(CX_FIFA_GATE_TEST_PAUSE="3"),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        first = self.game / "Update/Patch/Data/layout.toc"
+        try:
+            for _ in range(200):
+                if first.read_bytes() == self.FILES["Update/Patch/Data/layout.toc"][0]:
+                    break
+                subprocess.run(["/bin/sleep", "0.05"])
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertTrue((self.stash / "journal").exists())
+        self.assertFalse(self.is_vanilla())
+        # A copy that was half made when it was killed.
+        second = self.game / "Update/Patch/Data/Win32/chunks0.toc"
+        (second.parent / (second.name + ".cxtmp")).write_bytes(b"half")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.is_vanilla())
+        self.assertIn("cleaned up after an interrupted run", line[4])
+        self.assertEqual(list(self.game.rglob("*.cxtmp")), [])
+        self.assertFalse((self.stash / "journal").exists())
+
+    def test_a_held_lock_is_waited_for_then_the_launch_goes_on_unchanged(self):
+        self.install_cas()
+        self.cas_plays()
+        (self.stash / "lock").mkdir(parents=True)
+        (self.stash / "lock/pid").write_text(f"{os.getpid()} 0\n")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE", CX_FIFA_GATE_TEST_LOCK_WAIT="1")
+        self.assertEqual(rc, 0)
+        self.assertIn("lock", line[5])
+        self.assertTrue(self.is_cas())
+        # A lock whose owner is gone is stale, and taken over.
+        (self.stash / "lock/pid").write_text("999999 0\n")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE", CX_FIFA_GATE_TEST_LOCK_WAIT="1")
+        self.assertEqual(line[5], "ok")
+        self.assertTrue(self.is_vanilla())
+
+    def test_nothing_is_touched_while_another_fifa17_runs(self):
+        self.install_cas()
+        self.cas_plays()
+        # The gated game itself, and this script's own command line, do not count.
+        self.ps.write_text(
+            f"  {os.getpid()}     1 Z:\\Games\\FIFA 17\\FIFA17.exe\n"
+            "  998   500 /bin/zsh -f /x/cx-fifa17-gate --exe FIFA17.exe --image Z:\\a\\FIFA17.exe\n"
+            "  997   500 tail -f /tmp/FIFA17.exe.log\n")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(line[5], "ok")
+        self.assertTrue(self.is_vanilla())
+        self.cas_plays()
+        self.ps.write_text(self.ps.read_text() + "  999     1 Z:\\Volumes\\x\\FIFA 17\\FIFA17.exe /dbrv=1\n")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(rc, 0)
+        self.assertEqual(line[5], "skipped: FIFA 17 already running")
+        self.assertTrue(self.is_cas())
+
+    def test_the_games_own_relaunch_is_left_alone(self):
+        self.install_cas()
+        self.cas_plays()
+        rc, line = self.gate(parent="FIFA17.exe", envnames="FUT17_GAME_CODE")
+        self.assertEqual(rc, 0)
+        self.assertEqual(line[3], "skip(parent FIFA17.exe)")
+        self.assertEqual(line[5], "skipped")
+        self.assertTrue(self.is_cas())
+        self.assertFalse(self.stash.exists())
+
+    def test_an_unknown_build_is_left_alone_and_said_so(self):
+        self.install_cas()
+        self.cas_plays()
+        (self.game / "FIFA17.exe").write_bytes(fake_pe(0x0BADF00D))
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(rc, 0)
+        self.assertIn("unknown FIFA 17 build", line[4])
+        self.assertTrue(self.is_cas())
+        self.assertFalse((self.stash / "vanilla").exists())
+
+    def test_the_log_never_holds_a_value_and_is_kept_short(self):
+        self.put(self.log, b"".join(b"2026-01-01 00:00:00\tFIFA17.exe\t-\t?\tx\tok\t1 " + b"y" * 300 + b"\n"
+                                    for _ in range(600)))
+        self.gate(envnames="IMPULSUM_AUTH_TOKEN,PATH")
+        text = self.log.read_text()
+        self.assertLessEqual(len(text.splitlines()), 501)
+        self.assertNotIn("IMPULSUM_AUTH_TOKEN", text)
+
+    def test_the_gate_is_shipped_and_installed_beside_ntdll(self):
+        subprocess.run(["/bin/zsh", "-n", str(GATE_SCRIPT)], check=True)
+        sums = (ROOT / "fixes/SHA256SUMS").read_text()
+        self.assertIn(hashlib.sha256(GATE_SCRIPT.read_bytes()).hexdigest()
+                      + "  x86_64-unix/cx-fifa17-gate", sums)
+        setup = (ROOT / "setup.sh").read_text()
+        self.assertIn("GATE=x86_64-unix/cx-fifa17-gate", setup)
+        for name in ("refresh_fixes",):
+            self.assertIn('cmp -s "$HERE/fixes/$GATE" "$wine/$GATE"', function_source(name))
+        # One copy of the path mapping: setup.sh's are the gate's.
+        self.assertIn("cxg_win_to_unix", function_source("win_path_to_unix"))
+        self.assertIn("cxg_unix_to_win", function_source("unix_path_to_win"))
+
+    # ------------------------------------------- setup.sh: finding the folder
+    def reg_path(self, path, trailing=""):
+        return "Z:" + str(path).replace("/", "\\\\") + trailing
+
+    def detection_harness(self):
+        names = ["reg_value", "bottle_appdata", "aurora_launcher_dir", "aurora_ini_dir",
+                 "connector_game_dir", "win_path_to_unix", "fifa17_dir_candidates", "game_dir_find"]
+        source = (ROOT / "setup.sh").read_text()
+        key = [l for l in source.splitlines() if l.startswith("IMPULSUM_UNINSTALL_KEY=")][0]
+        return ("set -eu\n"
+                "BOTTLE_DIR=" + shlex_quote(str(self.prefix.parent)) + "\nBOTTLE=Aurora17\n"
+                + key + "\n"
+                'bottle_user_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }\n'
+                'bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }\n'
+                "source " + shlex_quote(str(GATE_SCRIPT)) + "\n"
+                + "".join(function_source(n) for n in names))
+
+    def test_the_folder_launchers_use_comes_before_a_guess(self):
+        folders = {}
+        for name in ("given", "gatelog", "cas", "impulsum", "ini", "connector", "ea"):
+            d = self.work / name / "FIFA 17"
+            d.mkdir(parents=True)
+            (d / "FIFA17.exe").write_bytes(b"MZ")
+            folders[name] = d
+        guess = self.work / "Downloads/FIFA 17"
+        guess.mkdir(parents=True)
+        (guess / "FIFA17.exe").write_bytes(b"MZ")
+        (guess / "_fifa17.exe").write_bytes(b"MZ")
+        (folders["impulsum"] / "_fifa17.exe").write_bytes(b"MZ")
+        self.log.write_text(f"2026-10-12 11:16:20\tFIFA17.exe\t{folders['gatelog']}\tcas(parent cas.exe)\tnothing to do\tok\t40\n"
+                            f"2026-10-12 11:17:20\tImpulsum17Launcher.exe\t{folders['ea']}\timpulsum(launcher)\tnothing to do\tok\t40\n")
+        (self.prefix / "user.reg").write_text(
+            "WINE REGISTRY Version 2\n\n[Software\\\\CAS\\\\Launcher] 1791794587\n"
+            f'"FifaExe"="FIFA17.exe"\n"FifaFolder"="{self.reg_path(folders["cas"])}"\n')
+        (self.prefix / "system.reg").write_text(
+            "WINE REGISTRY Version 2\n\n"
+            "[Software\\\\Wow6432Node\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\"
+            "{8F3C5E0A-1C34-4D8E-9E1B-7C2A5D9F1707}_is1] 1791798238\n"
+            f'"InstallLocation"="{self.reg_path(folders["impulsum"], chr(92) * 2)}"\n\n'
+            "[Software\\\\Wow6432Node\\\\EA Sports\\\\FIFA 17] 1\n"
+            f'"Install Dir"="{self.reg_path(folders["ea"], chr(92) * 2)}"\n')
+        aurora = self.local / "Aurora15Connector"
+        aurora.mkdir(parents=True)
+        (aurora / "Aurora15Connector.exe").write_bytes(b"MZ")
+        (aurora / "Aurora15Connector.ini").write_text(
+            "FifaPath=\r\nFifa17Path=Z:" + str(folders["ini"]).replace("/", "\\") + "\r\n")
+        conn = self.local / "Aurora17/Connector"
+        conn.mkdir(parents=True)
+        (conn / "connector.json").write_text(json.dumps({"gameDirectory": "Z:" + str(folders["connector"]).replace("/", "\\")}))
+        run = lambda env: subprocess.run(
+            ["/bin/zsh", "-f", "-c", self.detection_harness()
+             + 'fifa17_dir_candidates\nprint -r -- "find=$(game_dir_find)"\n'],
+            env={**self.env(), **env}, capture_output=True, text=True, timeout=30)
+        result = run({"AURORA_GAME_DIR": str(folders["given"])})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[:-1], [
+            f"AURORA_GAME_DIR\t{folders['given']}", f"gate log\t{folders['gatelog']}",
+            f"CAS\t{folders['cas']}", f"Impulsum17\t{folders['impulsum']}",
+            f"Aurora.exe\t{folders['ini']}", f"Aurora17\t{folders['connector']}",
+            f"EA registry\t{folders['ea']}", f"guess\t{guess}", f"guess\t{self.game}"])
+        # The loader's folder: the first that has _fifa17.exe, not the guess.
+        self.assertEqual(lines[-1], f"find={folders['impulsum']}")
+        # One folder named by several launchers is one line.
+        (self.prefix / "user.reg").write_text((self.prefix / "user.reg").read_text().replace(
+            self.reg_path(folders["cas"]), self.reg_path(folders["impulsum"])))
+        lines = run({}).stdout.splitlines()
+        self.assertIn(f"CAS, Impulsum17\t{folders['impulsum']}", lines)
+        self.assertEqual(lines[0], f"gate log\t{folders['gatelog']}")
+
+    # ----------------------------------------------- setup.sh: --verify and --fix-folder
+    def shared_bottle(self, gate_on=True):
+        """A bottle with all three launchers pointing at the game folder, CAS's
+        data live in it, and a stray guess in ~/Downloads."""
+        app = self.work / "CrossOver-FIFA.app"
+        unix = app / "Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix"
+        unix.mkdir(parents=True)
+        (unix / "ntdll.so").write_bytes(b"ntdll CX_GAME_PROFILES" + (b" CX_FOLDER_GATE_V1" if gate_on else b""))
+        shutil.copy2(GATE_SCRIPT, unix / "cx-fifa17-gate")
+        (self.prefix / "cxbottle.conf").write_text(
+            '[EnvironmentVariables]\n"CX_GRAPHICS_BACKEND" = "d3dmetal"\n"CX_DR_TRAP" = "2"\n'
+            '"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER" = "C:\\\\webview2-fixed\\\\99.0.1150.52"\n')
+        wv = self.prefix / "drive_c/webview2-fixed/99.0.1150.52"
+        wv.mkdir(parents=True)
+        (wv / "msedgewebview2.exe").write_bytes(b"MZ")
+        self.install_cas()
+        self.cas_plays()
+        (self.game / "Impulsum17Launcher.exe").write_bytes(b"MZ")
+        (self.game / "version.dll.cas-backup").write_bytes(self.AURORA_DLL)
+        aurora = self.local / "Aurora15Connector"
+        aurora.mkdir(parents=True)
+        (aurora / "Aurora15Connector.exe").write_bytes(b"MZ")
+        (self.prefix / "user.reg").write_text(
+            "WINE REGISTRY Version 2\n\n[Software\\\\CAS\\\\Launcher] 1791794587\n"
+            f'"FifaFolder"="{self.reg_path(self.game)}"\n\n'
+            '[Software\\\\Wine\\\\DllOverrides] 0\n"version"="native,builtin"\n'
+            '"msvcr120"="native,builtin"\n"msvcp120"="native,builtin"\n')
+        (self.prefix / "system.reg").write_text(
+            "WINE REGISTRY Version 2\n\n"
+            "[Software\\\\Wow6432Node\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\"
+            "{8F3C5E0A-1C34-4D8E-9E1B-7C2A5D9F1707}_is1] 1\n"
+            f'"InstallLocation"="{self.reg_path(self.game, chr(92) * 2)}"\n')
+        guess = self.work / "Downloads/FIFA 17"
+        guess.mkdir(parents=True)
+        (guess / "FIFA17.exe").write_bytes(b"MZ")
+        return app, guess
+
+    def setup_sh(self, mode, app, **extra):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("AURORA_", "FIFA1", "FIFA2", "CX_", "WEBVIEW2_", "REBORN_"))}
+        env.update(self.env(), CX_BOTTLE_PATH=str(self.prefix.parent), HOME=str(self.work),
+                   AURORA_RECEIPT_DIR=str(self.work / "receipts"), NO_COLOR="1",
+                   AURORA_BOTTLE="Aurora17", AURORA_TARGET=str(app), **extra)
+        return subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), mode], env=env,
+                              capture_output=True, text=True, timeout=120)
+
+    @staticmethod
+    def block(stdout):
+        return stdout.split("FIFA 17 game folder\n", 1)[1].split("\n\n", 1)[0]
+
+    def tree(self):
+        return {p: p.read_bytes() for root in (self.game, self.prefix)
+                for p in root.rglob("*") if p.is_file()}
+
+    def test_verify_shows_the_folder_and_changes_nothing(self):
+        app, guess = self.shared_bottle()
+        (self.log).write_text(f"2026-01-02 11:16:20\tFIFA17.exe\t{self.game}\tcas(parent cas.exe)\tnothing to do\tok\t40\n")
+        before = self.tree()
+        result = self.setup_sh("--verify", app)
+        self.assertIn(result.returncode, (0, 5), result.stdout + result.stderr)
+        self.assertEqual(self.tree(), before, "--verify changed something")
+        block = self.block(result.stdout)
+        self.assertIn("  ~/Games/FIFA 17              FIFA 17 last ran here 01-02 11:16 (cas); CAS and Impulsum17 point here", block)
+        self.assertIn("data files      CAS mod data (CAS Custom Players v123, 4 files)", block)
+        self.assertIn("the next launch that is not CAS's puts the game's own back", block)
+        self.assertIn("version.dll     CAS's redirect (", block)
+        self.assertIn("originals       0/3 in .crossover-fifa; CAS keeps copies in its original/ folder", block)
+        self.assertIn("Impulsum DLL    not on this Mac: Impulsum17's PLAY will stop and say so.", block)
+        self.assertIn("note  Impulsum17's version.dll is gone from ~/Games/FIFA 17", block)
+        self.assertIn("gate            on (ntdll.so has CX_FOLDER_GATE_V1, script is the shipped one)", block)
+        self.assertIn("last launches   01-02 11:16 cas: nothing to do", block)
+        self.assertIn("other files     version.dll.cas-backup is Aurora.exe's shim", block)
+        self.assertIn("~/Downloads/FIFA 17          only a guess: no launcher points here", block)
+        self.assertNotIn("BAD", block)
+        # The table's Impulsum17 cell says what its PLAY would stop at.
+        rows = SharedBottleTests.table(result.stdout)
+        self.assertEqual(rows["FIFA 17"][5], "missing Impulsum DLL")
+        self.assertEqual(rows["FIFA 17"][1], "found")
+        self.assertIn(f"  FIFA 17: {self.game}", result.stdout)
+
+    def test_verify_calls_the_gate_off_bad_with_several_launchers(self):
+        app, _ = self.shared_bottle()
+        with (self.prefix / "cxbottle.conf").open("a") as conf:
+            conf.write('"CX_FIFA_GATE" = "0"\n')
+        result = self.setup_sh("--verify", app)
+        self.assertEqual(result.returncode, 5)
+        block = self.block(result.stdout)
+        self.assertIn('gate            off in this bottle ("CX_FIFA_GATE" = "0"', block)
+        self.assertIn("BAD   the folder gate is off, and the Aurora17 bottle has 3 FIFA 17 launchers", block)
+
+    def test_fix_folder_keeps_copies_and_never_touches_the_game(self):
+        app, guess = self.shared_bottle()
+        game_files = {p: p.read_bytes() for p in self.game.rglob("*") if p.is_file()}
+        result = self.setup_sh("--fix-folder", app)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("kept 3 original file(s)", result.stdout)
+        self.assertIn("Impulsum17's version.dll is not on this Mac", result.stdout)
+        self.assertEqual({p: p.read_bytes() for p in self.game.rglob("*")
+                          if p.is_file() and ".crossover-fifa" not in p.parts}, game_files)
+        for rel, (vanilla, _) in self.FILES.items():
+            self.assertEqual((self.stash / "vanilla" / rel).read_bytes(), vanilla)
+        self.assertFalse((guess / ".crossover-fifa").exists())
+        # The next launch that is not CAS's puts the game's own back, and
+        # --verify then says so.
+        (self.game / "version.dll").write_bytes(self.AURORA_DLL)
+        rc, _ = self.gate(parent="Aurora15Connector.exe")
+        self.assertEqual(rc, 0)
+        block = self.block(self.setup_sh("--verify", app).stdout)
+        self.assertIn("data files      the game's own (3 of 3)", block)
+        self.assertIn("originals       3/3 in .crossover-fifa, match FIFA 17's final update", block)
+        self.assertIn("aurora: 3 file(s) restored, cas_03.cas parked", block)
 
 
 if __name__ == "__main__":

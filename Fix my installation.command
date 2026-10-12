@@ -7,7 +7,8 @@
 # again (settings, overrides, hosts, menu entries, and the WebView2 runtime the
 # launcher's window needs), has the game's own loader write a fresh licence
 # file, and checks the lot. CrossOver is not copied again. Your saves and the
-# game's own files are not touched.
+# game's own files are not touched; in the FIFA 17 folder it only keeps copies
+# of the few files launchers replace, in a hidden .crossover-fifa folder.
 #
 # It is the same as "diagnostics/15 Fix my installation.command"; it is here
 # so it can be found without opening that folder. From Terminal: ./setup.sh --repair

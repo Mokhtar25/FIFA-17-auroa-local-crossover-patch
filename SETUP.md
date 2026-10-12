@@ -13,7 +13,11 @@ CrossOver.
 - One download, for FIFA 17 only: Microsoft's Edge WebView2 runtime 99
   (165 MB, once, 365 MB unpacked into the bottle). See
   [step 9b](#9b-the-browser-runtime-the-launcher-needs).
-- The game is never modified.
+- The game's own files are never changed by setup. It adds one hidden folder,
+  `.crossover-fifa`, to the FIFA 17 folder: copies of the files launchers
+  replace (about 75 MB, only once CAS is used), so each launcher gets the game
+  the way it needs it. See
+  [Several launchers, one game folder](#several-launchers-one-game-folder).
 - Both CrossOvers share the same bottles. Never open the same bottle in both at once.
 
 ---
@@ -157,6 +161,97 @@ installer keeps the FIFA 15 and FIFA 16 fixes. FIFA 16 is set up on its own:
 see [FIFA 16](#fifa-16-experimental). **Stop.command** stops every game, and
 **Uninstall.command** removes their shared app; bottles and saves remain.
 Playing two matches at once has not been validated.
+
+## Several launchers, one game folder
+
+FIFA 17 has four launchers (`Aurora.exe`, Impulsum17, CAS, RebornFUT) and they
+all play from the same game folder. Each leaves it its own way:
+
+- **CAS** writes its mod data over seven of the game's files and adds
+  `cas_03.cas`. Under any other launcher that data makes FIFA 17 quit about
+  27 seconds in, before it reaches the server.
+- **Aurora.exe** and **CAS** put their own `version.dll` into the folder on
+  every PLAY.
+- **Impulsum17**'s `version.dll` only ever comes from its installer. Once
+  another launcher has played, Impulsum17's PLAY would start the game with
+  that launcher's DLL.
+
+So the patched Wine has a **folder gate**. Every time `FIFA17.exe` or
+`Impulsum17Launcher.exe` starts, before any of its own code runs, the gate
+works out which launcher started it (from what that launcher put in the
+game's environment, and from its name) and puts the folder the way that
+launcher needs it:
+
+| Started by | The gate |
+|---|---|
+| CAS | leaves CAS's data and DLL as CAS put them |
+| `Aurora.exe`, RebornFUT, the game directly | puts the game's own seven files back and moves `cas_03.cas` aside |
+| Impulsum17 | the same, and puts Impulsum17's own `version.dll` back |
+
+It works from copies kept in a hidden folder inside the game folder,
+`.crossover-fifa`: the game's own seven files (checked against FIFA 17's final
+update before they are kept), Impulsum17's `version.dll`, and what it moved
+aside. When nothing needs changing it costs a fraction of a second. After a
+CAS session, putting the game's files back takes about a second on an SSD.
+Whatever the last launch, crash or force-quit left behind, the next start puts
+right. While another `FIFA17.exe` is running it changes nothing.
+
+It stops a launch in one case only: Impulsum17 starts the game, its
+`version.dll` is not in the folder, and no copy is kept. A box says *Impulsum
+17's game file (version.dll) is no longer in your FIFA 17 folder. Another
+launcher replaced it. Run Impulsum17-Setup again, then press Play.* Do that:
+the Impulsum17 installer puts its DLL back, and from then on the gate keeps a
+copy. Everything else goes wrong open: if the gate cannot do something, the
+game starts as it would have without it, and `--verify` says what happened.
+
+Every run is one line in `cxfifa-gate.log` in the bottle's folder.
+**Fix my installation.command** (`./setup.sh --repair`) and the installer put
+the gate in and keep the copies; `./setup.sh --fix-folder` keeps them on its
+own. None of them changes the game's files: putting them back is the gate's
+job, at the next start, when it knows which launcher is starting.
+
+To turn the gate off for a bottle, add `"CX_FIFA_GATE" = "0"` to the
+`[EnvironmentVariables]` of its `cxbottle.conf` (CrossOver closed), as with
+`CX_GAME_PROFILES`. Then a launch after CAS dies at 27 seconds again unless you
+start the game from CAS.
+
+`./setup.sh --verify` ends with a block for the game folder, and the
+Impulsum17 column of its table says `missing Impulsum DLL` when Impulsum17's
+DLL is in neither place:
+
+```
+FIFA 17 game folder
+  /Volumes/Untitled/FIFA 17    FIFA 17 last ran here 11:16 (cas); CAS and Impulsum17 point here
+  data files      CAS mod data (CAS Custom Players v1791671949, 8 files)
+                  the next launch that is not CAS's puts the game's own back
+  version.dll     CAS's redirect (3323b59b)
+  originals       7/7 in .crossover-fifa, match FIFA 17's final update
+  Impulsum DLL    kept in .crossover-fifa (7c8c3af4); the gate puts it back
+                  when Impulsum17 starts
+  gate            on (ntdll.so has CX_FOLDER_GATE_V1, script is the shipped one)
+  last launches   11:16 cas: nothing to do | 10:53 aurora: 7 file(s) restored, cas_03.cas parked
+  other files     version.dll.cas-backup is Aurora.exe's shim
+                  (copies the launchers made; FIFA 17 itself loads only version.dll)
+  ~/Downloads/FIFA 17          only a guess: no launcher points here
+```
+
+- The folder is the one the launchers use: the one the game last started
+  from, then CAS's and Impulsum17's own records, then `Aurora.exe`'s, and a
+  copy in `~/Downloads` only when nothing names another.
+  `AURORA_GAME_DIR='/path/to/FIFA 17'` comes before all of them.
+- **BAD** when the bottle has two or more FIFA 17 launchers and the gate is
+  off (an older copy, or `CX_FIFA_GATE=0`): run **Fix my installation.command**.
+  **BAD** when CAS's data is in the game and the game's own copy of a file is
+  nowhere (not in `.crossover-fifa`, not in CAS's `original` folder): use CAS's
+  own restore button, or reinstall the game's files. **BAD** when the last
+  start could not put the folder right; the next start tries again.
+- `version.dll.*` files are named after whoever made the backup, not what is
+  in them, so `other files` says what each really is. They are the launchers'
+  and stay where they are.
+
+`.crossover-fifa` can be deleted while no launcher is open once `--verify`
+says the data files are the game's own. While CAS's data is in the game it
+may hold the only copy of the originals.
 
 ## What you need
 

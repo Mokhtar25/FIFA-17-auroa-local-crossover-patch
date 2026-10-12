@@ -6,7 +6,10 @@
 # other bottle you run in it are left exactly as they are.
 #
 # Everything it does can be undone by running ./uninstall.sh.
-# It never changes a file of the game's own. The one thing it downloads is
+# It never changes a file of the game's own. In the FIFA 17 folder it adds one
+# hidden folder, .crossover-fifa: copies of the files launchers replace (about
+# 75 MB, only once CAS is used), which the folder gate in the patched Wine uses
+# to give each launcher the game the way it needs it. The one thing it downloads is
 # Microsoft's fixed-version Edge WebView2 runtime 99.0.1150.52 (165 MB, once,
 # FIFA 17 only), which is what makes the RebornFUT launcher's window draw;
 # WEBVIEW2_CAB=/path/to/the.cab uses a copy you already have and
@@ -61,6 +64,12 @@
 #                                         "Fix my installation.command" is this
 #   ./setup.sh --offline-menu             (re)add the FIFA 17 (offline) entry to the
 #                                         bottle, e.g. after moving the game folder
+#   ./setup.sh --fix-folder               keep the copies the FIFA 17 folder gate
+#                                         puts back (the game's own data files once
+#                                         CAS is used, Impulsum17's version.dll) in
+#                                         each FIFA 17 folder's .crossover-fifa.
+#                                         Never changes the game's files. --repair
+#                                         and the installer do this too
 #   ./setup.sh --offline                  install FIFA 17 with no Aurora17 at all:
 #                                         the CrossOver copy, the fixes and the
 #                                         bottle settings only (the Aurora17 bottle
@@ -134,6 +143,7 @@ case "${1:-}" in
     --play-log) MODE=play-log; shift ;;
     --reseed-licence|--reseed-license) MODE=reseed-licence; shift ;;
     --offline-menu) MODE=offline-menu; shift ;;
+    --fix-folder) MODE=fix-folder; shift ;;
     --repair) MODE=repair; shift ;;
     --ensure-licence|--ensure-license) MODE=ensure-licence; shift ;;
     --fifa15)
@@ -255,6 +265,24 @@ FILES=(
 # One more file, added rather than replaced, so it is not in FILES: the thing
 # that makes name resolution work without touching /etc/hosts. See below.
 RESOLVER=x86_64-unix/a17hosts.dylib
+# And one more, added beside ntdll.so the same way: the FIFA 17 folder gate.
+# Several launchers share one FIFA 17 folder and leave it each their own way
+# (CAS's mod data kills the game under every other launcher; Impulsum17's
+# version.dll is overwritten by whoever played last). ntdll.so runs this
+# script when FIFA17.exe or Impulsum17Launcher.exe starts, before the
+# program's own code, and it puts the folder the way the starting launcher
+# needs it. All the policy is in the script, so it ships through --repair
+# with no rebuild; ntdll.so only says "run it". An ntdll.so that does has
+# GATE_MARKER in it. CX_FIFA_GATE=0 in a bottle turns it off there.
+GATE=x86_64-unix/cx-fifa17-gate
+GATE_MARKER=CX_FOLDER_GATE_V1
+# The script is also where the path mapping, the table of the game's own
+# files and the way a version.dll is recognised live, so this script reads
+# them from there rather than keeping a second copy (functions named cxg_*).
+# Sourced, it defines things and runs nothing.
+if [ -f "$HERE/fixes/$GATE" ]; then
+    source "$HERE/fixes/$GATE"
+fi
 
 # The Mach-O files that have to be signed after we have touched them. The first
 # four are ours; a17hosts.dylib is new; ws2_32.so is CrossOver's own, edited in
@@ -742,7 +770,7 @@ fi
 # launcher, its logs or its licence has nothing to do for them.
 if [ "$GAME" != fifa17 ]; then
     case "$MODE" in
-        smoke|report|bundle|play-log|play-offline|offline-menu|ensure-licence|reseed-licence|repair) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for $GAME_LABEL yet."
+        smoke|report|bundle|play-log|play-offline|offline-menu|ensure-licence|reseed-licence|repair|fix-folder) print -r -- "--$MODE knows only FIFA 17's launcher and logs; it has nothing to watch for $GAME_LABEL yet."
                       print -r -- "Use  ./setup.sh --$GAME --verify  instead."
                       exit $E_UNSUPPORTED ;;
     esac
@@ -2324,13 +2352,11 @@ connector_game_dir() {
 
 # Y:\Downloads\FIFA 17 -> the real path, through the bottle's own mapping. The
 # separators arrive doubled, having been through JSON, so a run of backslashes
-# of any length collapses to one slash.
+# of any length collapses to one slash. The mapping itself is the folder
+# gate's (cxg_win_to_unix in fixes/x86_64-unix/cx-fifa17-gate), which has to do
+# the same at every game start: one copy, not two.
 win_path_to_unix() {
-    local gamedir="$1" drive rest
-    [ -n "$gamedir" ] || return 1
-    drive="${gamedir%%:*}"
-    rest="$(print -r -- "$gamedir" | sed -e 's|^[A-Za-z]:||' -e 's|\\\\*|/|g')"
-    print -r -- "$BOTTLE_DIR/$BOTTLE/dosdevices/${(L)drive}:$rest"
+    cxg_win_to_unix "$BOTTLE_DIR/$BOTTLE" "$1"
 }
 
 # ------------------------------------------- the EA licence file (BUGS.md §18)
@@ -2346,19 +2372,79 @@ bottle_licence_file() {
     print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/ProgramData/Electronic Arts/EA Services/License/1027460.dlf"
 }
 
-# Where FIFA 17 is, in macOS terms. The connector records it, but only once
-# Aurora has run in the bottle -- and the licence is missing exactly when
-# nothing has run yet -- so fall back to AURORA_GAME_DIR and the usual places.
-game_dir_find() {
-    local gd u d
-    gd="$(connector_game_dir 2>/dev/null || true)"
-    if [ -n "$gd" ]; then
-        u="$(win_path_to_unix "$gd" 2>/dev/null || true)"
-        if [ -n "$u" ] && [ -f "$u/_fifa17.exe" ]; then print -r -- "$u"; return 0; fi
+# Every folder FIFA 17 might be played from, one per line as
+# "sources<TAB>Mac path", best first, each with FIFA17.exe in it. The order:
+#   AURORA_GAME_DIR   said outright, always first
+#   gate log          where FIFA17.exe last actually started in this bottle
+#                     (the folder gate writes cxfifa-gate.log in the bottle)
+#   CAS               HKCU\Software\CAS\Launcher  FifaFolder
+#   Impulsum17        its Inno uninstall key's InstallLocation (it installs
+#                     itself into the game folder)
+#   Aurora.exe        Aurora15Connector.ini  Fifa17Path (often empty: Aurora
+#                     finds FIFA 17 on its own)
+#   Aurora17          the old connector's connector.json gameDirectory
+#   EA registry       EA Sports\FIFA 17  Install Dir
+#   guess             ~/Downloads, ~/Desktop, ~/Games, ~ (and FIFA17_DIR)
+# Until the launchers' own records were read here, the home-folder guesses
+# came second and won: on a Mac with a stray ~/Downloads/FIFA 17, --verify,
+# the licence seeding and Impulsum17's check all looked at a folder no
+# launcher used. The same folder named by several sources is one line.
+fifa17_dir_candidates() {
+    local reg w log d sec
+    local -A FC_SRC; local -a FC_ORDER
+    FC_SRC=(); FC_ORDER=()
+    _fifa17_cand() {
+        local d="$2"
+        [ -n "$d" ] || return 0
+        [ -f "$d/FIFA17.exe" ] || return 0
+        d="${d:A}"
+        if (( ${+FC_SRC[$d]} )); then
+            [[ ", ${FC_SRC[$d]}, " == *", $1, "* ]] || FC_SRC[$d]="${FC_SRC[$d]}, $1"
+        else
+            FC_SRC[$d]="$1"; FC_ORDER+=( "$d" )
+        fi
+    }
+    _fifa17_win() { local u; u="$(win_path_to_unix "$2" 2>/dev/null)" && _fifa17_cand "$1" "$u"; return 0; }
+    _fifa17_cand AURORA_GAME_DIR "${AURORA_GAME_DIR:-}"
+    log="$BOTTLE_DIR/$BOTTLE/cxfifa-gate.log"
+    if [ -f "$log" ]; then
+        d="$(awk -F'\t' 'tolower($2) == "fifa17.exe" && $3 != "-" { d = $3 } END { print d }' "$log" 2>/dev/null)"
+        _fifa17_cand "gate log" "$d"
     fi
-    for d in "${AURORA_GAME_DIR:-}" "$HOME/Downloads/FIFA 17" "$HOME/FIFA 17" "$HOME/Desktop/FIFA 17"; do
-        [ -n "$d" ] || continue
-        if [ -f "$d/_fifa17.exe" ]; then print -r -- "$d"; return 0; fi
+    reg="$(bottle_user_reg)"
+    w="$(reg_value "$reg" '[Software\\CAS\\Launcher]' FifaFolder 2>/dev/null || true)"
+    _fifa17_win CAS "$w"
+    reg="$(bottle_system_reg)"
+    for sec in '[Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'"$IMPULSUM_UNINSTALL_KEY"']' \
+               '[Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'"$IMPULSUM_UNINSTALL_KEY"']'; do
+        w="$(reg_value "$reg" "$sec" InstallLocation 2>/dev/null || true)"
+        _fifa17_win Impulsum17 "$w"
+    done
+    d="$(aurora_ini_dir Fifa17Path 2>/dev/null || true)"
+    _fifa17_cand Aurora.exe "$d"
+    w="$(connector_game_dir 2>/dev/null || true)"
+    _fifa17_win Aurora17 "$w"
+    for sec in '[Software\\Wow6432Node\\EA Sports\\FIFA 17]' '[Software\\EA Sports\\FIFA 17]'; do
+        w="$(reg_value "$reg" "$sec" "Install Dir" 2>/dev/null || true)"
+        _fifa17_win "EA registry" "$w"
+    done
+    for d in "${FIFA17_DIR:-}" "$HOME/Downloads/FIFA 17" "$HOME/FIFA 17" "$HOME/Desktop/FIFA 17" \
+             "$HOME/Games/FIFA 17"; do
+        _fifa17_cand guess "$d"
+    done
+    for d in $FC_ORDER; do print -r -- "${FC_SRC[$d]}	$d"; done
+    return 0
+}
+# Impulsum17's Inno Setup AppId, which names its uninstall key.
+IMPULSUM_UNINSTALL_KEY='{8F3C5E0A-1C34-4D8E-9E1B-7C2A5D9F1707}_is1'
+
+# Where FIFA 17 is, in macOS terms, for the things that start its loader
+# (the licence seeding, --play-offline, the offline menu entry): the first
+# folder above that also has _fifa17.exe in it.
+game_dir_find() {
+    local l
+    for l in ${(f)"$(fifa17_dir_candidates)"}; do
+        [ -f "${l#*$'\t'}/_fifa17.exe" ] && { print -r -- "${l#*$'\t'}"; return 0; }
     done
     return 1
 }
@@ -2366,25 +2452,9 @@ game_dir_find() {
 # /Users/me/Downloads/FIFA 17 -> Y:\Downloads\FIFA 17, through the bottle's own
 # dosdevices links, longest match first so y: beats z:. The loader is started by
 # drive letter because that is how CrossOver starts it, and how the run that
-# proved this worked.
+# proved this worked. The folder gate's mapping, as above.
 unix_path_to_win() {
-    local p="${1%/}" link target dl best_drive="" best_target="" rest
-    for link in "$BOTTLE_DIR/$BOTTLE"/dosdevices/?:(N@); do
-        target="$(readlink "$link" 2>/dev/null || true)"
-        [ -n "$target" ] || continue
-        case "$target" in
-            ../drive_c) target="$BOTTLE_DIR/$BOTTLE/drive_c" ;;
-        esac
-        target="${target%/}"
-        [ "$p" = "$target" ] || [ "${p#$target/}" != "$p" ] || continue
-        if [ -z "$best_drive" ] || [ "${#target}" -gt "${#best_target}" ]; then
-            best_target="$target"; best_drive="${link:t}"
-        fi
-    done
-    [ -n "$best_drive" ] || return 1
-    rest="${p#$best_target}"
-    dl="${(U)best_drive%:}"
-    print -r -- "${dl}:${rest//\//\\}"
+    cxg_unix_to_win "$BOTTLE_DIR/$BOTTLE" "$1"
 }
 
 # The game and its loader in THIS bottle, and no other.
@@ -2662,7 +2732,11 @@ game_dir_of() {
     case "$g" in
         fifa15) d="$(f15_game_dir 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
         fifa16) d="$(f16_game_dir 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
-        fifa17) d="$(game_dir_find 2>/dev/null)" && { print -r -- "$d"; return 0; } ;;
+        fifa17)
+            # The folder the launchers really use (fifa17_dir_candidates).
+            d="$(fifa17_dir_candidates | head -1)"
+            d="${d#*$'\t'}"
+            [ -n "$d" ] && { print -r -- "$d"; return 0; } ;;
     esac
     case "$g" in fifa15) key=FifaPath ;; *) key="Fifa${n}Path" ;; esac
     d="$(aurora_ini_dir "$key" 2>/dev/null)" && [ -f "$d/$exe" ] && { print -r -- "${d:A}"; return 0; }
@@ -2797,9 +2871,14 @@ cas_launcher_exe() {
     local a; a="$(bottle_appdata 2>/dev/null)" || return 1
     [ -f "${a:h}/CAS/cas.exe" ] && print -r -- "${a:h}/CAS/cas.exe"
 }
+# Impulsum17 lives in a FIFA 17 folder, not necessarily the first one.
 impulsum_launcher_exe() {
-    local d; d="$(game_dir_of fifa17 2>/dev/null)" || return 1
-    [ -f "$d/Impulsum17Launcher.exe" ] && print -r -- "$d/Impulsum17Launcher.exe"
+    local l
+    for l in ${(f)"$(fifa17_dir_candidates)"}; do
+        [ -f "${l#*$'\t'}/Impulsum17Launcher.exe" ] \
+            && { print -r -- "${l#*$'\t'}/Impulsum17Launcher.exe"; return 0; }
+    done
+    return 1
 }
 reborn_launcher_exe() {
     local d a; local -a inside
@@ -2812,6 +2891,16 @@ reborn_launcher_exe() {
         [ -f "$d/RebornFUT.exe" ] && { print -r -- "$d/RebornFUT.exe"; return 0; }
     done
     return 1
+}
+
+# Whether Impulsum17's own version.dll is in reach: in its folder, or kept in
+# that folder's .crossover-fifa by the folder gate.
+impulsum_dll_reachable() {
+    local exe d
+    exe="$(impulsum_launcher_exe 2>/dev/null)" || return 1
+    d="${exe:h}"
+    [ "$(cxg_dll_kind "$d/version.dll")" = impulsum ] && return 0
+    [ "$(cxg_dll_kind "$d/$CXG_STASH/impulsum/version.dll")" = impulsum ]
 }
 
 # The pieces more than one launcher needs.
@@ -2894,6 +2983,12 @@ gt_cell() {
     case "$l" in
         aurora|impulsum) dll_native_global version || { print -r -- "missing version override"; return 0; } ;;
     esac
+    # Impulsum17's own version.dll. Only its installer ever puts it in, and
+    # every other launcher replaces it, so it counts when it is in the folder
+    # or kept where the folder gate can put it back.
+    if [ "$l" = impulsum ]; then
+        impulsum_dll_reachable || { print -r -- "missing Impulsum DLL"; return 0; }
+    fi
     if [ "$l:$g" = aurora:fifa21 ]; then
         gt_powershell_ok || { print -r -- "missing PowerShell stand-in"; return 0; }
         gt_dnscache_ok   || { print -r -- "missing Dnscache stand-in"; return 0; }
@@ -2972,6 +3067,277 @@ verify_games_table() {
     say "  settings: table = the copy's own per-game settings; AppDefaults = this"
     say "  bottle's choice for that program; bare env = the bottle's variables."
     say "  ready means every static check passed; only a launch proves it plays."
+    return 0
+}
+
+# ------------------------------------------- the FIFA 17 folder and its gate
+# Whether the folder gate runs in this bottle, as "on", "stale", "off" or
+# "none" (this package has no gate to install yet), a tab, and what to say.
+# It runs when the copy's ntdll.so has GATE_MARKER, the script is beside it
+# and the bottle has not turned it off.
+fifa17_gate_state() {
+    local app="$1" wine ntdll script
+    wine="$app/Contents/SharedSupport/CrossOver/lib/wine"
+    ntdll="$wine/x86_64-unix/ntdll.so"; script="$wine/$GATE"
+    if [[ "$(conf_value CX_FIFA_GATE)" == 0* ]]; then
+        print -r -- "off	off in this bottle (\"CX_FIFA_GATE\" = \"0\" in its cxbottle.conf)"
+    elif ! LC_ALL=C grep -aqF "$GATE_MARKER" "$ntdll" 2>/dev/null; then
+        if LC_ALL=C grep -aqF "$GATE_MARKER" "$HERE/fixes/x86_64-unix/ntdll.so" 2>/dev/null; then
+            print -r -- "off	off: ${app:t}'s ntdll.so is older than the folder gate (./setup.sh --repair updates it)"
+        else
+            print -r -- "none	off: this package's ntdll.so has no folder gate yet"
+        fi
+    elif [ ! -f "$script" ]; then
+        print -r -- "off	off: ${GATE:t} is missing from ${app:t} (./setup.sh --repair puts it in)"
+    elif ! cmp -s "$HERE/fixes/$GATE" "$script"; then
+        print -r -- "stale	on, but ${app:t}'s ${GATE:t} is not this package's (./setup.sh --repair replaces it)"
+    else
+        print -r -- "on	on (ntdll.so has $GATE_MARKER, script is the shipped one)"
+    fi
+}
+
+# The gate log's lines for one folder, newest first: "HH:MM launcher: what".
+fifa17_gate_runs() {
+    local log="$BOTTLE_DIR/$BOTTLE/cxfifa-gate.log"
+    [ -f "$log" ] || return 0
+    awk -F'\t' -v d="$1" -v today="$(date +%Y-%m-%d)" '
+        $3 == d && (tolower($2) == "fifa17.exe" || tolower($2) == "impulsum17launcher.exe") {
+            t = substr($1, 12, 5); if (substr($1, 1, 10) != today) t = substr($1, 6, 5) " " t
+            who = $4; sub(/\(.*/, "", who)
+            if (tolower($2) == "impulsum17launcher.exe") who = "Impulsum17 launcher"
+            what = $5; if ($6 != "ok") what = what " (" $6 ")"
+            line[++n] = t "\t" who "\t" what "\t" $6 "\t" tolower($2)
+        }
+        END { for (i = n; i >= 1; i--) print line[i] }' "$log" 2>/dev/null
+    return 0
+}
+
+# One block in --verify: every folder FIFA 17 might be played from, what is in
+# it, and whether the gate is there to put it right. Read only. Sets
+# FOLDER_PROBLEMS to the number of BAD lines, which verify_install counts.
+verify_fifa17_folders() {
+    local app="$1" l src d gl gstate gtext pfx="$BOTTLE_DIR/$BOTTLE" shown=0 v x t
+    local -a cands lnch pointed runs bk cnt
+    local -A FX
+    FOLDER_PROBLEMS=0
+    cands=( ${(f)"$(fifa17_dir_candidates)"} )
+    say ""
+    say "FIFA 17 game folder"
+    if [ ${#cands} -eq 0 ]; then
+        say "  none found. A folder kept somewhere else:"
+        say "      AURORA_GAME_DIR='/path/to/FIFA 17' ./setup.sh --verify"
+        return 0
+    fi
+    lnch=()
+    aurora_launcher_dir >/dev/null 2>&1 && lnch+=( Aurora.exe )
+    impulsum_launcher_exe >/dev/null 2>&1 && lnch+=( Impulsum17 )
+    cas_launcher_exe >/dev/null 2>&1 && lnch+=( CAS )
+    gl="$(fifa17_gate_state "$app")"
+    gstate="${gl%%$'\t'*}"; gtext="${gl#*$'\t'}"
+    CXG_PS_OUT="$(cxg_ps)"
+    pointed=()
+    for l in $cands; do
+        src="${l%%$'\t'*}"; d="${l#*$'\t'}"
+        x=""
+        for v in CAS Impulsum17 Aurora.exe Aurora17 "EA registry"; do
+            [[ ", $src, " == *", $v, "* ]] && x="${x:+$x, }$v"
+        done
+        [ -n "$x" ] && pointed+=( "$x uses ${d/#$HOME/~}" )
+        # A guess, when anything better is known, is one line.
+        t="${d/#$HOME/~}"
+        (( ${#t} < 28 )) && t="${(r:28:)t}"
+        if [ "$src" = guess ] && [ ${#cands} -gt 1 ]; then
+            say "  $t only a guess: no launcher points here"
+            continue
+        fi
+        shown=$((shown + 1))
+        FX=( build "" cas_around 0 dll missing total 0 kept 0 in_cas_original 0 unchecked 0
+             own "" changed "" missing "" unrecoverable "" added "" parked "" cas_mod "" cas_files 0 )
+        for v in ${(f)"$(cxg_folder_facts "$d" "$pfx")"}; do
+            [[ "$v" == *=* ]] || continue
+            case "$v" in
+                backup=*) bk+=( "${v#backup=}" ) ;;
+                *) FX[${v%%=*}]="${v#*=}" ;;
+            esac
+        done
+        runs=( ${(f)"$(fifa17_gate_runs "$d")"} )
+        # The heading: where the game last ran from, and who points here.
+        gl=""
+        for v in $runs; do
+            [[ "${v##*$'\t'}" == fifa17.exe ]] || continue
+            gl="FIFA 17 last ran here ${v%%$'\t'*} (${${v#*$'\t'}%%$'\t'*})"; break
+        done
+        if [[ "$x" == *,* ]]; then
+            gl="${gl:+$gl; }${x%, *} and ${x##*, } point here"
+        elif [ -n "$x" ]; then
+            gl="${gl:+$gl; }$x points here"
+        fi
+        [[ ", $src, " == *", AURORA_GAME_DIR, "* ]] && gl="${gl:+$gl; }AURORA_GAME_DIR names it"
+        [ -n "$gl" ] || gl="only a guess: no launcher points here"
+        say "  $t $gl"
+
+        # The data files.
+        if [ "${FX[build]:-}" != known ]; then
+            say "  data files      unknown FIFA 17 build (FIFA17.exe is not the final update):"
+            say "                  the gate leaves its data files alone"
+            note "unknown FIFA 17 build in ${d/#$HOME/~}: the folder gate cannot tell its own"
+            say "        data files from a launcher's there, so it leaves them as they are"
+        elif [ "${FX[unchecked]:-0}" -gt 0 ] && [ -z "${FX[changed]}${FX[added]}" ]; then
+            say "  data files      not checked: CAS has not been used with this folder, and"
+            say "                  nothing else changes them"
+        elif [ -z "${FX[changed]}${FX[added]}${FX[missing]}" ]; then
+            say "  data files      the game's own (${FX[total]} of ${FX[total]})"
+        elif [ -n "${FX[changed]}" ] && [ -z "${FX[own]}" ]; then
+            v="${FX[cas_mod]:-CAS's}"
+            cnt=( ${(s:,:)FX[changed]} ${(s:,:)FX[added]} )
+            say "  data files      CAS mod data ($v, ${#cnt} files)"
+            say "                  the next launch that is not CAS's puts the game's own back"
+        else
+            cnt=( ${(s:,:)FX[own]} )
+            say "  data files      mixed: ${#cnt} of ${FX[total]} are the game's own${FX[added]:+; ${FX[added]//,/, } in}"
+            [ -n "${FX[missing]}" ] && say "                  missing: ${FX[missing]//,/, }"
+            note "the data files in ${d/#$HOME/~} are half the game's own and half a"
+            say "        launcher's. The next launch puts them right."
+        fi
+        if [ -n "${FX[unrecoverable]}" ] && ! cxg_running FIFA17.exe; then
+            bad "CAS's data is in ${d/#$HOME/~} and the game's own copy of"
+            say "        ${FX[unrecoverable]//,/, } is nowhere: not in .crossover-fifa, not in"
+            say "        CAS's original/ folder. Nothing can put it back. Use CAS's own"
+            say "        restore button, or reinstall the game's files."
+            FOLDER_PROBLEMS=$((FOLDER_PROBLEMS + 1))
+        fi
+        say "  version.dll     $(cxg_dll_label "${FX[dll]}")${FX[dll_sha8]:+ (${FX[dll_sha8]})}"
+        # The kept originals.
+        if [ "${FX[kept]}" -gt 0 ] || [ "${FX[cas_around]}" = 1 ]; then
+            if [ "${FX[kept]}" = "${FX[total]}" ]; then
+                say "  originals       ${FX[kept]}/${FX[total]} in .crossover-fifa, match FIFA 17's final update"
+            elif [ "${FX[in_cas_original]}" -gt 0 ]; then
+                say "  originals       ${FX[kept]}/${FX[total]} in .crossover-fifa; CAS keeps copies in its original/ folder"
+                say "                  (./setup.sh --fix-folder keeps them here, so they outlive CAS)"
+            else
+                say "  originals       ${FX[kept]}/${FX[total]} in .crossover-fifa"
+            fi
+        else
+            say "  originals       not needed: CAS has not been used with this folder"
+        fi
+        # Impulsum17's DLL.
+        if [ -n "${FX[impulsum_here]:-}" ] || [ -n "${FX[impulsum_kept]:-}" ]; then
+            if [ -n "${FX[impulsum_kept]:-}" ]; then
+                if [ "${FX[dll]}" = impulsum ]; then
+                    say "  Impulsum DLL    kept in .crossover-fifa (${FX[impulsum_kept]}), and in the folder"
+                else
+                    say "  Impulsum DLL    kept in .crossover-fifa (${FX[impulsum_kept]}); the gate puts it back"
+                    say "                  when Impulsum17 starts"
+                fi
+            elif [ "${FX[dll]}" = impulsum ]; then
+                say "  Impulsum DLL    in the folder, not kept yet: Impulsum17's next start keeps it"
+                say "                  (or ./setup.sh --fix-folder)"
+            else
+                say "  Impulsum DLL    not on this Mac: Impulsum17's PLAY will stop and say so."
+                say "                  Run Impulsum17-Setup again (it keeps nothing else of yours)."
+                note "Impulsum17's version.dll is gone from ${d/#$HOME/~}: another launcher"
+                say "        replaced it. Run Impulsum17-Setup again, then press Play in Impulsum17."
+            fi
+        fi
+        say "  gate            $gtext"
+        if [ "$gstate" = off ] && [ ${#lnch} -ge 2 ]; then
+            bad "the folder gate is off, and the $BOTTLE bottle has ${#lnch} FIFA 17 launchers"
+            say "        (${(j:, :)lnch}). Each leaves the game folder its own way, and the next"
+            say "        launch can die with the last one's files. Fix: ./setup.sh --repair"
+            FOLDER_PROBLEMS=$((FOLDER_PROBLEMS + 1))
+        elif [ "$gstate" = stale ]; then
+            note "the folder gate's script in ${app:t} is not this package's. ./setup.sh --repair"
+        elif [ "$gstate" = none ] && [ ${#lnch} -ge 2 ]; then
+            note "${#lnch} FIFA 17 launchers share this folder and nothing puts it right"
+            say "        between them: after a CAS PLAY, start the game from CAS again, or"
+            say "        expect the next launch from another launcher to die at ~27 seconds."
+        fi
+        if [ ${#runs} -gt 0 ]; then
+            v=""
+            for x in ${runs[1,2]}; do
+                v="${v:+$v | }${x%%$'\t'*} ${${x#*$'\t'}%%$'\t'*}: ${${${x#*$'\t'}#*$'\t'}%%$'\t'*}"
+            done
+            say "  last launches   $v"
+            case "${${${${runs[1]#*$'\t'}#*$'\t'}#*$'\t'}%%$'\t'*}" in
+                failed|incomplete)
+                    bad "the last game start could not put ${d/#$HOME/~} right:"
+                    say "        ${${${runs[1]#*$'\t'}#*$'\t'}%%$'\t'*}"
+                    say "        The next start tries again. The log is $BOTTLE_DIR/$BOTTLE/cxfifa-gate.log"
+                    FOLDER_PROBLEMS=$((FOLDER_PROBLEMS + 1)) ;;
+            esac
+        fi
+        [ -n "${FX[journal]:-}" ] && note "the last gate run in ${d/#$HOME/~} was interrupted; the next start finishes it"
+        if [ -n "${FX[unknown_changes]:-}" ]; then
+            note "since FIFA 17 last started, files changed in ${d/#$HOME/~} that no known"
+            say "        launcher writes: ${FX[unknown_changes]//,/, }"
+        fi
+        # The launchers' backups, by what is in them, not by their names.
+        if [ ${#bk} -gt 0 ]; then
+            v="  other files    "
+            for x in $bk; do
+                if [ "${x%%:*}" = verorig.dll ] && [ "${x#*:}" = wine ]; then
+                    say "$v ${x%%:*} is Wine's own (CAS's redirect hands calls on to it)"
+                else
+                    say "$v ${x%%:*} is $(cxg_dll_label "${x#*:}")"
+                fi
+                v="                 "
+            done
+            say "                  (copies the launchers made; FIFA 17 itself loads only version.dll)"
+        fi
+        bk=()
+    done
+    if [ ${#pointed} -gt 1 ]; then
+        note "the launchers do not agree on the game folder: ${(j:; :)pointed}"
+    fi
+    return 0
+}
+
+# Keeps the copies the folder gate puts back, in every FIFA 17 folder a
+# launcher uses: the game's own data files once CAS has anything to do with
+# the folder (each checked against the table, about 75 MB, once), and any
+# Impulsum17 version.dll found. It never changes a file of the game's own:
+# putting the game's files back is the gate's job, at the next start, when it
+# knows which launcher is starting. --fix-folder runs it, and so does step 9e
+# of the bottle setup, which the installer and --repair both run.
+fix_fifa17_folders() {
+    local l src d pfx="$BOTTLE_DIR/$BOTTLE" acts
+    local -a cands
+    cands=( ${(f)"$(fifa17_dir_candidates)"} )
+    if [ ${#cands} -eq 0 ]; then
+        note "no FIFA 17 folder found, so nothing to keep. For one kept elsewhere:"
+        say "        AURORA_GAME_DIR='/path/to/FIFA 17' ./setup.sh --fix-folder"
+        return 0
+    fi
+    for l in $cands; do
+        src="${l%%$'\t'*}"; d="${l#*$'\t'}"
+        [ "$src" = guess ] && [ ${#cands} -gt 1 ] && continue
+        if ! cxg_cas_around "$d" "$pfx" && [ ! -f "$d/Impulsum17Launcher.exe" ] \
+           && [ ! -d "$d/$CXG_STASH" ] && [ "$(cxg_dll_kind "$d/version.dll")" != impulsum ]; then
+            ok "${d/#$HOME/~}: nothing to keep (no CAS and no Impulsum17 here)"
+            continue
+        fi
+        if ! cxg_stash_make "$d"; then
+            note "could not write $d/$CXG_STASH"
+            continue
+        fi
+        if ! cxg_lock "$d/$CXG_STASH" 15; then
+            note "${d/#$HOME/~} is busy (a game start holds it); run this again"
+            continue
+        fi
+        CXG_ACTS=(); CXG_PROBS=()
+        CXG_JOURNAL="$d/$CXG_STASH/journal"
+        cxg_capture "$d" "$pfx" || true
+        rm -f "$CXG_JOURNAL"
+        CXG_JOURNAL=""
+        cxg_unlock "$d/$CXG_STASH"
+        acts="${(j:, :)CXG_ACTS}"
+        ok "${d/#$HOME/~}: ${acts:-everything worth keeping is already kept}"
+        [ ${#CXG_PROBS} -gt 0 ] && note "${(j:; :)CXG_PROBS}"
+        if [ -f "$d/Impulsum17Launcher.exe" ] && [ ! -f "$d/$CXG_STASH/impulsum/version.dll" ]; then
+            note "Impulsum17's version.dll is not on this Mac: another launcher replaced it."
+            say "        Run Impulsum17-Setup again; its next start keeps the DLL."
+        fi
+    done
     return 0
 }
 
@@ -3615,6 +3981,14 @@ verify_install() {
     fi
 
     verify_no_cleanup_agent || problems=$((problems+1))
+
+    # The game folder the launchers share, and the gate that keeps it right
+    # for each of them. FIFA 17's alone: no other game's launchers change it.
+    if [ "$GAME" = fifa17 ]; then
+        FOLDER_PROBLEMS=0
+        verify_fifa17_folders "$app"
+        problems=$((problems + FOLDER_PROBLEMS))
+    fi
     say ""
     if [ "$problems" -eq 0 ]; then
         # Everything here is static -- files, UUIDs, signatures, registry keys.
@@ -4346,7 +4720,7 @@ bundle_mode() {
         print -r -- "ones by design -- they are re-signed on install. --verify"
         print -r -- "compares Mach-O UUIDs, which signing does not change.)"
         local w="$app/Contents/SharedSupport/CrossOver/lib/wine"
-        for f in $FILES $RESOLVER x86_64-unix/ws2_32.so; do
+        for f in $FILES $RESOLVER $GATE x86_64-unix/ws2_32.so; do
             if [ -f "$w/$f" ]; then
                 print -r -- "  $(shasum -a 256 "$w/$f" | cut -c1-16)  $f"
             else
@@ -5209,6 +5583,12 @@ configure_bottle() {
     say ""
     say "9d. Letting the Aurora launcher start FIFA 21"
     install_dnscache_standin
+
+    # ------------------------------------------- 9e. the FIFA 17 game folder
+    # See fix_fifa17_folders. Only keeps copies; the gate does the rest.
+    say ""
+    say "9e. Keeping copies of the FIFA 17 files launchers replace"
+    fix_fifa17_folders
 }
 
 # ------------------------------------------------- the launch that is watched
@@ -6012,6 +6392,21 @@ if [ "$MODE" = offline-menu ]; then
     exit 0
 fi
 
+# Keeps the copies the folder gate needs (fix_fifa17_folders). Never changes
+# the game's own files, and needs neither CrossOver quit nor the app.
+if [ "$MODE" = fix-folder ]; then
+    say ""
+    say "Keeping copies of the FIFA 17 files launchers replace ($BOTTLE bottle)"
+    say ""
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] \
+        || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         For another name:  AURORA_BOTTLE='name' ./setup.sh --fix-folder"
+    fix_fifa17_folders
+    say ""
+    exit 0
+fi
+
 # ------------------------------------------------------- --ensure-licence
 # What the Start Menu shims call on every click (see guard_menu_shims). Quiet
 # and always successful by design: it runs in front of someone's launch, with
@@ -6313,6 +6708,18 @@ $APP_MGMT_HINT"
     else
         ok "${RESOLVER:t}"
     fi
+    # The folder gate's script, added beside ntdll.so the same way. Not
+    # Mach-O, but inside the app, so a changed one needs the app re-signed.
+    if [ ! -f "$wine/$GATE" ] || ! cmp -s "$HERE/fixes/$GATE" "$wine/$GATE"; then
+        cp -X "$HERE/fixes/$GATE" "$wine/$GATE" \
+            || die $E_PERMISSION "Could not install ${GATE:t} into $app.
+$APP_MGMT_HINT"
+        chmod 755 "$wine/$GATE" 2>/dev/null || true
+        stale+=( "$GATE" )
+        ok "${GATE:t} — replaced"
+    else
+        ok "${GATE:t}"
+    fi
     if ws2_32_is_patched "$wine"; then
         ok "ws2_32.so — reads the bottle's hosts file"
     else
@@ -6502,6 +6909,14 @@ $APP_MGMT_HINT"
             || die $E_PERMISSION "Could not replace ${RESOLVER:t} in $TARGET.
 $APP_MGMT_HINT"
         ok "replaced ${RESOLVER:t} with the shipped version"
+    fi
+    # The folder gate's script, the same way: signing seals it with the app.
+    if [ ! -f "$RESIGN_WINE/$GATE" ] || ! cmp -s "$HERE/fixes/$GATE" "$RESIGN_WINE/$GATE"; then
+        cp -X "$HERE/fixes/$GATE" "$RESIGN_WINE/$GATE" \
+            || die $E_PERMISSION "Could not install ${GATE:t} into $TARGET.
+$APP_MGMT_HINT"
+        chmod 755 "$RESIGN_WINE/$GATE" 2>/dev/null || true
+        ok "put in the shipped ${GATE:t}"
     fi
     if ! ws2_32_is_patched "$RESIGN_WINE"; then
         install_name_tool -change "$LIBSYSTEM" "$RESOLVER_PATH" \
@@ -6855,6 +7270,12 @@ cp -X "$HERE/fixes/$RESOLVER" "$WINE/$RESOLVER" \
     || die $E_PERMISSION "Could not install ${RESOLVER:t} into $APP.
 $APP_MGMT_HINT"
 ok "${RESOLVER:t}"
+# The FIFA 17 folder gate's script, beside ntdll.so, which runs it.
+cp -X "$HERE/fixes/$GATE" "$WINE/$GATE" \
+    || die $E_PERMISSION "Could not install ${GATE:t} into $APP.
+$APP_MGMT_HINT"
+chmod 755 "$WINE/$GATE" 2>/dev/null || true
+ok "${GATE:t}"
 if ws2_32_is_patched "$WINE"; then
     ok "ws2_32.so — already reading the bottle's hosts file"
 else

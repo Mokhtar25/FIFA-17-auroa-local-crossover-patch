@@ -216,6 +216,12 @@ if [ "$MODE" = "in-place" ]; then
         rm -f "$WINE/x86_64-unix/a17hosts.dylib"
         ok "removed a17hosts.dylib"
     fi
+    # The FIFA 17 folder gate's script. CrossOver's own ntdll.so, put back
+    # above, never runs it.
+    if [ -f "$WINE/x86_64-unix/cx-fifa17-gate" ]; then
+        rm -f "$WINE/x86_64-unix/cx-fifa17-gate"
+        ok "removed cx-fifa17-gate"
+    fi
 
     if [ "$put_back" -gt 0 ]; then
         # This re-signs ad-hoc. It does NOT restore CodeWeavers' signature,
@@ -483,5 +489,9 @@ say "    named has been deleted with it."
 say "  * Aurora17's own hosts receipt, if its launcher has run since. That is"
 say "    Aurora17's record, not ours. To clear it, run in the Aurora17 folder:"
 say "        .\\Aurora17Connector.exe uninstall-hosts"
-say "  * the game, your bottles, and everything in them."
+say "  * the game, your bottles, and everything in them. That includes the hidden"
+say "    .crossover-fifa folder inside your FIFA 17 folder: copies of the game's"
+say "    files that launchers replace. While CAS's data is in the game it may hold"
+say "    the only copy of the game's own files, so delete it only once they are back"
+say "    (./setup.sh --verify, run before uninstalling, says which are in the game)."
 say ""

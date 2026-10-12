@@ -1,0 +1,1043 @@
+#!/bin/zsh
+# The FIFA 17 folder gate.
+#
+# Several launchers share one FIFA 17 folder, and each wants it its own way.
+# CAS writes its mod data over seven of the game's files and adds cas_03.cas,
+# and that data stops FIFA 17 about 27 seconds into any launch that is not
+# CAS's. Aurora.exe and CAS put their own version.dll in on every PLAY, but
+# Impulsum17's only ever comes from its installer, so once another launcher
+# has played, Impulsum17's PLAY starts the game with somebody else's.
+#
+# CrossOver-FIFA's ntdll.so runs this script when FIFA17.exe or
+# Impulsum17Launcher.exe starts, before any of the program's own code has run,
+# and waits for it (up to 60 seconds). It starts it with zsh -f, in /, with
+# only PATH, HOME, LANG and CX_FIFA_GATE_FROM_WINE=1 set, so nothing here
+# leans on anyone's zsh settings: every function sets its own options.
+#
+#   /bin/zsh -f cx-fifa17-gate --exe FIFA17.exe --image 'Z:\...\FIFA17.exe'
+#            --parent cas.exe --envnames FUT17_GAME_CODE,PATH,... --prefix <bottle>
+#            --winpid 1234
+#
+# Only the names of the program's environment variables arrive, never their
+# values: Impulsum17's token is a secret. The script works out which launcher
+# started the game and puts the folder the way that launcher needs it, from
+# copies it keeps in the folder's hidden .crossover-fifa folder. Exit 10 asks
+# ntdll.so to stop the program; any other exit, a crash of this script or a
+# timeout lets it go on. Everything that goes wrong here goes wrong open: the
+# launch carries on as it would without the gate, and the log says why.
+# "CX_FIFA_GATE" = "0" in a bottle's cxbottle.conf turns the gate off there;
+# ntdll.so checks that before it runs anything.
+#
+# setup.sh sources this file for the pieces both need -- the Windows-to-Mac
+# path mapping, the table of the game's own files, how a version.dll is
+# recognised -- so there is one copy of each. Sourced, it only defines things.
+#
+# Test hooks, honoured only when CX_FIFA_GATE_FROM_WINE is not 1 (ntdll.so
+# sets it and hands the script nothing else, so a launch never sees them):
+#   CX_FIFA_GATE_TEST_TABLE   a file in the CXG_VANILLA format, used instead
+#   CX_FIFA_GATE_TEST_BUILDS  a file in the CXG_BUILDS format, used instead
+#   CX_FIFA_GATE_TEST_PS      a file standing in for `ps -Ao pid=,ppid=,command=`
+#   CX_FIFA_GATE_TEST_LOCK_WAIT  seconds to wait for a held lock (default 15)
+#   CX_FIFA_GATE_TEST_PAUSE   seconds to sleep after each restored file
+
+# Where this file is, sourced or run: Wine's own version.dll sits beside it in
+# the app (../x86_64-windows), and in the release folder too.
+CXG_HOME="${${(%):-%x}:A:h}"
+CXG_STASH=.crossover-fifa
+
+# ============================================================== the policy
+# Everything the gate decides is in the next three tables and in
+# cxg_identify below. Change them here; nothing else needs to move.
+
+# FIFA 17 builds whose files the table below describes: FIFA17.exe's size in
+# bytes and its PE timestamp. The final update, June 2017 (image size
+# 0x11359000). A build not listed is left alone, because restoring files from
+# another build's table would break it.
+CXG_BUILDS='
+224639408  593B37BB
+'
+
+# The game's own files that a launcher is known to replace, under the game
+# folder, with their size and sha256 in FIFA 17's final update. From
+# shasum -a 256 over CAS's copies of the originals (content/FIFA17-*/original),
+# which match what CAS recorded before it wrote. A copy is only ever kept or
+# put back when its hash is the one here, so no launcher's backup is trusted.
+CXG_VANILLA='
+Update/Patch/Data/layout.toc                                            29999  4de5a12f091b1d56b8e784e610469c1f2d4ee2ad6aaacc4c41a3f624c6c545bd
+Update/Patch/Data/Win32/chunks0.toc                                   8063195  3f20866f26b597f107d79b746eb5072181df00b0704ce627556079e3ce80f388
+Update/Patch/Data/Win32/superbundlelayout/fifa_installpackage_00/cas.cat 1378712  117cc00ffa2f897a07195e3432dbf9280b8c60251b868e79f91d4418853eac58
+Update/Patch/Data/Win32/fifa/fifagame/fifagame.sb                     1536566  c2ba456da709ad301b221092457fc0727469899f361abe133254b4fee68deae8
+Update/Patch/Data/Win32/storysba.sb                                  14516523  8eadbd4f2e11e858026447197ce0d22a1b06f5de662232f50243fb959f81f625
+Update/Patch/Data/Win32/storyinstallsba.sb                            2032531  2e8c915410e93ef77272f53ca77af59e0927ceb585c64074016e0d2d648128f3
+Update/Patch/Data/Win32/worldssb.sb                                  47987812  eaf1121518784406e8cc08ae0236379332f10e84ab28b77211e7bf8a8566a9c6
+'
+
+# Files a launcher adds that the game never had. On a launch that is not
+# theirs they are moved into .crossover-fifa/parked, never deleted (CAS puts
+# its own back on its next PLAY anyway). CAS's installed.json adds to this
+# list: every path it marks "replaces": false.
+CXG_ADDED='
+Update/Patch/Data/Win32/superbundlelayout/fifa_installpackage_00/cas_03.cas
+'
+
+# What a version.dll is, by its content and never by its file name: the
+# launchers' backups (version.dll.cas-backup, .before-impulsum, .aurora17)
+# are named after whoever made the backup, not after what is inside.
+#   cas       the export name cas-fifa-redirect.dll, or CAS's tag CASBRDG1
+#   impulsum  the names of the two variables Impulsum17 hands the game
+#   aurora    Aurora.exe's FIFA 17 shim, which reads FUT17_GAME_CODE
+#   reborn    RebornFUT's "Crumpet" DLL (it reads crumpet.ini)
+#   aurora17  the old Aurora17Connector shim
+#   wine      byte for byte Wine's own (CrossOver-FIFA's) version.dll
+cxg_dll_kind() {
+    emulate -L zsh
+    local f="$1" m wine="${CXG_HOME:h}/x86_64-windows/version.dll"
+    [[ -f $f ]] || { print -r -- missing; return 0; }
+    m="$(LC_ALL=C grep -aoE 'CASBRDG1|cas-fifa-redirect\.dll|IMPULSUM_AUTH_TOKEN|IMPULSUM_SERVER_HOST|FUT17_GAME_CODE|crumpet\.ini|Aurora17RedirectShim\.dll' "$f" 2>/dev/null)"
+    case "$m" in
+        *CASBRDG1*|*cas-fifa-redirect.dll*) print -r -- cas ;;
+        *IMPULSUM_AUTH_TOKEN*|*IMPULSUM_SERVER_HOST*) print -r -- impulsum ;;
+        *FUT17_GAME_CODE*) print -r -- aurora ;;
+        *crumpet.ini*) print -r -- reborn ;;
+        *Aurora17RedirectShim.dll*) print -r -- aurora17 ;;
+        *) if [[ -f $wine ]] && cmp -s "$f" "$wine"; then print -r -- wine
+           else print -r -- unknown; fi ;;
+    esac
+}
+
+# The same, for people.
+cxg_dll_label() {
+    case "$1" in
+        cas) print -r -- "CAS's redirect" ;;
+        impulsum) print -r -- "Impulsum17's" ;;
+        aurora) print -r -- "Aurora.exe's shim" ;;
+        reborn) print -r -- "RebornFUT's (Crumpet)" ;;
+        aurora17) print -r -- "the old Aurora17 shim" ;;
+        wine) print -r -- "Wine's own" ;;
+        missing) print -r -- "none" ;;
+        *) print -r -- "not one this knows" ;;
+    esac
+}
+
+# Who started the game, from what ntdll.so saw at its start. First match wins.
+#   EXE       FIFA17.exe (Impulsum17Launcher.exe is never identified: its gate
+#             only ever puts Impulsum17's own DLL back)
+#   PARENT    the Windows parent's image name, or - when it has gone
+#   ENVNAMES  the names in the program's environment, comma separated
+#   DLL       cxg_dll_kind of the version.dll in the game folder right now
+#   BRIDGE    1 when a CasBridge.exe is running
+# Prints "launcher<TAB>reason"; the launcher is skip, cas, aurora, impulsum,
+# reborn, direct or other (handled as direct).
+#
+# The rows that read the environment and the parent describe what each
+# launcher does, not which build it is, so a launcher update still matches.
+# A launcher that stopped tagging the environment is still caught by its name.
+#
+# The safety rule (the last cas row). Getting CAS wrong costs that one CAS
+# session its mod data, and CAS puts it back on its next PLAY. Getting a
+# launch that is not CAS's wrong leaves CAS's data under a game that dies at
+# 27 seconds. So when the parent says nothing either way, the version.dll
+# decides: CAS's redirect is live only after a CAS PLAY (every other launcher
+# puts its own in, or needs none), so a launch with it live and no known
+# parent counts as CAS's and its data stays. When the live DLL is not CAS's,
+# an unknown parent is treated as a direct start and the game's own files go
+# back, which is the safer mistake there.
+cxg_identify() {
+    emulate -L zsh
+    local exe="${(L)1}" parent="${(L)2:--}" envs=",${(L)3}," dll="$4" bridge="${5:-0}"
+    local P="${2:--}"
+    # 0. The game restarting itself (the /dbrv relaunch): the copy that started
+    #    it already had its gate run, and the folder is already right.
+    if [[ $exe == fifa17.exe && $parent == fifa17.exe ]]; then
+        print -r -- "skip	parent FIFA17.exe"; return 0
+    fi
+    # 1-3. What the launcher put in the game's environment.
+    case "$envs" in *,fut17_*) print -r -- "aurora	env FUT17_*"; return 0 ;; esac
+    case "$envs" in *,impulsum_*) print -r -- "impulsum	env IMPULSUM_*"; return 0 ;; esac
+    case "$envs" in *,cas_*) print -r -- "cas	env CAS_*"; return 0 ;; esac
+    # 4-8. Who the parent is.
+    case "$parent" in
+        aurora.exe|aurora15connector.exe|aurora15client.exe)
+            print -r -- "aurora	parent $P"; return 0 ;;
+        impulsum17launcher.exe)
+            print -r -- "impulsum	parent $P"; return 0 ;;
+        cas.exe|casbridge.exe)
+            print -r -- "cas	parent $P"; return 0 ;;
+    esac
+    # A CAS that starts the game through something in between.
+    if [[ $bridge == 1 && $dll == cas ]]; then
+        print -r -- "cas	CasBridge.exe running and CAS's version.dll live"; return 0
+    fi
+    case "$parent" in
+        rebornfut.exe)
+            print -r -- "reborn	parent $P"; return 0 ;;
+        # winewrapper.exe is CrossOver's bin/wine: every cxmenu shortcut and
+        # --play-offline. start.exe and cmd.exe are `cmd /c [start]`.
+        _fifa17.exe|winewrapper.exe|start.exe|explorer.exe|cmd.exe)
+            print -r -- "direct	parent $P"; return 0 ;;
+    esac
+    # The safety rule above.
+    if [[ $dll == cas ]]; then
+        print -r -- "cas	CAS's version.dll live, parent ${P/#-/gone}"; return 0
+    fi
+    if [[ $parent == - ]]; then
+        print -r -- "direct	no parent"; return 0
+    fi
+    print -r -- "other	parent $P"
+}
+
+# ====================================================== paths, Windows and Mac
+# Y:\Downloads\FIFA 17 -> the real path, through the bottle's own drive
+# mapping. Separators that went through JSON or a .reg file arrive doubled, so
+# a run of backslashes of any length is one slash. \??\ and \\?\ in front (an
+# NT image path) are dropped.
+cxg_win_to_unix() {
+    emulate -L zsh
+    setopt extendedglob
+    local prefix="$1" w="$2" drive rest
+    [[ -n $w ]] || return 1
+    w="${w#\\\\\?\\}"; w="${w#\\\?\?\\}"
+    [[ $w == [A-Za-z]:* ]] || return 1
+    drive="${w%%:*}"
+    rest="${w#?:}"
+    rest="${rest//\\##//}"
+    print -r -- "$prefix/dosdevices/${(L)drive}:$rest"
+}
+
+# /Users/me/Downloads/FIFA 17 -> Y:\Downloads\FIFA 17, through the bottle's own
+# dosdevices links, longest match first so y: beats z:.
+cxg_unix_to_win() {
+    emulate -L zsh
+    local prefix="$1" p="${2%/}" link target dl best_drive="" best_target="" rest
+    for link in "$prefix"/dosdevices/?:(N@); do
+        target="$(readlink "$link" 2>/dev/null)"
+        [[ -n $target ]] || continue
+        case "$target" in
+            ../drive_c) target="$prefix/drive_c" ;;
+        esac
+        target="${target%/}"
+        [[ $p == $target || ${p#$target/} != $p ]] || continue
+        if [[ -z $best_drive || ${#target} -gt ${#best_target} ]]; then
+            best_target="$target"; best_drive="${link:t}"
+        fi
+    done
+    [[ -n $best_drive ]] || return 1
+    rest="${p#$best_target}"
+    dl="${(U)best_drive%:}"
+    print -r -- "${dl}:${rest//\//\\}"
+}
+
+# DIR/REL as it really is spelled on disk. CAS's own manifest writes Win32 and
+# win32 for the same folder; on a case-sensitive volume only one exists.
+# Prints the path (spelled as given from the first part that is missing) and
+# returns 1 when it does not exist.
+cxg_ci() {
+    emulate -L zsh
+    setopt extendedglob
+    local dir="$1" rel="$2" p c i; local -a parts m
+    [[ -e "$dir/$rel" ]] && { print -r -- "$dir/$rel"; return 0; }
+    parts=( ${(s:/:)rel} )
+    p="$dir"
+    for (( i = 1; i <= ${#parts}; i++ )); do
+        c="${parts[i]}"
+        m=( "$p"/(#i)${(b)c}(N) )
+        if (( ${#m} )); then
+            p="${m[1]}"
+        else
+            print -r -- "$p/${(j:/:)parts[i,-1]}"; return 1
+        fi
+    done
+    print -r -- "$p"
+}
+
+# ========================================================== the tables, read
+cxg_testing() { [[ "${CX_FIFA_GATE_FROM_WINE:-}" != 1 ]]; }
+
+# "path bytes sha256", one file a line.
+cxg_table() {
+    emulate -L zsh
+    local t="$CXG_VANILLA" l
+    if cxg_testing && [[ -n ${CX_FIFA_GATE_TEST_TABLE:-} ]]; then
+        t="$(<"$CX_FIFA_GATE_TEST_TABLE")"
+    fi
+    for l in "${(@f)t}"; do
+        l="${l%%\#*}"
+        [[ -n ${l//[[:space:]]/} ]] && print -r -- ${=l}
+    done
+    return 0
+}
+
+# Whether the game in F is a build the table is for: known, unknown or missing.
+cxg_build_of() {
+    emulate -L zsh
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    local exe t l lf stamp; local -a st w
+    exe="$(cxg_ci "$1" FIFA17.exe)" || { print -r -- missing; return 0; }
+    zstat -A st +size -- "$exe" 2>/dev/null || { print -r -- missing; return 0; }
+    t="$CXG_BUILDS"
+    if cxg_testing && [[ -n ${CX_FIFA_GATE_TEST_BUILDS:-} ]]; then
+        t="$(<"$CX_FIFA_GATE_TEST_BUILDS")"
+    fi
+    for l in "${(@f)t}"; do
+        w=( ${=l%%\#*} )
+        (( ${#w} >= 2 )) || continue
+        [[ ${w[1]} == ${st[1]} ]] || continue
+        # Only now read the PE header, and only its two numbers.
+        lf="$(od -An -tu4 -j60 -N4 -- "$exe" 2>/dev/null)"; lf="${lf//[[:space:]]/}"
+        [[ $lf == <-> ]] || continue
+        stamp="$(od -An -tx4 -j$(( lf + 8 )) -N4 -- "$exe" 2>/dev/null)"
+        stamp="${stamp//[[:space:]]/}"
+        [[ ${(U)stamp} == ${(U)w[2]} ]] && { print -r -- known; return 0; }
+    done
+    print -r -- unknown
+}
+
+# CAS's content folders for FIFA 17 in this bottle (one per game folder CAS
+# has been pointed at), newest first.
+cxg_cas_dirs() {
+    emulate -L zsh
+    local d
+    for d in "$1"/drive_c/users/*/AppData/Local/CAS/content/FIFA17-*(N/om); do
+        print -r -- "$d"
+    done
+    return 0
+}
+
+# What one installed.json says CAS wrote: "true<TAB>path" for a file it
+# replaced, "false<TAB>path" for one it added, and a first line
+# "mod<TAB>name v<version>". plutil reads JSON, and is on every Mac.
+cxg_cas_manifest() {
+    emulate -L zsh
+    [[ -f $1 ]] || return 1
+    plutil -p -- "$1" 2>/dev/null | awk '
+        /"mods" =>/  { inmods = 1 }
+        /"files" =>/ { inmods = 0; infiles = 1 }
+        inmods && /"name" =>/    { n = $0; sub(/.*"name" => "/, "", n); sub(/"$/, "", n) }
+        inmods && /"version" =>/ { v = $0; sub(/.*"version" => "?/, "", v); sub(/"$/, "", v) }
+        infiles && /"path" =>/   { p = $0; sub(/.*"path" => "/, "", p); sub(/"$/, "", p) }
+        infiles && /"replaces" =>/ {
+            r = ($0 ~ /=> (true|1)$/) ? "true" : "false"
+            if (p != "") { files[++k] = r "\t" p; p = "" }
+        }
+        END {
+            if (n != "") print "mod\t" n (v != "" ? " v" v : "")
+            for (i = 1; i <= k; i++) print files[i]
+        }'
+}
+
+# What CAS recorded about the game's own copy of REL before it wrote over it,
+# from DIR/base-hashes.json: "bytes sha256", or nothing. Its keys are the
+# file's full Windows path with / and \ mixed; only the part under the game
+# folder is compared, without regard to case.
+cxg_cas_base_hash() {
+    emulate -L zsh
+    [[ -f $1/base-hashes.json ]] || return 1
+    plutil -p -- "$1/base-hashes.json" 2>/dev/null | awk -v rel="${(L)2}" '
+        /^    "/ && / => \{/ {
+            k = $0; sub(/^    "/, "", k); sub(/" => \{$/, "", k)
+            gsub(/\\/, "/", k); k = tolower(k)
+            hit = (length(k) > length(rel) && substr(k, length(k) - length(rel)) == "/" rel)
+            b = ""; next
+        }
+        hit && /"bytes" =>/  { b = $0; sub(/.*=> /, "", b) }
+        hit && /"sha256" =>/ { s = $0; sub(/.*=> "/, "", s); sub(/"$/, "", s)
+                               if (b != "") { print b " " s; found = 1; exit } }
+        END { exit !found }'
+}
+
+# Whether CAS has anything to do with this folder: it is in the bottle, or
+# its added files are in (or were parked from) the folder. Only then are the
+# game's own copies worth keeping, 75 MB once.
+cxg_cas_around() {
+    emulate -L zsh
+    local F="$1" prefix="$2" rel; local -a cas
+    if [[ -n $prefix ]]; then
+        cas=( "$prefix"/drive_c/users/*/AppData/Local/CAS/cas.exe(N) )
+        (( ${#cas} )) && return 0
+        [[ -n "$(cxg_cas_dirs "$prefix")" ]] && return 0
+    fi
+    for rel in ${(f)"$(cxg_added_rels "$F" "$prefix")"}; do
+        cxg_ci "$F" "$rel" >/dev/null && return 0
+        [[ -e "$F/$CXG_STASH/parked/$rel" ]] && return 0
+    done
+    return 1
+}
+
+# The table's paths plus every path CAS's manifests say it replaced:
+# "path bytes sha256" for the table's, "path - -" for CAS's others.
+cxg_replaced_rels() {
+    emulate -L zsh
+    local F="$1" prefix="$2" d l rel; local -A seen; local -a w
+    for l in ${(f)"$(cxg_table)"}; do
+        w=( ${=l} ); seen[${(L)w[1]}]=1; print -r -- "$l"
+    done
+    [[ -n $prefix ]] || return 0
+    for d in ${(f)"$(cxg_cas_dirs "$prefix")"}; do
+        for l in ${(f)"$(cxg_cas_manifest "$d/installed.json")"}; do
+            [[ $l == true$'\t'* ]] || continue
+            rel="${l#*$'\t'}"
+            (( ${+seen[${(L)rel}]} )) && continue
+            seen[${(L)rel}]=1
+            print -r -- "$rel - -"
+        done
+    done
+    return 0
+}
+
+# The added files: the built-in list plus CAS's "replaces": false paths.
+cxg_added_rels() {
+    emulate -L zsh
+    local F="$1" prefix="$2" d l rel; local -A seen
+    for l in "${(@f)CXG_ADDED}"; do
+        [[ -n ${l//[[:space:]]/} ]] || continue
+        seen[${(L)l}]=1; print -r -- "$l"
+    done
+    [[ -n $prefix ]] || return 0
+    for d in ${(f)"$(cxg_cas_dirs "$prefix")"}; do
+        for l in ${(f)"$(cxg_cas_manifest "$d/installed.json")"}; do
+            [[ $l == false$'\t'* ]] || continue
+            rel="${l#*$'\t'}"
+            (( ${+seen[${(L)rel}]} )) && continue
+            seen[${(L)rel}]=1
+            print -r -- "$rel"
+        done
+    done
+    return 0
+}
+
+# ================================================================ small tools
+cxg_sha() { local s; s="$(shasum -a 256 -- "$1" 2>/dev/null)" || return 1; print -r -- "${s%% *}"; }
+cxg_size() { emulate -L zsh; zmodload -F zsh/stat b:zstat 2>/dev/null; local -a s; zstat -A s +size -- "$1" 2>/dev/null || return 1; print -r -- "$s[1]"; }
+cxg_mtime() { emulate -L zsh; zmodload -F zsh/stat b:zstat 2>/dev/null; local -a s; zstat -A s +mtime -- "$1" 2>/dev/null || return 1; print -r -- "$s[1]"; }
+
+# The fast check: same size, and modification times within 2 seconds (exFAT
+# keeps them to 2 s on some drivers). Every copy the gate makes keeps the
+# source's time, so a file put back from the stash matches the stash.
+cxg_same_meta() {
+    emulate -L zsh
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    local -A a b
+    zstat -H a -- "$1" 2>/dev/null || return 1
+    zstat -H b -- "$2" 2>/dev/null || return 1
+    [[ ${a[size]} == ${b[size]} ]] || return 1
+    (( ${a[mtime]} - ${b[mtime]} <= 2 && ${b[mtime]} - ${a[mtime]} <= 2 ))
+}
+
+# DST replaced by a copy of SRC in one rename, so it is always all old or all
+# new: copied beside it as DST.cxtmp first (same volume), then moved over it.
+# On APFS cp -c makes the copy a clone that costs no space; elsewhere cp falls
+# back to a plain copy by itself. -p keeps the time, which the fast check
+# compares. The journal names every DST first, so a run killed half way has
+# its .cxtmp files cleaned up by the next.
+cxg_put() {
+    emulate -L zsh
+    local src="$1" dst="$2"
+    [[ -n ${CXG_JOURNAL:-} ]] && print -r -- "$dst" >> "$CXG_JOURNAL"
+    rm -f -- "$dst.cxtmp" 2>/dev/null
+    if ! cp -c -p -- "$src" "$dst.cxtmp" 2>/dev/null; then
+        rm -f -- "$dst.cxtmp" 2>/dev/null
+        cp -p -- "$src" "$dst.cxtmp" 2>/dev/null || { rm -f -- "$dst.cxtmp" 2>/dev/null; return 1; }
+    fi
+    mv -f -- "$dst.cxtmp" "$dst" 2>/dev/null || { rm -f -- "$dst.cxtmp" 2>/dev/null; return 1; }
+}
+
+# The stash's own bookkeeping, key=value.
+cxg_state_get() {
+    emulate -L zsh
+    local f="$1/state" l
+    [[ -f $f ]] || return 1
+    for l in "${(@f)$(<$f)}"; do
+        [[ $l == "$2="* ]] && { print -r -- "${l#*=}"; return 0; }
+    done
+    return 1
+}
+cxg_state_set() {
+    emulate -L zsh
+    local stash="$1" kv k l; shift
+    local -A st; local -a order
+    if [[ -f $stash/state ]]; then
+        for l in "${(@f)$(<$stash/state)}"; do
+            [[ $l == *=* ]] || continue
+            k="${l%%=*}"; (( ${+st[$k]} )) || order+=( "$k" ); st[$k]="${l#*=}"
+        done
+    fi
+    for kv in "$@"; do
+        k="${kv%%=*}"; (( ${+st[$k]} )) || order+=( "$k" ); st[$k]="${kv#*=}"
+    done
+    { for k in $order; do print -r -- "$k=${st[$k]}"; done } > "$stash/state.cxtmp" 2>/dev/null \
+        && mv -f -- "$stash/state.cxtmp" "$stash/state" 2>/dev/null
+}
+
+# Size and time of every file under Update and Data, so --verify can name a
+# change that no known launcher makes.
+cxg_snapshot() {
+    emulate -L zsh
+    setopt extendedglob
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    local F="$1" f; local -A s
+    for f in "$F"/(#i)(update|data)/**/^._*(.N); do
+        zstat -H s -- "$f" 2>/dev/null || continue
+        print -r -- "${s[size]} ${s[mtime]} ${f#$F/}"
+    done
+}
+
+# The snapshot once per folder, not at every start: walking every file under
+# Update and Data takes half a second on a USB drive, and the launcher's
+# CreateProcess waits for the gate. Only --verify reads it, and it skips the
+# files known launchers write, so the first one stays a good baseline.
+cxg_snapshot_once() {
+    [[ -f $1/$CXG_STASH/snapshot ]] && return 0
+    cxg_snapshot "$1" > "$1/$CXG_STASH/snapshot" 2>/dev/null
+}
+
+# Running programs, as macOS sees them. A Wine process shows by its Windows
+# image path (Z:\...\FIFA17.exe), or by the bare name.
+cxg_ps() {
+    if cxg_testing && [[ -n ${CX_FIFA_GATE_TEST_PS:-} ]]; then
+        cat -- "$CX_FIFA_GATE_TEST_PS" 2>/dev/null; return 0
+    fi
+    /bin/ps -Ao pid=,ppid=,command= 2>/dev/null
+}
+
+# Whether a program called NAME is running, other than the pids given.
+# The command has to start with it, by itself or after a Windows folder, so
+# this script's own --image argument and a `tail .../FIFA17.exe.log` do not
+# count.
+cxg_running() {
+    emulate -L zsh
+    setopt extendedglob
+    local name="${(L)1}" pid ppid cmd l; shift
+    local -a skip; skip=( "$@" )
+    for l in "${(@f)CXG_PS_OUT}"; do
+        l="${l##[[:space:]]#}"
+        pid="${l%%[[:space:]]*}"; l="${l#*[[:space:]]}"; l="${l##[[:space:]]#}"
+        ppid="${l%%[[:space:]]*}"; cmd="${l#*[[:space:]]}"; cmd="${cmd##[[:space:]]#}"
+        [[ $pid == <-> ]] || continue
+        (( ${skip[(Ie)$pid]} )) && continue
+        if [[ ${(L)cmd} == ([a-z]:\\(*\\|)|)${name}(| *) ]]; then return 0; fi
+    done
+    return 1
+}
+
+# The parent of PID, from the same listing.
+cxg_ppid_of() {
+    emulate -L zsh
+    setopt extendedglob
+    local l w
+    for l in "${(@f)CXG_PS_OUT}"; do
+        w=( ${=l} )
+        [[ ${w[1]} == $1 ]] && { print -r -- "${w[2]}"; return 0; }
+    done
+    return 1
+}
+
+# ======================================================= the stash, kept up
+CXG_README='This folder was made by CrossOver-FIFA (setup.sh, and the FIFA 17 folder
+gate in its Wine). It keeps the copies the gate needs so that every launcher
+gets this game folder the way it needs it:
+
+  vanilla/    the game'"'"'s own copies of the files CAS writes its mod data over
+  impulsum/   Impulsum17'"'"'s version.dll, which other launchers replace
+  parked/     files CAS adds, moved out of the way while other launchers play
+  state, snapshot, journal, lock    the gate'"'"'s own bookkeeping
+
+Each time FIFA 17 starts, the gate puts the folder right for the launcher
+that is starting it: CAS'"'"'s data for CAS, the game'"'"'s own files for
+everything else, and Impulsum17'"'"'s version.dll for Impulsum17.
+
+It is safe to delete this folder when no launcher and no game is open and
+./setup.sh --verify says the data files are the game'"'"'s own. While CAS'"'"'s
+data is in the game, vanilla/ may be the only copy of the originals.
+'
+
+# Makes the stash folder and its README when they are not there yet.
+cxg_stash_make() {
+    emulate -L zsh
+    local stash="$1/$CXG_STASH"
+    [[ -d $stash ]] || mkdir -p -- "$stash" 2>/dev/null || return 1
+    [[ -f $stash/README.txt ]] || print -r -- "$CXG_README" > "$stash/README.txt" 2>/dev/null
+    return 0
+}
+
+# The lock: a folder, made or not in one step. It is stale when the pid in
+# it is not running, when it has no pid for more than 5 seconds, or when it
+# is older than 10 minutes. Waits up to WAIT seconds for one that is held.
+cxg_lock() {
+    emulate -L zsh
+    zmodload zsh/datetime 2>/dev/null
+    local stash="$1" wait="${2:-15}" lock="$1/lock" pid age polls=0 mt
+    while ! mkdir -- "$lock" 2>/dev/null; do
+        pid="$(<"$lock/pid" 2>/dev/null)"; pid="${pid%% *}"
+        mt="$(cxg_mtime "$lock")" || mt="$EPOCHSECONDS"
+        age=$(( EPOCHSECONDS - mt ))
+        if (( age > 600 )) || { [[ -z $pid ]] && (( age > 5 )); } \
+           || { [[ $pid == <-> ]] && ! kill -0 "$pid" 2>/dev/null; }; then
+            rm -rf -- "$lock" 2>/dev/null
+            continue
+        fi
+        (( polls >= wait * 5 )) && return 1
+        sleep 0.2
+        polls=$(( polls + 1 ))
+    done
+    print -r -- "$$ $EPOCHSECONDS" > "$lock/pid" 2>/dev/null
+    return 0
+}
+cxg_unlock() { [[ -d "$1/lock" ]] && rm -rf -- "$1/lock" 2>/dev/null; return 0; }
+
+# Keeps Impulsum17's version.dll: the live one when it is Impulsum17's and
+# not kept yet (the one kept before becomes version.dll.prev), or, when
+# nothing is kept, the newest Impulsum17 DLL among the folder's version.dll.*
+# backups. Adds what it did to CXG_ACTS.
+cxg_capture_impulsum() {
+    emulate -L zsh
+    setopt extendedglob
+    local F="$1" kept="$1/$CXG_STASH/impulsum/version.dll" best="" f
+    if [[ "$(cxg_dll_kind "$F/version.dll")" == impulsum ]]; then
+        [[ -f $kept ]] && cmp -s -- "$F/version.dll" "$kept" && return 0
+        best="$F/version.dll"
+    elif [[ ! -f $kept ]]; then
+        for f in "$F"/version.dll.^*.cxtmp(N.om); do
+            [[ "$(cxg_dll_kind "$f")" == impulsum ]] && { best="$f"; break; }
+        done
+    fi
+    [[ -n $best ]] || return 0
+    mkdir -p -- "${kept:h}" 2>/dev/null || return 1
+    [[ -f $kept ]] && mv -f -- "$kept" "$kept.prev" 2>/dev/null
+    if cxg_put "$best" "$kept"; then
+        CXG_ACTS+=( "kept Impulsum17's version.dll ($(cxg_sha "$kept" | cut -c1-8))" )
+    else
+        CXG_PROBS+=( "could not keep Impulsum17's version.dll" )
+        return 1
+    fi
+}
+
+# Keeps the game's own copy of every table file not kept yet: the live file
+# when its sha256 is the table's, else CAS's copy of the original when its is.
+# Only where CAS has to do with the folder, and only for a build the table is
+# for. Hashing happens here and nowhere else, once per file.
+cxg_capture_vanilla() {
+    emulate -L zsh
+    local F="$1" prefix="$2" stash="$1/$CXG_STASH" l rel bytes sha dst live src d o n=0
+    local -a w missing
+    cxg_cas_around "$F" "$prefix" || return 0
+    [[ "$(cxg_build_of "$F")" == known ]] || return 0
+    for l in ${(f)"$(cxg_table)"}; do
+        w=( ${=l} ); rel="${w[1]}"; bytes="${w[2]}"; sha="${w[3]}"
+        dst="$stash/vanilla/$rel"
+        [[ -f $dst && "$(cxg_size "$dst")" == $bytes ]] && continue
+        src=""
+        live="$(cxg_ci "$F" "$rel")" \
+            && [[ "$(cxg_size "$live")" == $bytes && "$(cxg_sha "$live")" == $sha ]] && src="$live"
+        if [[ -z $src && -n $prefix ]]; then
+            for d in ${(f)"$(cxg_cas_dirs "$prefix")"}; do
+                o="$(cxg_ci "$d/original" "$rel")" || continue
+                [[ "$(cxg_size "$o")" == $bytes && "$(cxg_sha "$o")" == $sha ]] && { src="$o"; break; }
+            done
+        fi
+        if [[ -z $src ]]; then missing+=( "${rel:t}" ); continue; fi
+        mkdir -p -- "${dst:h}" 2>/dev/null && cxg_put "$src" "$dst" && n=$(( n + 1 )) \
+            || missing+=( "${rel:t}" )
+    done
+    # Files a newer CAS pack replaces that the table does not know. CAS's
+    # copy in original/ is the only one there is, and it is kept only when
+    # CAS's own base-hashes.json gives the same size and sha256 for it: that
+    # is what CAS checked the game's file against before writing over it.
+    # Without that record the file stays as CAS wrote it (cxg_enforce_vanilla
+    # says so), never put back from a copy nothing vouches for.
+    if [[ -n $prefix ]]; then
+        local base
+        for l in ${(f)"$(cxg_replaced_rels "$F" "$prefix")"}; do
+            w=( ${=l} ); rel="${w[1]}"
+            [[ ${w[2]} == - ]] || continue
+            dst="$stash/vanilla/$rel"
+            [[ -f $dst ]] && continue
+            for d in ${(f)"$(cxg_cas_dirs "$prefix")"}; do
+                o="$(cxg_ci "$d/original" "$rel")" || continue
+                base="$(cxg_cas_base_hash "$d" "$rel")" || continue
+                w=( ${=base} )
+                [[ "$(cxg_size "$o")" == ${w[1]} && "$(cxg_sha "$o")" == ${w[2]} ]] || continue
+                mkdir -p -- "${dst:h}" 2>/dev/null && cxg_put "$o" "$dst" && n=$(( n + 1 ))
+                break
+            done
+        done
+    fi
+    (( n )) && CXG_ACTS+=( "kept $n original file(s)" )
+    (( ${#missing} )) && CXG_PROBS+=( "no original of ${(j:, :)missing}" )
+    return 0
+}
+
+# Everything the stash can take from what is in reach. Run by the gate at
+# every start and by setup.sh --fix-folder; never changes the game's files.
+cxg_capture() {
+    cxg_capture_impulsum "$1"
+    cxg_capture_vanilla "$1" "$2"
+}
+
+# ================================================= the game's files, enforced
+# CAS's manifests as they are now (time and size of each installed.json).
+# CAS rewrites its manifest on every PLAY, so a different answer than the one
+# recorded when the files were last put back means CAS has played since.
+cxg_cas_stamp() {
+    emulate -L zsh
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    local d out=""; local -A h
+    [[ -n $1 ]] || return 0
+    for d in ${(f)"$(cxg_cas_dirs "$1")"}; do
+        zstat -H h -- "$d/installed.json" 2>/dev/null || continue
+        out="${out:+$out,}${h[mtime]}:${h[size]}"
+    done
+    print -r -- "$out"
+}
+
+# The game's own files back in place, and the added ones parked. The fast
+# path is a size-and-time comparison with the stash, file by file. It is not
+# trusted once CAS has played since the files were last known to be the
+# game's own (cxg_cas_stamp changed): a CAS file of the same size that kept
+# the original's time would pass it. Adds to CXG_ACTS and CXG_PROBS.
+cxg_enforce_vanilla() {
+    emulate -L zsh
+    local F="$1" prefix="$2" stash="$1/$CXG_STASH" l rel kept live trust=1 n=0 pause=0 was
+    local -a w left parked
+    was="$(cxg_state_get "$stash" cas_stamp)" || was="?"
+    [[ $was == "$(cxg_cas_stamp "$prefix")" ]] || trust=0
+    cxg_testing && [[ ${CX_FIFA_GATE_TEST_PAUSE:-} == <-> ]] && pause="$CX_FIFA_GATE_TEST_PAUSE"
+    for l in ${(f)"$(cxg_replaced_rels "$F" "$prefix")"}; do
+        w=( ${=l} ); rel="${w[1]}"
+        kept="$stash/vanilla/$rel"
+        live="$(cxg_ci "$F" "$rel")"
+        if [[ ! -f $kept ]]; then
+            # CAS's other files: never put back without a known original.
+            [[ ${w[2]} == - ]] && { [[ -f $live ]] && left+=( "${rel:t}" ); continue; }
+            CXG_PROBS+=( "no original of ${rel:t}" ); continue
+        fi
+        if (( trust )) && [[ -f $live ]] && cxg_same_meta "$live" "$kept"; then continue; fi
+        if [[ ! -d ${live:h} ]]; then CXG_PROBS+=( "no folder for ${rel:t}" ); continue; fi
+        if cxg_put "$kept" "$live"; then
+            n=$(( n + 1 ))
+            (( pause )) && sleep "$pause"
+        else
+            CXG_PROBS+=( "could not put ${rel:t} back" )
+        fi
+    done
+    for rel in ${(f)"$(cxg_added_rels "$F" "$prefix")"}; do
+        live="$(cxg_ci "$F" "$rel")" || continue
+        mkdir -p -- "$stash/parked/${rel:h}" 2>/dev/null
+        if mv -f -- "$live" "$stash/parked/$rel" 2>/dev/null; then parked+=( "${rel:t}" )
+        else CXG_PROBS+=( "could not park ${rel:t}" ); fi
+    done
+    (( n )) && CXG_ACTS+=( "$n file(s) restored" )
+    (( ${#parked} )) && CXG_ACTS+=( "${(j:, :)parked} parked" )
+    # Only worth saying when CAS's data was in the game this time.
+    (( ${#left} && ( n || ${#parked} ) )) && CXG_ACTS+=( "left ${(j:, :)left} as CAS wrote it (no original known)" )
+    return 0
+}
+
+# Impulsum17's version.dll in place. 0 when it is (or now is), 2 when there is
+# none kept to put there, 1 when the copy failed.
+cxg_enforce_impulsum() {
+    emulate -L zsh
+    local F="$1" kept="$1/$CXG_STASH/impulsum/version.dll" kind
+    kind="$(cxg_dll_kind "$F/version.dll")"
+    [[ $kind == impulsum ]] && return 0
+    [[ -f $kept ]] || return 2
+    if cxg_put "$kept" "$F/version.dll"; then
+        CXG_ACTS+=( "put Impulsum17's version.dll back (it was $(cxg_dll_label "$kind"))" )
+        return 0
+    fi
+    CXG_PROBS+=( "could not put Impulsum17's version.dll back" )
+    return 1
+}
+
+# ================================================================= the log
+# One line per run in the bottle: time, program, folder, launcher(reason),
+# what was done, the result, milliseconds. Tab separated. It is also how
+# setup.sh learns which folder the game really runs from. Kept to 500 lines.
+cxg_log() {
+    emulate -L zsh
+    zmodload zsh/datetime 2>/dev/null
+    local log="$1" line; shift
+    [[ -n $log && -d ${log:h} ]] || return 0
+    line="$(strftime '%Y-%m-%d %H:%M:%S' $EPOCHSECONDS)"
+    print -r -- "$line	${(pj:\t:)@}" >> "$log" 2>/dev/null
+    if (( $(cxg_size "$log" || print 0) > 150000 )); then
+        tail -n 500 -- "$log" > "$log.cxtmp" 2>/dev/null && mv -f -- "$log.cxtmp" "$log" 2>/dev/null
+    fi
+    return 0
+}
+
+# The dialog for the one refusal. From a launch only (not from tests), and in
+# the background: ntdll.so is waiting for this script, not for the person.
+cxg_dialog() {
+    cxg_testing && return 0
+    /usr/bin/osascript -e "display dialog \"$1\" with title \"FIFA 17\" buttons {\"OK\"} default button 1 with icon stop giving up after 600" >/dev/null 2>&1 &!
+    return 0
+}
+
+# ======================================================= what --verify reads
+# The state of one folder, as key=value lines, for setup.sh --verify. It only
+# reads. A data file is hashed only when its size is the game's own and its
+# time does not match a kept copy (or none is kept), so a folder that is the
+# game's own and has its copies kept costs a few stat calls.
+cxg_folder_facts() {
+    emulate -L zsh
+    setopt extendedglob
+    local F="$1" prefix="$2" stash="$1/$CXG_STASH" l rel bytes sha live kept d o k f st
+    local total=0 nkept=0 norig=0 cas=0 unchecked=0 haskept hasorig nfiles=0 mod=""
+    local -a w cw own changed missing unrec added parked unknown
+    local -A known cur
+    print -r -- "build=$(cxg_build_of "$F")"
+    cxg_cas_around "$F" "$prefix" && cas=1
+    print -r -- "cas_around=$cas"
+    k="$(cxg_dll_kind "$F/version.dll")"
+    print -r -- "dll=$k"
+    [[ -f $F/version.dll ]] && print -r -- "dll_sha8=$(cxg_sha "$F/version.dll" | cut -c1-8)"
+    [[ -f $stash/impulsum/version.dll ]] \
+        && print -r -- "impulsum_kept=$(cxg_sha "$stash/impulsum/version.dll" | cut -c1-8)"
+    [[ -f $F/Impulsum17Launcher.exe ]] && print -r -- "impulsum_here=1"
+    for l in ${(f)"$(cxg_table)"}; do
+        w=( ${=l} ); rel="${w[1]}"; bytes="${w[2]}"; sha="${w[3]}"
+        total=$(( total + 1 )); known[${(L)rel}]=1
+        kept="$stash/vanilla/$rel"; haskept=0; hasorig=0
+        [[ -f $kept && "$(cxg_size "$kept")" == $bytes ]] && { haskept=1; nkept=$(( nkept + 1 )); }
+        if [[ -n $prefix ]]; then
+            for d in ${(f)"$(cxg_cas_dirs "$prefix")"}; do
+                o="$(cxg_ci "$d/original" "$rel")" || continue
+                [[ "$(cxg_size "$o")" == $bytes ]] && { hasorig=1; break; }
+            done
+        fi
+        (( hasorig )) && norig=$(( norig + 1 ))
+        live="$(cxg_ci "$F" "$rel")" || { missing+=( "${rel:t}" ); continue; }
+        if (( ! haskept && ! cas )); then unchecked=$(( unchecked + 1 )); continue; fi
+        if [[ "$(cxg_size "$live")" != $bytes ]]; then st=changed
+        elif (( haskept )) && cxg_same_meta "$live" "$kept"; then st=own
+        elif [[ "$(cxg_sha "$live")" == $sha ]]; then st=own
+        else st=changed; fi
+        if [[ $st == own ]]; then
+            own+=( "${rel:t}" )
+        else
+            changed+=( "${rel:t}" )
+            (( haskept || hasorig )) || unrec+=( "${rel:t}" )
+        fi
+    done
+    for rel in ${(f)"$(cxg_added_rels "$F" "$prefix")"}; do
+        known[${(L)rel}]=1
+        cxg_ci "$F" "$rel" >/dev/null && added+=( "${rel:t}" )
+        [[ -e $stash/parked/$rel ]] && parked+=( "${rel:t}" )
+    done
+    if [[ -n $prefix ]]; then
+        for d in ${(f)"$(cxg_cas_dirs "$prefix")"}; do
+            for l in ${(f)"$(cxg_cas_manifest "$d/installed.json")"}; do
+                case "$l" in
+                    mod$'\t'*) [[ -z $mod ]] && mod="${l#*$'\t'}" ;;
+                    *) nfiles=$(( nfiles + 1 )); known[${(L)${l#*$'\t'}}]=1 ;;
+                esac
+            done
+            break
+        done
+    fi
+    print -r -- "total=$total"
+    print -r -- "kept=$nkept"
+    print -r -- "in_cas_original=$norig"
+    print -r -- "unchecked=$unchecked"
+    print -r -- "own=${(j:,:)own}"
+    print -r -- "changed=${(j:,:)changed}"
+    print -r -- "missing=${(j:,:)missing}"
+    print -r -- "unrecoverable=${(j:,:)unrec}"
+    print -r -- "added=${(j:,:)added}"
+    print -r -- "parked=${(j:,:)parked}"
+    print -r -- "cas_mod=$mod"
+    print -r -- "cas_files=$nfiles"
+    [[ -f $stash/journal ]] && print -r -- "journal=1"
+    for k in launcher time result enforced; do
+        l="$(cxg_state_get "$stash" "$k")" && print -r -- "state_$k=$l"
+    done
+    # Anything under Update or Data that changed since the last game start
+    # and is not a file a known launcher writes.
+    if [[ -f $stash/snapshot ]]; then
+        for l in ${(f)"$(cxg_snapshot "$F")"}; do cur[${l#* * }]="${l% *}"; done
+        for l in "${(@f)$(<$stash/snapshot)}"; do
+            [[ -n $l ]] || continue
+            rel="${l#* * }"
+            (( ${+known[${(L)rel}]} )) && { unset "cur[$rel]"; continue; }
+            if [[ ${cur[$rel]:-} != "${l% *}" ]]; then
+                # Seconds apart is exFAT rounding, not a change.
+                w=( ${=l} ); cw=( ${=cur[$rel]:-} )
+                if [[ -z ${cur[$rel]:-} || ${cw[1]} != ${w[1]} ]] \
+                   || (( ${cw[2]} - ${w[2]} > 2 || ${w[2]} - ${cw[2]} > 2 )); then
+                    unknown+=( "$rel" )
+                fi
+            fi
+            unset "cur[$rel]"
+        done
+        for rel in ${(k)cur}; do
+            (( ${+known[${(L)rel}]} )) || unknown+=( "$rel" )
+        done
+        print -r -- "unknown_changes=${(j:,:)unknown}"
+    fi
+    for f in "$F"/version.dll.^*.cxtmp(N.) "$F"/verorig.dll(N.); do
+        print -r -- "backup=${f:t}:$(cxg_dll_kind "$f")"
+    done
+    return 0
+}
+
+# ================================================================== the run
+cxg_main() {
+    emulate -L zsh
+    setopt extendedglob
+    zmodload zsh/datetime 2>/dev/null
+    local exe="" image="" parent="-" envnames="" prefix="" winpid=""
+    while (( $# )); do
+        case "$1" in
+            --exe|--image|--parent|--envnames|--prefix|--winpid)
+                (( $# >= 2 )) || break
+                case "$1" in
+                    --exe) exe="$2" ;; --image) image="$2" ;; --parent) parent="${2:--}" ;;
+                    --envnames) envnames="$2" ;; --prefix) prefix="$2" ;; --winpid) winpid="$2" ;;
+                esac
+                shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local t0="$EPOCHREALTIME" log="" F="" stash launcher reason who rc=0 result
+    typeset -ga CXG_ACTS CXG_PROBS
+    typeset -g CXG_JOURNAL="" CXG_PS_OUT=""
+    CXG_ACTS=(); CXG_PROBS=()
+    [[ -n $prefix && -d $prefix ]] && log="$prefix/cxfifa-gate.log"
+
+    cxg_finish() {
+        local res="$1" acts="${(j:, :)CXG_ACTS}"
+        (( ${#CXG_PROBS} )) && acts="${acts:+$acts; }${(j:; :)CXG_PROBS}"
+        local ms=$(( (EPOCHREALTIME - t0) * 1000 ))
+        cxg_log "$log" "$exe" "${F:--}" "$who" "${acts:-nothing to do}" "$res" "${ms%.*}"
+    }
+
+    who="?"
+    F="$(cxg_win_to_unix "$prefix" "$image")" && F="${F:h}" && F="${F:A}"
+    if [[ -z $F || ! -d $F ]]; then
+        F=""; cxg_finish "skipped: folder not found"; return 0
+    fi
+
+    # Row 0 first: it needs nothing but the arguments, and the relaunched
+    # game must not wait for its own parent's lock.
+    if [[ ${(L)exe} == fifa17.exe ]]; then
+        who="$(cxg_identify "$exe" "$parent" "$envnames" - 0)"
+        if [[ $who == skip$'\t'* ]]; then
+            who="skip(${who#*$'\t'})"; cxg_finish skipped; return 0
+        fi
+    fi
+
+    stash="$F/$CXG_STASH"
+    if ! cxg_stash_make "$F"; then
+        who="?"; CXG_PROBS+=( "cannot write $CXG_STASH" ); cxg_finish failed; return 0
+    fi
+    local wait=15
+    cxg_testing && [[ ${CX_FIFA_GATE_TEST_LOCK_WAIT:-} == <-> ]] && wait="$CX_FIFA_GATE_TEST_LOCK_WAIT"
+    if ! cxg_lock "$stash" "$wait"; then
+        who="?"; cxg_finish "skipped: another gate run holds the lock"; return 0
+    fi
+    cxg_run_locked
+    rc=$?
+    cxg_unlock "$stash"
+    return $rc
+}
+
+# The part of a run that holds the lock. Shares cxg_main's locals.
+cxg_run_locked() {
+    local l kind bridge=0 pp; local -a me
+
+    # An earlier run was stopped half way: every file it touched is whole
+    # (old or new, see cxg_put), so cleaning its temporary copies up and
+    # running the same reconcile again is the whole recovery.
+    if [[ -f $stash/journal ]]; then
+        for l in "${(@f)$(<$stash/journal)}"; do
+            [[ -n $l ]] && rm -f -- "$l.cxtmp" 2>/dev/null
+        done
+        rm -f -- "$F/version.dll.cxtmp" "$stash/state.cxtmp" 2>/dev/null
+        rm -f -- "$stash/journal"
+        CXG_ACTS+=( "cleaned up after an interrupted run" )
+    fi
+    CXG_JOURNAL="$stash/journal"
+
+    # Never change the folder under a running game: it has the files open,
+    # and replacing a mapped file on exFAT is not known to be safe.
+    CXG_PS_OUT="$(cxg_ps)"
+    me=( $$ )
+    if [[ $PPID == <-> ]]; then
+        me+=( $PPID )
+        pp="$(cxg_ppid_of "$PPID")" && me+=( $pp )
+    fi
+    if cxg_running FIFA17.exe $me; then
+        who="?"; CXG_ACTS=(); cxg_finish "skipped: FIFA 17 already running"
+        rm -f -- "$CXG_JOURNAL"; return 0
+    fi
+
+    kind="$(cxg_dll_kind "$F/version.dll")"
+
+    # Impulsum17's launcher: keep its DLL and put it back if another
+    # launcher replaced it, so the launcher itself loads its own and its
+    # "patch installed" check is honest. Its data is left alone, and it is
+    # never stopped.
+    if [[ ${(L)exe} == impulsum17launcher.exe ]]; then
+        who="impulsum(launcher)"
+        cxg_capture_impulsum "$F"
+        cxg_enforce_impulsum "$F"
+        [[ $? == 2 ]] && CXG_ACTS+=( "no Impulsum17 version.dll kept to put back" )
+        cxg_finish "$( (( ${#CXG_PROBS} )) && print failed || print ok )"
+        rm -f -- "$CXG_JOURNAL"; return 0
+    fi
+
+    cxg_running CasBridge.exe && bridge=1
+    who="$(cxg_identify "$exe" "$parent" "$envnames" "$kind" "$bridge")"
+    launcher="${who%%$'\t'*}"; reason="${who#*$'\t'}"
+    who="$launcher($reason)"
+
+    cxg_capture "$F" "$prefix"
+
+    if [[ $launcher == cas ]]; then
+        cxg_state_set "$stash" "launcher=cas" "time=$EPOCHSECONDS" "result=ok"
+        cxg_snapshot_once "$F"
+        cxg_finish ok
+        rm -f -- "$CXG_JOURNAL"; return 0
+    fi
+
+    # The one refusal: Impulsum17 started the game, its DLL is not in the
+    # folder, and none is kept to put there. The game would talk to
+    # Impulsum17's server through another launcher's DLL and fail with
+    # nothing to say why. Before anything is changed.
+    if [[ $launcher == impulsum && $kind != impulsum && ! -f $stash/impulsum/version.dll ]]; then
+        cxg_dialog "Impulsum 17's game file (version.dll) is no longer in your FIFA 17 folder. Another launcher replaced it. Run Impulsum17-Setup again, then press Play."
+        CXG_PROBS+=( "Impulsum17's version.dll is gone and none is kept" )
+        cxg_state_set "$stash" "launcher=impulsum" "time=$EPOCHSECONDS" "result=refused"
+        cxg_finish refused
+        rm -f -- "$CXG_JOURNAL"; return 10
+    fi
+
+    local build; build="$(cxg_build_of "$F")"
+    if [[ $build == known ]]; then
+        if [[ -n "$(print -r -- "$stash"/vanilla/**/*(N.))" ]] || cxg_cas_around "$F" "$prefix"; then
+            cxg_enforce_vanilla "$F" "$prefix"
+        fi
+    else
+        CXG_ACTS+=( "unknown FIFA 17 build: data left alone" )
+    fi
+    [[ $launcher == impulsum ]] && cxg_enforce_impulsum "$F"
+
+    if (( ${#CXG_PROBS} )); then
+        result=incomplete
+    else
+        result=ok
+        [[ $build == known ]] \
+            && cxg_state_set "$stash" "enforced=$EPOCHSECONDS" "cas_stamp=$(cxg_cas_stamp "$prefix")"
+    fi
+    cxg_state_set "$stash" "launcher=$launcher" "time=$EPOCHSECONDS" "result=$result" "build=$build"
+    cxg_snapshot_once "$F"
+    cxg_finish "$result"
+    rm -f -- "$CXG_JOURNAL"
+    return 0
+}
+
+# Run, unless sourced (setup.sh sources this file for its functions).
+if [[ $ZSH_EVAL_CONTEXT == toplevel ]]; then
+    cxg_main "$@"
+    exit $?
+fi
