@@ -41,6 +41,10 @@ class ScriptTests(unittest.TestCase):
             ("setup.sh", ["--fifa16", "--unknown"], 2),
             ("setup.sh", ["--fifa16", "one.app", "two.app"], 2),
             ("setup.sh", ["--fifa16", "--repair"], 2),
+            ("setup.sh", ["--fifa21", "--unknown"], 2),
+            ("setup.sh", ["--fifa21", "one.app", "two.app"], 2),
+            ("setup.sh", ["--fifa21", "--repair"], 2),
+            ("setup.sh", ["--fifa21", "--offline"], 2),
             ("setup-both.sh", ["--repair", "extra"], 2),
             ("setup-both.sh", ["--help"], 0),
             ("setup-both.sh", ["--unknown"], 2),
@@ -198,6 +202,8 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
             ("fifa17", "Aurora17", "CX_DR_TRAP=2", "CX_TOPDOWN_LIMIT="),
             ("fifa15", "Aurora15", "CX_TOPDOWN_LIMIT=0x1ffffffff", "CX_DR_TRAP="),
             ("fifa16", "FIFA16", "CX_FIFA16_DSTFIX=0", "CX_TOPDOWN_LIMIT="),
+            # FIFA 21 has no bottle of its own: the Aurora launcher's, Aurora17.
+            ("fifa21", "Aurora17", "CX_DR_TRAP=2", "CX_TOPDOWN_LIMIT="),
         ]:
             with self.subTest(game=game):
                 result = subprocess.run(["/bin/zsh", str(probe), "--verify"],
@@ -244,7 +250,7 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
                     self.assertEqual(conf.read_text(), contents)
 
     def test_fifa15_refuses_fifa17_only_actions(self):
-        for game, action in [(game, action) for game in ("fifa15", "fifa16")
+        for game, action in [(game, action) for game in ("fifa15", "fifa16", "fifa21")
                              for action in ("--offline", "--play-offline", "--play-log",
                                             "--reseed-licence", "--bundle", "--repair")]:
             with self.subTest(game=game, action=action):
@@ -836,6 +842,191 @@ class SharedBottleTests(unittest.TestCase):
         self.assertIn(f"note  your choice {lost} is not reachable (drive not connected?)",
                       result.stdout)
         self.assertIn("no FIFA 15 folder found", result.stdout)
+
+    # ------------------------------------------------- FIFA 21 (--fifa21)
+
+    STUB = b"MZ Wine's own powershell stub"
+    DNSCACHE = r'[System\\CurrentControlSet\\Services\\Dnscache]'
+
+    def fifa21_bottle(self, name, *settings, powershell=STUB, cas=False):
+        """A bottle the Aurora launcher is installed in, with FIFA 21 where its
+        ini says, and Wine's own powershell.exe (or CAS's stand-in)."""
+        conf = self.bottle(name, *settings)
+        root = self.bottles / name
+        local = root / "drive_c/users/crossover/AppData/Local"
+        aurora = local / "Aurora15Connector"
+        aurora.mkdir(parents=True)
+        (aurora / "Aurora15Connector.exe").write_bytes(b"MZ")
+        (aurora / "Aurora15Connector.ini").write_text("Fifa21Path=Y:\\Games\\FIFA 21\r\n")
+        if cas:
+            (local / "CAS").mkdir()
+            (local / "CAS/cas.exe").write_bytes(b"MZ")
+        (root / "dosdevices").mkdir()
+        (root / "dosdevices/y:").symlink_to(self.work.resolve(), target_is_directory=True)
+        fifa21 = self.work / "Games/FIFA 21"
+        fifa21.mkdir(parents=True, exist_ok=True)
+        (fifa21 / "FIFA21.exe").write_bytes(b"MZ")
+        (root / "user.reg").write_text('WINE REGISTRY Version 2\n\n'
+                                       '[Software\\\\Wine\\\\DllOverrides] 1758000000\n'
+                                       '"*d3dcompiler_47"="native"\n')
+        # A fresh bottle has a Dnscache key with Start and Type only.
+        (root / "system.reg").write_text('WINE REGISTRY Version 2\n\n'
+                                         + self.DNSCACHE + ' 1758000000\n'
+                                         '"Start"=dword:00000003\n"Type"=dword:00000020\n')
+        psdir = root / "drive_c/windows/system32/WindowsPowerShell/v1.0"
+        psdir.mkdir(parents=True)
+        (psdir / "powershell.exe").write_bytes(powershell)
+        return conf, psdir
+
+    def set_up_fifa21(self, app, **env):
+        """--fifa21 on an existing copy, up to and including configure_bottle,
+        as setup.sh runs it: its own start (arguments, the per-game settings,
+        the shared-bottle guard) and every function, from a package in the
+        temporary directory. Stops before the session and lock handling, which
+        reach for real processes."""
+        source = (ROOT / "setup.sh").read_text().split(
+            "# ------------------------------------------------- the launch that is watched", 1)[0]
+        for path in ("aurora17/powershell.exe", "fixes/x86_64-windows/cas-powershell.exe",
+                     "fixes/x86_64-unix/cx-fifa17-gate"):
+            (self.work / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / path, self.work / path)
+        script = self.work / "setup21.sh"
+        script.write_text(source + '\nconfigure_bottle "$TARGET"\nf21_check_game\n'
+                          'print -r -- "MODE=$MODE OK=$BOTTLE_OK$PS_OK$HOSTS_OK '
+                          'SHARED=${(j:,:)SHARED_WITH}"\n')
+        return subprocess.run(["/bin/zsh", str(script), "--fifa21"],
+                              env={**self.env, "AURORA_TARGET": str(app),
+                                   "TMPDIR": str(self.work), **env},
+                              capture_output=True, text=True, timeout=60)
+
+    @staticmethod
+    def section_lines(reg, section):
+        found, out = False, []
+        for line in reg.read_text().splitlines():
+            if line.startswith("["):
+                found = line.lower().startswith(section.lower())
+                continue
+            if found and line.startswith('"'):
+                out.append(line)
+        return sorted(out)
+
+    def snapshot(self, name):
+        root = self.bottles / name
+        return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+    def test_fifa21_outside_aurora17_gets_what_the_aurora_launcher_needs(self):
+        # Test 11 of HANDOFF-per-game-setup.md: Aurora.exe in Aurora15 (a
+        # FIFA 15 bottle from before the table) -> Dnscache, the PowerShell
+        # stand-in in the bottle, version bottle-wide; no hosts, no licence.
+        app = self.copy(marker=True)
+        self.shipped(True)
+        conf, psdir = self.fifa21_bottle("Aurora15", ("CX_GRAPHICS_BACKEND", "d3dmetal"),
+                                         ("WINE_SIMULATE_WRITECOPY", "1"),
+                                         ("CX_TOPDOWN_LIMIT", "0x1ffffffff"))
+        root = self.bottles / "Aurora15"
+        result = self.set_up_fifa21(app, AURORA_BOTTLE="Aurora15")
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn("MODE=bottle OK=111 SHARED=FIFA 15", out)
+        self.assertEqual(self.section_lines(root / "system.reg", self.DNSCACHE), sorted([
+            '"DisplayName"="DNS Client"', '"ErrorControl"=dword:00000001',
+            r'"ImagePath"=str(2):"C:\\windows\\system32\\spoolsv.exe"',
+            '"ObjectName"="LocalSystem"', '"Start"=dword:00000002', '"Type"=dword:00000010']))
+        reg = root / "user.reg"
+        self.assertEqual(self.section_lines(reg, r'[Software\\Wine\\DllOverrides]'),
+                         ['"*d3dcompiler_47"="native"', '"version"="native,builtin"'])
+        self.assertEqual(self.section_lines(reg, r'[Software\\Wine\\AppDefaults\\FIFA21.exe\\DllOverrides]'),
+                         ['"ucrtbase"="native,builtin"'])
+        proxy = self.section_lines(
+            reg, r'[Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Connections]')
+        self.assertTrue(proxy and proxy[0].startswith('"DefaultConnectionSettings"=hex:46,'), proxy)
+        # The stand-in Aurora17 and FIFA 21 share, with Wine's stub kept once.
+        self.assertEqual((psdir / "powershell.exe").read_bytes(),
+                         (ROOT / "aurora17/powershell.exe").read_bytes())
+        self.assertEqual((psdir / "powershell.exe.wine-stub-orig").read_bytes(), self.STUB)
+        self.assertFalse((psdir / "aurora17-powershell.exe").exists())
+        # Only what the games share; FIFA 15's leftover goes, with a backup.
+        settings = conf.read_text()
+        self.assertIn('"CX_GRAPHICS_BACKEND" = "d3dmetal"', settings)
+        for absent in ("CX_DR_TRAP", "WEBVIEW2_", "CX_TOPDOWN_LIMIT"):
+            self.assertNotIn(absent, settings)
+        self.assertEqual(len(list(root.glob("cxbottle.conf.bak-*"))), 1)
+        # Nothing of FIFA 17's: no hosts file, no licence, no WebView2.
+        self.assertFalse((root / "drive_c/windows/system32/drivers/etc/hosts").exists())
+        self.assertEqual(list(root.rglob("*.dlf")), [])
+        self.assertFalse((root / "drive_c/webview2-fixed").exists())
+        self.assertIn("ok    the Aurora launcher is in the Aurora15 bottle", out)
+
+        # Idempotent: a second run says so and changes not one byte.
+        before = self.snapshot("Aurora15")
+        again = self.set_up_fifa21(app, AURORA_BOTTLE="Aurora15")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        for line in ("version = native,builtin for the whole bottle — already set",
+                     "ucrtbase = native,builtin for FIFA21.exe — already set",
+                     "proxy auto-detect off — already set",
+                     "already answered in the Aurora15 bottle"):
+            self.assertIn(line, again.stdout)
+        self.assertEqual(self.snapshot("Aurora15"), before, "a second --fifa21 changed the bottle")
+
+        # And the games table now calls FIFA 21 from Aurora.exe ready.
+        verify = self.verify(app, AURORA_BOTTLE="Aurora15")
+        self.assertEqual(self.tables(verify.stdout)[1][("Aurora.exe", "FIFA 21")], "ready",
+                         verify.stdout)
+        named = self.verify(app, AURORA_BOTTLE="Aurora15", AURORA_GAME="fifa21")
+        for line in ("ok    PowerShell stand-in in the bottle",
+                     "ok    Dnscache stand-in in the bottle",
+                     "ok    ucrtbase = native,builtin for FIFA21.exe in the Aurora15 bottle",
+                     "ok    FIFA 21: no Aurora ports to check"):
+            self.assertIn(line, named.stdout)
+        self.assertEqual(self.snapshot("Aurora15"), before, "--verify changed the bottle")
+
+    def test_fifa21_leaves_cas_its_device_check(self):
+        # In a bottle CAS is set up in, powershell.exe is CAS's stand-in and
+        # hands every other command line to aurora17-powershell.exe. FIFA 21's
+        # stand-in is Aurora17's, so it goes there and CAS's stays.
+        app = self.copy(marker=True)
+        self.shipped(True)
+        cas = (ROOT / "fixes/x86_64-windows/cas-powershell.exe").read_bytes()
+        conf, psdir = self.fifa21_bottle("Aurora17", ("CX_GRAPHICS_BACKEND", "d3dmetal"),
+                                         ("CX_DR_TRAP", "2"), ("WINE_SIMULATE_WRITECOPY", "1"),
+                                         powershell=cas, cas=True)
+        (psdir / "powershell.exe.wine-stub").write_bytes(self.STUB)
+        result = self.set_up_fifa21(app)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SHARED=FIFA 17", result.stdout)
+        self.assertIn("as aurora17-powershell.exe behind CAS's stand-in", result.stdout)
+        self.assertEqual((psdir / "powershell.exe").read_bytes(), cas)
+        self.assertEqual((psdir / "aurora17-powershell.exe").read_bytes(),
+                         (ROOT / "aurora17/powershell.exe").read_bytes())
+        self.assertEqual((psdir / "powershell.exe.wine-stub").read_bytes(), self.STUB)
+        self.assertFalse((psdir / "powershell.exe.wine-stub-orig").exists())
+        # FIFA 17's own value stays; nothing of FIFA 17's is added or taken.
+        self.assertIn('"CX_DR_TRAP" = "2"', conf.read_text())
+        self.assertFalse((self.bottles / "Aurora17/drive_c/webview2-fixed").exists())
+        _, launchers = self.tables(self.verify(app, AURORA_BOTTLE="Aurora17").stdout)
+        self.assertEqual(launchers[("Aurora.exe", "FIFA 21")], "ready")
+
+    def test_fifa21_shares_fifa17s_settings_with_or_without_the_table(self):
+        self.bottle("Aurora17", ("CX_DR_TRAP", "2"))
+        self.bottle("Aurora15", ("CX_TOPDOWN_LIMIT", "0x1ffffffff"))
+        # With the table FIFA 21 goes anywhere and the bottle keeps mode 2 out.
+        app = self.copy(marker=True)
+        result, lines = self.run_probe("--fifa21", "--verify", AURORA_BOTTLE="Aurora15",
+                                       AURORA_TARGET=str(app))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SHARED=FIFA 15", lines)
+        self.assertEqual(sorted(lines[2:]), ["CX_GRAPHICS_BACKEND=d3dmetal", "WINE_SIMULATE_WRITECOPY=1"])
+        # Without it, FIFA 17's bottle is still FIFA 21's (the same settings),
+        # and FIFA 15's is not.
+        old = self.copy(marker=False, name="old.app")
+        result, lines = self.run_probe("--fifa21", "--verify", AURORA_TARGET=str(old))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SHARED=FIFA 17", lines)
+        self.assertIn("CX_DR_TRAP=2", lines)
+        result, _ = self.run_probe("--fifa21", "--verify", AURORA_BOTTLE="Aurora15",
+                                   AURORA_TARGET=str(old))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("needs its own bottle", result.stdout)
 
 
 class RepairTests(unittest.TestCase):

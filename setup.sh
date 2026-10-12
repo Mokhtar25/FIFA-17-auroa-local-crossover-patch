@@ -86,7 +86,13 @@
 #                                         drive letter for the game folder
 #   ./setup.sh --fifa16 --verify          check the FIFA 16 setup, change nothing
 #                                         (experimental; see SETUP.md "FIFA 16")
-#   AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15   (or --fifa16) add the game to
+#   ./setup.sh --fifa21                   set the bottle up for FIFA 21 from the
+#                                         Aurora launcher (Aurora.exe): the copy if
+#                                         it is missing, then the settings, the
+#                                         PowerShell and DNS Client stand-ins. The
+#                                         bottle (Aurora17 by default) must exist
+#   ./setup.sh --fifa21 --verify          check the FIFA 21 setup, change nothing
+#   AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15   (or --fifa16, --fifa21) add the game to
 #                                         another game's bottle. Needs a copy whose
 #                                         ntdll.so gives each game its own settings;
 #                                         see SETUP.md "Several games in one bottle"
@@ -170,6 +176,17 @@ case "${1:-}" in
             --shutdown) MODE=shutdown; shift ;;
             --resign) MODE=resign; shift ;;
             -*) print -r -- "Unknown option after --fifa16: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
+        esac ;;
+    --fifa21)
+        # And for FIFA 21: AURORA_GAME=fifa21, the same way.
+        AURORA_GAME=fifa21; MODE=fifa21; shift
+        case "${1:-}" in
+            --verify) MODE=verify; shift ;;
+            --bottle) MODE=bottle; shift ;;
+            --unstick) MODE=unstick; shift ;;
+            --shutdown) MODE=shutdown; shift ;;
+            --resign) MODE=resign; shift ;;
+            -*) print -r -- "Unknown option after --fifa21: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
         esac ;;
     --help|-h)
         sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -555,7 +572,9 @@ BOTTLE_DIR="${CX_BOTTLE_PATH:-$HOME/Library/Application Support/CrossOver/Bottle
 # skipping the Aurora17-only steps. See SETUP.md, "FIFA 15". FIFA 16
 # (AURORA_GAME=fifa16) shares it too: its three Wine patches act only under
 # CX_DR_TRAP=3 and CX_FIFA16_DSTFIX, which only its bottle profile sets, and it
-# skips the same steps. See SETUP.md, "FIFA 16". A copy whose ntdll.so has the
+# skips the same steps. See SETUP.md, "FIFA 16". FIFA 21 (AURORA_GAME=fifa21)
+# needs FIFA 17's Wine settings and only the Aurora launcher's part of the
+# bottle steps. A copy whose ntdll.so has the
 # per-game table applies all of these by program name instead, and then any
 # game can go into any bottle: see "one bottle, every game" below.
 GAME="${AURORA_GAME:-fifa17}"
@@ -614,14 +633,16 @@ CAS_LINK_ID=com.fifa17-crossover.cas-link
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 case "$GAME" in
-    fifa17|fifa15|fifa16) ;;
-    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15 or fifa16)"; exit $E_UNSUPPORTED ;;
+    fifa17|fifa15|fifa16|fifa21) ;;
+    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15, fifa16 or fifa21)"; exit $E_UNSUPPORTED ;;
 esac
-# Whether the game was named (--fifa15, --fifa16 or AURORA_GAME) or plain
-# FIFA 17 was assumed. A plain --verify also prints the table of every game
-# in the bottle (verify_games_table); a named one checks that game only.
+# Whether the game was named (--fifa15, --fifa16, --fifa21 or AURORA_GAME) or
+# plain FIFA 17 was assumed. A plain --verify also prints the table of every
+# game in the bottle (verify_games_table); a named one checks that game only.
 GAME_EXPLICIT=0
 [ -n "${AURORA_GAME:-}" ] && GAME_EXPLICIT=1
+# FIFA 21 has no bottle of its own: it plays only from the Aurora launcher,
+# and that is in FIFA 17's bottle unless AURORA_BOTTLE names another.
 case "$GAME" in
     fifa15) BOTTLE="${AURORA_BOTTLE:-${FIFA15_BOTTLE:-Aurora15}}" ;;
     fifa16) BOTTLE="${AURORA_BOTTLE:-${FIFA16_BOTTLE:-FIFA16}}" ;;
@@ -658,9 +679,12 @@ SHIPPED_NTDLL="$HERE/fixes/x86_64-unix/ntdll.so"
 # Which ntdll.so the bottle will run on once this run is over. An install
 # makes the copy afresh from fixes/, --repair refreshes it from there, and
 # --fifa15 and --fifa16 either install or bring the copy's ntdll.so up to
-# the shipped one (add_game_ntdll). Every other mode leaves the copy as it is.
+# the shipped one (add_game_ntdll). --fifa21 installs when there is no copy
+# and otherwise leaves it as it is, like every other mode.
 case "$MODE" in
     install|repair|fifa15|fifa16) PROFILE_NTDLL="$SHIPPED_NTDLL" ;;
+    fifa21)
+        if [ -d "$COPY_APP" ]; then PROFILE_NTDLL="$COPY_NTDLL"; else PROFILE_NTDLL="$SHIPPED_NTDLL"; fi ;;
     *) PROFILE_NTDLL="$COPY_NTDLL" ;;
 esac
 # PROFILES=1: games can share this bottle. PROFILES_WHY says why not.
@@ -753,6 +777,19 @@ elif [ "$GAME" = fifa16 ]; then
     NTDLL_MARKER="in a Wine builtin now reads SystemCall"
     NTDLL_OLD="an older"
     NTDLL_WHY="FIFA 16 stops before its start screen, loops after the language pick, or stutters, with it"
+elif [ "$GAME" = fifa21 ]; then
+    # FIFA 21 was proven in Aurora17 under FIFA 17's CX_DR_TRAP=2, and the
+    # table gives FIFA21.exe the same mode. With the table the bottle keeps it
+    # out, as it does FIFA 15's and 16's, so every other program in a bottle
+    # FIFA 21 is added to runs as it did before. FIFA 17's WebView2 folder is
+    # for its own launchers and stays out. No ntdll.so marker: the patches
+    # FIFA 21 needs are FIFA 17's, which every copy has.
+    if [ "$PROFILES" = 1 ]; then
+        BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "WINE_SIMULATE_WRITECOPY=1" )
+    else
+        BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
+    fi
+    GAME_LABEL="FIFA 21"
 else
     # CX_DR_TRAP=2 stays bare even with the table, which gives FIFA17.exe and
     # _fifa17.exe mode 2 itself: every FIFA 17 bottle has had it, and the
@@ -766,7 +803,7 @@ else
         || BOTTLE_SETTINGS+=( "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=$WEBVIEW2_WIN_DIR" )
     GAME_LABEL="FIFA 17"
 fi
-# FIFA 15 and FIFA 16 have no Aurora17, so every mode built around its
+# FIFA 15, 16 and 21 have no Aurora17, so every mode built around its
 # launcher, its logs or its licence has nothing to do for them.
 if [ "$GAME" != fifa17 ]; then
     case "$MODE" in
@@ -790,7 +827,10 @@ fi
 # game's bare ones, and configure_bottle writes only what they share. Without
 # it the two games would run on one set of settings, and one of them would
 # fail in a way nothing names (FIFA 15 under FIFA 17's dies 0x80000004), so
-# this stops and says what would let them share.
+# this stops and says what would let them share. FIFA 21 and FIFA 17 run on
+# the same settings, so those two share a bottle with or without the table:
+# FIFA 21 was first played from Aurora17, before there was one. FIFA 21's
+# bottle has no setting of its own, so nothing here takes a bottle for it.
 BOTTLE_PATH="$BOTTLE_DIR/$BOTTLE"
 SHARED_WITH=()
 for OTHER_GAME in fifa17 fifa15 fifa16; do
@@ -806,7 +846,7 @@ for OTHER_GAME in fifa17 fifa15 fifa16; do
     OTHER_BOTTLE_PATH="$BOTTLE_DIR/$OTHER_BOTTLE"
     if [ "${(L)BOTTLE_PATH:A}" = "${(L)OTHER_BOTTLE_PATH:A}" ] \
        || grep -Eq "^$OTHER_SETTING" "$BOTTLE_PATH/cxbottle.conf" 2>/dev/null; then
-        if [ "$PROFILES" = 1 ]; then
+        if [ "$PROFILES" = 1 ] || [ "$GAME:$OTHER_GAME" = fifa21:fifa17 ]; then
             SHARED_WITH+=( "$OTHER_LABEL" )
             continue
         fi
@@ -846,10 +886,14 @@ done
 # it is missing, and the copy's ntdll.so replaced if it is a build without the
 # FIFA 16 fix, which every copy made before that build is. Either way it ends
 # with the game folder found and reachable from the bottle.
+#
+# --fifa21 is the same for FIFA 21, except that it never makes the bottle:
+# FIFA 21 plays only from the Aurora launcher, which has to be installed in
+# the bottle first, and a bottle made here would not have it.
 F15_ONE=0
 F16_ONE=0
-if [ "$MODE" = fifa15 ] || [ "$MODE" = fifa16 ]; then
-    if [ "$MODE" = fifa15 ]; then F15_ONE=1; else F16_ONE=1; fi
+if [ "$MODE" = fifa15 ] || [ "$MODE" = fifa16 ] || [ "$MODE" = fifa21 ]; then
+    if [ "$MODE" = fifa15 ]; then F15_ONE=1; elif [ "$MODE" = fifa16 ]; then F16_ONE=1; fi
     if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
@@ -861,8 +905,9 @@ fi
 ALL_PORTS=47170,47171,47172,47173,3216
 if [ "$GAME" = fifa15 ]; then
     GAME_PORTS=3216; GAME_PORTS_LABEL=3216
-elif [ "$GAME" = fifa16 ]; then
-    # FIFA 16 runs on its own: no Aurora, no port.
+elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ]; then
+    # FIFA 16 runs on its own: no Aurora, no port. FIFA 21's Aurora launcher
+    # holds none this script knows of.
     GAME_PORTS=""; GAME_PORTS_LABEL=""
 else
     GAME_PORTS=47170,47171,47172,47173; GAME_PORTS_LABEL=47170-47173
@@ -1672,7 +1717,8 @@ OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
 # to spring14.gosredirector.ea.com and says the servers are closed -- with the
 # Origin/LSX side working perfectly (FIFA 15 checkpoint fact 81). FIFA 16:
 # none. Nothing redirects it anywhere, and the bottle the fix was proven in
-# had no override, so it gets none.
+# had no override, so it gets none. FIFA 21: version, as FIFA 17. The Aurora
+# launcher's proxy version.dll sits beside FIFA21.exe.
 if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; elif [ "$GAME" = fifa16 ]; then OVERRIDE_DLL=""; else OVERRIDE_DLL=version; fi
 OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 # The programs the overrides are written for. Each override used to go in the
@@ -1683,7 +1729,8 @@ OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 # HKCU\Software\Wine\AppDefaults\<exe>\DllOverrides, which Wine reads before
 # the bottle-wide section, for the game's programs only. FIFA 17 has two:
 # _fifa17.exe is its loader, which loads from the same folder and had these
-# overrides as much as FIFA17.exe did while they were bottle-wide. A
+# overrides as much as FIFA17.exe did while they were bottle-wide. FIFA 21 has
+# FIFA21.exe, for its ucrtbase (see the C runtime override below). A
 # bottle-wide override an earlier setup.sh wrote is left where it is and still
 # counts (dll_override_is_set): removing it is not this script's to do, and
 # nothing that works today should stop working.
@@ -1694,7 +1741,7 @@ OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 # beside FIFA 13, 16 and 21 -- and every one of them was proven with the
 # bottle-wide override. A bottle-wide version=native,builtin is harmless to
 # FIFA 16, which has no version.dll of its own to prefer.
-if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa16 ]; then OVERRIDE_EXES=(); else OVERRIDE_EXES=(FIFA17.exe _fifa17.exe); fi
+if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa16 ]; then OVERRIDE_EXES=(); elif [ "$GAME" = fifa21 ]; then OVERRIDE_EXES=(FIFA21.exe); else OVERRIDE_EXES=(FIFA17.exe _fifa17.exe); fi
 
 # ------------------------------------------------ the C runtime override
 # An online match is a lockstep simulation: every client runs the same maths on
@@ -1721,7 +1768,15 @@ if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa1
 # FIFA 16 gets neither. The override is for online matches, and FIFA 16 here
 # is played offline; its loading-loop fix was found and proven on Wine's own
 # msvcr110, and nothing here should move that ground under it.
-if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); elif [ "$GAME" = fifa16 ]; then CRT_OVERRIDE_DLLS=(); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
+#
+# FIFA 21 gets no pair either. Its maths is in ucrtbase, and Aurora 21 pairs
+# two players only when both run Microsoft's: the client pack's maths bridge
+# loads the pinned Microsoft ucrtbase into FIFA21.exe, and under Wine that
+# load comes back as Wine's own unless FIFA21.exe prefers native ucrtbase.
+# The PowerShell stand-in writes that override at PLAY (for the bridge too);
+# configure_bottle writes FIFA21.exe's now, for that one program only, so
+# nothing else in the bottle is moved off Wine's ucrtbase.
+if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ]; then CRT_OVERRIDE_DLLS=(); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
 
 bottle_user_reg()   { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
 bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
@@ -3756,14 +3811,14 @@ verify_install() {
 
     # Check whether any Aurora ports are held by orphaned processes. Aurora17's
     # server listens on 47170-47173; Aurora15Connector's Origin stand-in on 3216.
-    # FIFA 16 has no Aurora and so no port to check.
+    # FIFA 16 has no Aurora and so no port to check, and FIFA 21 none known.
     local port_pids=""
     if [ -n "$GAME_PORTS" ]; then
         port_pids="$(/usr/sbin/lsof -nP -iTCP:$GAME_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | tr '\n' ' ')"
         port_pids="${port_pids% }"
     fi
     if [ -z "$GAME_PORTS" ]; then
-        ok "FIFA 16: no Aurora ports to check"
+        ok "$GAME_LABEL: no Aurora ports to check"
     elif [ -z "$port_pids" ]; then
         ok "all Aurora ports ($GAME_PORTS_LABEL) are free"
     elif [ -n "$(crossovers_running)" ] || hold_pid_alive; then
@@ -3811,6 +3866,17 @@ verify_install() {
                  problems=$((problems+1)); }
     fi
 
+    # FIFA 21's ucrtbase (see the C runtime override). A note: the PowerShell
+    # stand-in writes it at PLAY whether or not setup has.
+    if [ "$GAME" = fifa21 ] && [ -f "$(bottle_user_reg)" ]; then
+        if dll_override_is_set ucrtbase; then
+            ok "ucrtbase = native,builtin for FIFA21.exe in the $BOTTLE bottle"
+        else
+            note "FIFA21.exe does not prefer Microsoft's ucrtbase in the $BOTTLE bottle yet."
+            say "        The PowerShell stand-in sets it at PLAY; ./setup.sh --fifa21 sets it now."
+        fi
+    fi
+
     # See f16_pin_crt. A note: FIFA 16 still starts on Microsoft's runtime,
     # but that is not the ground its loading fix was proven on.
     if [ "$GAME" = fifa16 ] && [ -f "$(bottle_user_reg)" ] && f16_crt_pin_needed; then
@@ -3853,6 +3919,11 @@ verify_install() {
                    say "        .NET process (Aurora15Connector, its client) waits five seconds"
                    say "        for a proxy lookup before its first request. Quit CrossOver"
                    say "        fully, then re-run  ./setup.sh --fifa15"
+                 elif [ "$GAME" = fifa21 ]; then
+                   bad "proxy auto-detect is on in the $BOTTLE bottle, so every fresh"
+                   say "        .NET process (the Aurora launcher's bridges) waits five seconds"
+                   say "        for a proxy lookup before its first request. Quit CrossOver"
+                   say "        fully, then re-run  ./setup.sh --fifa21"
                  else
                    bad "proxy auto-detect is on in the $BOTTLE bottle, so Aurora's"
                    say "        helper spends five seconds looking for a proxy and misses"
@@ -3909,12 +3980,33 @@ verify_install() {
 
     # FIFA 15 has no PowerShell stand-in: Aurora15Connector is one program. The
     # checks below are FIFA 17's and are skipped for it (not re-indented).
+    # FIFA 21 has its own: the bottle's stand-in, and the Dnscache one.
     if [ "$GAME" = fifa15 ]; then
         ok "FIFA 15: no Aurora17 stand-in to check"
         f15_check_game
     elif [ "$GAME" = fifa16 ]; then
         ok "FIFA 16: no Aurora17 stand-in to check"
         f16_check_game
+    elif [ "$GAME" = fifa21 ]; then
+        # The Aurora launcher's PLAY reaches the stand-in in the bottle; the
+        # Aurora17 folder's is Aurora17Connector's and not looked at.
+        if gt_powershell_ok; then
+            ok "PowerShell stand-in in the bottle"
+        else
+            bad "the $BOTTLE bottle has no PowerShell stand-in, so the Aurora launcher's"
+            say "        FIFA 21 PLAY does nothing. Quit CrossOver fully, then re-run"
+            say "        ./setup.sh --fifa21"
+            problems=$((problems+1))
+        fi
+        if gt_dnscache_ok; then
+            ok "Dnscache stand-in in the bottle (the Aurora launcher's DNS Client check)"
+        else
+            bad "the $BOTTLE bottle has no DNS Client service, so the Aurora launcher"
+            say "        stops before FIFA 21 starts. Quit CrossOver fully, then re-run"
+            say "        ./setup.sh --fifa21"
+            problems=$((problems+1))
+        fi
+        f21_check_game
     elif [ "$offline" = 1 ]; then
         ok "offline install: no Aurora17 stand-in to check"
     else
@@ -3989,6 +4081,9 @@ verify_install() {
         ok "FIFA 15: Aurora17's EA names, licence and certificate checks do not apply"
     elif [ "$GAME" = fifa16 ]; then
         ok "FIFA 16: Aurora17's EA names, licence and certificate checks do not apply"
+    elif [ "$GAME" = fifa21 ]; then
+        # FIFA 21's stand-in writes its own names at PLAY.
+        ok "FIFA 21: Aurora17's EA names, licence and certificate checks do not apply"
     elif [ "$offline" = 1 ]; then
         ok "offline install: Aurora17's EA names, redirect and certificate do not apply"
         # The licence file is the game's own and is checked either way.
@@ -4163,6 +4258,11 @@ verify_install() {
         if [ "$GAME" = fifa16 ]; then
             say "These checks do not test a launch. Run fifa16.exe in the $BOTTLE bottle,"
             say "press start and pick a language: the menus appearing is the real test."
+            return 0
+        fi
+        if [ "$GAME" = fifa21 ]; then
+            say "These checks do not test a launch. Open the Aurora launcher in the $BOTTLE"
+            say "bottle and press PLAY on FIFA 21: the game reaching its menus is the real test."
             return 0
         fi
         say "That is not the same as \"the game will play\": these checks cannot"
@@ -5250,6 +5350,70 @@ install_dnscache_standin() {
     return 0
 }
 
+# What FIFA 21 needs that is not the bottle's to give: the Aurora launcher
+# installed in it, and a game folder. Both are the player's to do in the
+# launcher, so these are notes, never a stop.
+f21_check_game() {
+    local d
+    if aurora_launcher_dir >/dev/null 2>&1; then
+        ok "the Aurora launcher is in the $BOTTLE bottle"
+    else
+        note "the Aurora launcher (Aurora.exe) is not in the $BOTTLE bottle yet, and FIFA 21"
+        say "        plays only from it. Run Aurora.exe once in this bottle (CrossOver's"
+        say "        Run Command), then play FIFA 21 from it."
+    fi
+    if d="$(game_dir_of fifa21 2>/dev/null)"; then
+        ok "FIFA 21 is in $d"
+    else
+        note "no FIFA 21 folder found; the Aurora launcher asks for it, and nothing"
+        say "        here needs it"
+    fi
+    return 0
+}
+
+# Step 8's second half: the stand-in inside the bottle, so it is found no
+# matter where Aurora17 lives -- and the Aurora launcher, which plays FIFA 21
+# through the pack's Start-Aurora21.ps1, only ever finds this one. It is the
+# same file for both: aurora17/powershell.exe does Start-Aurora21.ps1's work
+# too. The file being replaced is Wine's own stub; we keep a copy of it.
+# Once step 9c has put CAS's stand-in in that name, CAS's hands every call
+# that is not its own device check on to $CAS_HANDOFF beside it, so that is
+# the file kept current here, and CAS's is left where it is. Wine's stub was
+# kept when CAS's went in. Sets PS_OK=1 and PS_BOTTLE_ACTION once it is in;
+# a bottle that is not there is left for the caller to report.
+install_bottle_powershell() {
+    PSDIR="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
+    PS_BOTTLE_NAME=powershell.exe
+    [ -d "$BOTTLE_DIR/$BOTTLE" ] || return 0
+    if [ -f "$PSDIR/powershell.exe" ] && cmp -s "$CAS_PS" "$PSDIR/powershell.exe"; then
+        PS_BOTTLE_NAME="$CAS_HANDOFF"
+        PS_BOTTLE_ACTION=replaced
+    elif [ -f "$PSDIR/powershell.exe" ] \
+       && ! cmp -s "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe"; then
+        # Somebody else's file. Keep it once; never overwrite that copy.
+        [ -f "$PSDIR/powershell.exe.wine-stub-orig" ] \
+            || cp -X "$PSDIR/powershell.exe" "$PSDIR/powershell.exe.wine-stub-orig"
+        PS_BOTTLE_ACTION=replaced
+    elif [ -f "$PSDIR/powershell.exe.wine-stub-orig" ]; then
+        # Ours is already in and the original is safe beside it. A second
+        # run must not back up our own file as if it were Wine's.
+        PS_BOTTLE_ACTION=replaced
+    else
+        mkdir -p "$PSDIR"
+        PS_BOTTLE_ACTION=created
+    fi
+    cp -X "$HERE/aurora17/powershell.exe" "$PSDIR/$PS_BOTTLE_NAME" \
+        || die $E_PERMISSION "Could not write the stand-in into the $BOTTLE bottle.
+         Quit CrossOver completely and run this again. If it repeats, check
+         there is free disk space."
+    if [ "$PS_BOTTLE_NAME" = powershell.exe ]; then
+        ok "into the $BOTTLE bottle ($PS_BOTTLE_ACTION)"
+    else
+        ok "into the $BOTTLE bottle, as $PS_BOTTLE_NAME behind CAS's stand-in"
+    fi
+    PS_OK=1
+}
+
 # Takes the named leftover single-game variables (leftover_game_vars) out of
 # cxbottle.conf, after saving it as cxbottle.conf.bak-<time> next to it.
 remove_leftover_game_vars() {
@@ -5466,6 +5630,19 @@ configure_bottle() {
                     say "        kick-off. Quit CrossOver completely and run this again."
                 fi
             fi
+            # FIFA 21's ucrtbase, for FIFA21.exe only (see the C runtime
+            # override). Not a stop: the PowerShell stand-in writes it at PLAY.
+            if [ "$GAME" = fifa21 ]; then
+                if dll_override_is_set ucrtbase; then
+                    ok "ucrtbase = native,builtin for FIFA21.exe — already set"
+                elif set_dll_override ucrtbase; then
+                    ok "ucrtbase = native,builtin for FIFA21.exe"
+                    say "        this is what lets the maths bridge give FIFA 21 Microsoft's maths"
+                else
+                    note "could not set ucrtbase for FIFA21.exe in $(bottle_user_reg)"
+                    say "        the PowerShell stand-in sets it at PLAY instead"
+                fi
+            fi
             # See disable_proxy_autodetect. Same file, so it is done here rather
             # than in a block of its own. Not a stop: without it the game still
             # launches, and on a network where the wpad lookup fails fast it
@@ -5550,6 +5727,28 @@ configure_bottle() {
         say ""
         say "8-9a. Skipped — these three steps are FIFA 17's (Aurora17 stand-in, EA names, licence)"
         PS_OK=1; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""; HOSTS_OK=1; LICENCE_OK=1
+        return 0
+    fi
+    if [ "$GAME" = fifa21 ]; then
+        # FIFA 21 plays only from the Aurora launcher, and what that needs of
+        # the bottle beyond step 7 is two stand-ins: PowerShell, which its
+        # PLAY runs Start-Aurora21.ps1 through, and Dnscache (9d), which it
+        # asks about before it starts anything. The Aurora17 folder is
+        # Aurora17Connector's and not looked for. Step 9's names are
+        # Aurora17's -- FIFA 21's stand-in writes its own at PLAY -- and 9a to
+        # 9c are FIFA 17's licence and launchers. In a bottle CAS is in,
+        # Aurora17's stand-in goes beside CAS's, which keeps the name.
+        say ""
+        say "8. Installing the PowerShell stand-in the Aurora launcher needs for FIFA 21"
+        PS_OK=0; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""
+        install_bottle_powershell
+        [ "$PS_OK" = 1 ] || note "no bottle called '$BOTTLE' yet, so there is nowhere to put it"
+        say ""
+        say "9-9c. Skipped — FIFA 17's (EA names, licence, WebView2, CAS)"
+        HOSTS_OK=1; LICENCE_OK=1
+        say ""
+        say "9d. Letting the Aurora launcher start FIFA 21"
+        install_dnscache_standin
         return 0
     fi
 
@@ -5651,43 +5850,8 @@ configure_bottle() {
         say "        AURORA_DIR=/path/to/Aurora17 ./setup.sh"
     fi
 
-    # Also install it inside the bottle, so it is found no matter where Aurora17
-    # lives. The file being replaced is Wine's own stub; we keep a copy of it.
-    # Once step 9c has put CAS's stand-in in that name, CAS's hands PLAY's
-    # calls on to $CAS_HANDOFF beside it, so that is the file kept current
-    # here, and CAS's is left where it is. Wine's stub was kept when CAS's
-    # went in.
-    PSDIR="$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"
-    PS_BOTTLE_NAME=powershell.exe
-    if [ -d "$BOTTLE_DIR/$BOTTLE" ]; then
-        if [ -f "$PSDIR/powershell.exe" ] && cmp -s "$CAS_PS" "$PSDIR/powershell.exe"; then
-            PS_BOTTLE_NAME="$CAS_HANDOFF"
-            PS_BOTTLE_ACTION=replaced
-        elif [ -f "$PSDIR/powershell.exe" ] \
-           && ! cmp -s "$HERE/aurora17/powershell.exe" "$PSDIR/powershell.exe"; then
-            # Somebody else's file. Keep it once; never overwrite that copy.
-            [ -f "$PSDIR/powershell.exe.wine-stub-orig" ] \
-                || cp -X "$PSDIR/powershell.exe" "$PSDIR/powershell.exe.wine-stub-orig"
-            PS_BOTTLE_ACTION=replaced
-        elif [ -f "$PSDIR/powershell.exe.wine-stub-orig" ]; then
-            # Ours is already in and the original is safe beside it. A second
-            # run must not back up our own file as if it were Wine's.
-            PS_BOTTLE_ACTION=replaced
-        else
-            mkdir -p "$PSDIR"
-            PS_BOTTLE_ACTION=created
-        fi
-        cp -X "$HERE/aurora17/powershell.exe" "$PSDIR/$PS_BOTTLE_NAME" \
-            || die $E_PERMISSION "Could not write the stand-in into the $BOTTLE bottle.
-         Quit CrossOver completely and run this again. If it repeats, check
-         there is free disk space."
-        if [ "$PS_BOTTLE_NAME" = powershell.exe ]; then
-            ok "into the $BOTTLE bottle ($PS_BOTTLE_ACTION)"
-        else
-            ok "into the $BOTTLE bottle, as $PS_BOTTLE_NAME behind CAS's stand-in"
-        fi
-        PS_OK=1
-    fi
+    # Also install it inside the bottle (install_bottle_powershell).
+    install_bottle_powershell
 
     # ------------------------------------------- 9. the six network mappings
     # See seed_bottle_hosts. Without this the launcher's first PLAY on a fresh
@@ -6459,6 +6623,13 @@ if [ "$MODE" = bottle ]; then
         f16_add_win32u "$TARGET"
         [ -d "$BOTTLE_DIR/$BOTTLE" ] || make_bottle "$TARGET"
     fi
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE" ] && [ "$GAME" = fifa21 ]; then
+        die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         FIFA 21 plays from the Aurora launcher: make the bottle in CrossOver,
+         run Aurora.exe in it once, quit CrossOver, then run this again. For
+         another name:   AURORA_BOTTLE='name' ./setup.sh --fifa21"
+    fi
     [ -d "$BOTTLE_DIR/$BOTTLE" ] \
         || die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
          $BOTTLE_DIR
@@ -6469,6 +6640,7 @@ if [ "$MODE" = bottle ]; then
     configure_bottle "$TARGET"
     [ "$GAME" = fifa15 ] && f15_check_game
     [ "$GAME" = fifa16 ] && f16_check_game map
+    [ "$GAME" = fifa21 ] && f21_check_game
     end_own_wine_session
     say ""
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
@@ -6485,6 +6657,9 @@ if [ "$MODE" = bottle ]; then
             say "      run ${F16_EXE_WIN:-fifa16.exe from your FIFA 16 folder}."
             say "      Tick the box that saves it as a launcher, and next time it is one"
             say "      click in the bottle."
+        elif [ "$GAME" = fifa21 ]; then
+            green "Done. Open ${TARGET:t:r}, then the Aurora launcher in the $BOTTLE bottle,"
+            say "      and play FIFA 21 from it."
         else
             green "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
         fi
@@ -6495,6 +6670,8 @@ if [ "$MODE" = bottle ]; then
             say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa15 --verify"
         elif [ "$GAME" = fifa16 ]; then
             say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa16 --verify"
+        elif [ "$GAME" = fifa21 ]; then
+            say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa21 --verify"
         else
             say "To check:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
         fi
@@ -6803,7 +6980,7 @@ if [ "$MODE" = verify ]; then
     if [ "$GAME_EXPLICIT" = 0 ]; then
         verify_games_table "$TARGET"
         say ""
-        say "FIFA 17 in detail (./setup.sh --fifa15 --verify and --fifa16 --verify do the others)"
+        say "FIFA 17 in detail (--fifa15 --verify, --fifa16 --verify and --fifa21 --verify do the others)"
     fi
     verify_install "$TARGET" || exit $E_INCOMPLETE
     exit 0
@@ -7298,7 +7475,8 @@ require_bottle_free
 # the copy's cxbottle that makes it. That needs CrossOver closed: an open one
 # lists the bottles it found when it started and puts the new one's registry
 # back its own way on quit. So it is checked here, before a gigabyte is copied, rather
-# than in make_bottle afterwards.
+# than in make_bottle afterwards. --fifa21 needs the Aurora launcher in the
+# bottle, so like a plain install it stops, and says how to make it.
 MAKE_BOTTLE=0
 if [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$F16_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
     [ ! -e "$BOTTLE_DIR/$BOTTLE" ] \
@@ -7317,6 +7495,13 @@ if [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$F
     fi
     MAKE_BOTTLE=1
     ok "no $BOTTLE bottle yet -- it will be made once the copy exists"
+elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && [ "$GAME" = fifa21 ]; then
+    die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
+         FIFA 21 plays from the Aurora launcher: make the bottle in CrossOver
+         (+ > Windows 10 64-bit, named exactly $BOTTLE), run Aurora.exe in it
+         once, quit CrossOver completely (Command-Q), then run this again.
+         Already using another name?   AURORA_BOTTLE='name' ./setup.sh --fifa21
+         Nothing has been changed."
 elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ]; then
     die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
          Make it first, in CrossOver, along with the Aurora17 launcher:
@@ -7486,6 +7671,7 @@ fi
 configure_bottle "$APP"
 [ "$GAME" = fifa15 ] && f15_check_game
 [ "$GAME" = fifa16 ] && f16_check_game map
+[ "$GAME" = fifa21 ] && f21_check_game
 end_own_wine_session
 
 # ------------------------------------------------------------- the receipt
@@ -7538,6 +7724,10 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
         say "          Tick the box that saves it as a launcher, and next time it is"
         say "          one click in the bottle. No launcher program is involved: the"
         say "          game runs on its own (SETUP.md, FIFA 16)."
+    elif [ "$GAME" = fifa21 ]; then
+        say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
+        say "          $BOTTLE bottle, run the Aurora launcher and play FIFA 21 from it"
+        say "          (SETUP.md, 9d)."
     elif [ "$IN_PLACE" = "1" ]; then
         say "To play:  open CrossOver, then open Aurora17 in the $BOTTLE bottle"
         say "          and press PLAY FIFA 17."

@@ -1392,8 +1392,24 @@ there, and drag CAS Link (CrossOver) to the Trash.
 
 ### 9d. FIFA 21's Aurora launcher
 
-FIFA 21 plays on Aurora 21 through the Aurora launcher (`Aurora.exe`), run in
-this same Aurora17 bottle. Its PLAY runs the client pack's `Start-Aurora21.ps1`
+FIFA 21 plays on Aurora 21 through the Aurora launcher (`Aurora.exe`). To set
+up its existing bottle, quit CrossOver completely and run:
+
+```sh
+./setup.sh --fifa21
+./setup.sh --fifa21 --verify
+```
+
+The default is `Aurora17`. If Aurora.exe is installed in another bottle, use
+`AURORA_BOTTLE='name'` before both commands. Setup makes the CrossOver-FIFA
+copy if it is missing, then installs FIFA 21's bottle settings, PowerShell
+stand-in and Dnscache stand-in. It also sets the `ucrtbase` override for
+`FIFA21.exe`; the stand-in sets the maths bridge's override at PLAY.
+The bottle must already exist. Install Aurora.exe in it through CrossOver's
+**Run Command** first. To add FIFA 21 to a FIFA 15 or FIFA 16 bottle, the copy
+needs the per-game settings table described above.
+
+Its PLAY runs the client pack's `Start-Aurora21.ps1`
 through PowerShell, which reaches step 8's stand-in; that stand-in does the
 script's work and two things the script cannot do under Wine: it tells Wine to
 load Microsoft's `ucrtbase` for FIFA21.exe and the pack's maths bridge, so the
@@ -1404,8 +1420,9 @@ Before any of that, the launcher asks Windows whether its DNS Client service,
 `Dnscache`, is running, and a bottle has no such service, so PLAY stops there.
 This step registers Wine's print spooler, `spoolsv.exe`, under that name as a
 service that starts with the bottle. It does nothing, and needs to do nothing:
-the game's lookups go through Wine's resolver either way. Online install only;
-FIFA 17 does not need it, so it is never a reason for the installer to fail.
+the game's lookups go through Wine's resolver either way. It is installed by
+`--fifa21` and online FIFA 17 setup; FIFA 17 does not need it, so it is never
+a reason for that game's installer to fail.
 
 To undo it, with the bottle running: `sc delete Dnscache` from CrossOver's
 **Run Command** in the Aurora17 bottle.
