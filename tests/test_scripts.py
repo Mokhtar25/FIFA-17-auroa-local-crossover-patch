@@ -5,6 +5,7 @@ side effects. Diagnostics run with stubbed reporting in a temporary directory.
 """
 import hashlib
 import os
+import re
 import json
 from pathlib import Path
 from shlex import quote as shlex_quote
@@ -494,13 +495,32 @@ class SharedBottleTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=120)
 
     @staticmethod
-    def table(stdout):
-        rows = {}
+    def tables(stdout):
+        """The games table as {game: cells} and the launcher table as
+        {(launcher, game): state}. Columns are two or more spaces apart."""
+        games, launchers, which, last = {}, {}, None, ""
         for line in stdout.splitlines():
-            if line.startswith("| FIFA "):
-                cells = [c.strip() for c in line.strip("|").split("|")]
-                rows[cells[0]] = cells
-        return rows
+            if line.startswith("  game "):
+                which = "games"; continue
+            if line.startswith("  launcher "):
+                which = "launchers"; continue
+            if not line.strip() or line.strip().startswith("─"):
+                if not line.strip():
+                    which = None
+                continue
+            if which == "games":
+                cells = re.split(r"\s{2,}", line.strip())
+                games[cells[0]] = cells
+            elif which == "launchers":
+                name = line[2:].split("  ")[0].strip() if line[2] != " " else ""
+                last = name or last
+                rest = re.split(r"\s{2,}", line[2 + len(name):].strip())
+                launchers[(last, rest[0])] = rest[1]
+        return games, launchers
+
+    @staticmethod
+    def table(stdout):
+        return SharedBottleTests.tables(stdout)[0]
 
     def test_plain_verify_prints_every_game_and_launcher_and_changes_nothing(self):
         app, conf = self.shared_bottle()
@@ -512,28 +532,33 @@ class SharedBottleTests(unittest.TestCase):
         self.assertIn(f"CrossOver copy   {app.resolve()}", out)
         self.assertIn("per-game table   yes", out)
         self.assertIn("CX_PF_PAE        1", out)
-        self.assertIn("| game ", out)
-        rows = self.table(out)
+        self.assertIn("  game ", out)
+        self.assertNotIn("| ", out)
+        rows, launchers = self.tables(out)
         self.assertEqual(sorted(rows), ["FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
-        # game | folder | settings | DLL overrides | Aurora.exe | Impulsum17 | CAS | RebornFUT | direct
+        # game | folder | settings | DLL overrides | offline
         self.assertEqual(rows["FIFA 21"][1:4], ["found", "table", "ucrtbase"])
         self.assertEqual(rows["FIFA 16"][1:4],
                          ["found", "AppDefaults (Profile=fifa16, DrTrap=3)", "none needed"])
         self.assertEqual(rows["FIFA 15"][1], "missing")
         self.assertEqual(rows["FIFA 13"][2], "bare env")
-        # Which launcher starts which game.
-        for game in ("FIFA 13", "FIFA 15", "FIFA 16", "FIFA 21"):
-            self.assertEqual(rows[game][5:8], ["unsupported"] * 3, game)
-        self.assertEqual(rows["FIFA 13"][8], "unsupported")
-        self.assertEqual(rows["FIFA 21"][8], "unsupported")
+        # No offline start for FIFA 13 and 21; FIFA 16 run by hand: found,
+        # and y: reaches it.
+        self.assertEqual(rows["FIFA 13"][4], "-")
+        self.assertEqual(rows["FIFA 21"][4], "-")
+        self.assertEqual(rows["FIFA 16"][4], "ready")
+        # Which launcher starts which game: only those rows are there.
+        self.assertEqual(sorted(g for l, g in launchers if l == "Aurora.exe"),
+                         ["FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
+        self.assertEqual(sorted(l for l, _ in launchers), sorted(
+            ["Aurora.exe"] * 5 + ["Impulsum17", "CAS", "RebornFUT"]))
+        self.assertNotIn("unsupported", out.split("FIFA 17 in detail")[0])
         # Present but not ready, each saying what it lacks first.
-        self.assertEqual(rows["FIFA 15"][4], "missing game folder")
-        self.assertEqual(rows["FIFA 16"][4], "missing proxy setting")
-        self.assertEqual(rows["FIFA 17"][5], "missing Impulsum17")
-        self.assertEqual(rows["FIFA 17"][6], "missing game folder")
-        self.assertEqual(rows["FIFA 17"][7], "missing RebornFUT")
-        # FIFA 16 run by hand: found, and y: reaches it.
-        self.assertEqual(rows["FIFA 16"][8], "ready")
+        self.assertEqual(launchers[("Aurora.exe", "FIFA 15")], "missing game folder")
+        self.assertEqual(launchers[("Aurora.exe", "FIFA 16")], "missing proxy setting")
+        self.assertEqual(launchers[("Impulsum17", "-")], "not installed")
+        self.assertEqual(launchers[("CAS", "FIFA 17")], "missing game folder")
+        self.assertEqual(launchers[("RebornFUT", "-")], "not installed")
         # FIFA 17's own checks still follow, as they always did.
         self.assertIn("FIFA 17 in detail", out)
         after = {p: p.read_bytes() for p in (self.bottles / "Shared").rglob("*") if p.is_file()}
@@ -1748,7 +1773,11 @@ class FolderGateTests(unittest.TestCase):
         env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.work), "LANG": "C",
                "CX_FIFA_GATE_TEST_TABLE": str(self.table),
                "CX_FIFA_GATE_TEST_BUILDS": str(self.builds),
-               "CX_FIFA_GATE_TEST_PS": str(self.ps)}
+               "CX_FIFA_GATE_TEST_PS": str(self.ps),
+               # The chores a start leaves for after it, run before the
+               # gate exits, so a test sees what they did.
+               "CX_FIFA_GATE_TEST_CHORES": "wait",
+               "CX_FIFA_GATE_TEST_DIALOG": str(self.work / "dialogs")}
         env.update(extra)
         return env
 
@@ -1764,9 +1793,28 @@ class FolderGateTests(unittest.TestCase):
         return result.returncode, self.last_log()
 
     def last_log(self):
+        """The start's own line (the chores after it log as "after <exe>")."""
         if not self.log.exists():
             return None
-        return self.log.read_text().splitlines()[-1].split("\t")
+        lines = [l.split("\t") for l in self.log.read_text().splitlines()]
+        lines = [l for l in lines if not l[1].startswith("after ")]
+        return lines[-1] if lines else None
+
+    def chores_log(self):
+        if not self.log.exists():
+            return []
+        return [l.split("\t") for l in self.log.read_text().splitlines()
+                if l.split("\t")[1].startswith("after ")]
+
+    def lock_holder(self):
+        """A process that looks like a gate run to `ps`, alive for the test."""
+        proc = subprocess.Popen(["/bin/zsh", "-f", "-c", "sleep 30; :", "cx-fifa17-gate"])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        return proc
+
+    def dialogs(self):
+        path = self.work / "dialogs"
+        return path.read_text() if path.exists() else ""
 
     def source(self, body):
         script = "source " + shlex_quote(str(GATE_SCRIPT)) + "\n" + body
@@ -1860,7 +1908,9 @@ class FolderGateTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertTrue(self.is_cas(), line)
             self.assertTrue(line[3].startswith("cas(" + reason), line)
-        # Its originals are kept all the same, from CAS's own copies.
+        # Its originals are kept all the same, from CAS's own copies, but
+        # after the start (see test_a_cas_start_never_hashes_or_waits).
+        self.assertIn("after FIFA17.exe", self.log.read_text())
         self.assertIn("kept 3 original file(s)", self.log.read_text())
 
     def test_the_fast_path_changes_nothing_when_the_files_are_the_games_own(self):
@@ -2016,7 +2066,8 @@ class FolderGateTests(unittest.TestCase):
         self.install_cas()
         self.cas_plays()
         (self.stash / "lock").mkdir(parents=True)
-        (self.stash / "lock/pid").write_text(f"{os.getpid()} 0\n")
+        holder = self.lock_holder()
+        (self.stash / "lock/pid").write_text(f"{holder.pid} 0\n")
         rc, line = self.gate(envnames="FUT17_GAME_CODE", CX_FIFA_GATE_TEST_LOCK_WAIT="1")
         self.assertEqual(rc, 0)
         self.assertIn("lock", line[5])
@@ -2230,9 +2281,9 @@ class FolderGateTests(unittest.TestCase):
         self.assertIn("other files     version.dll.cas-backup is Aurora.exe's shim", block)
         self.assertIn("~/Downloads/FIFA 17          only a guess: no launcher points here", block)
         self.assertNotIn("BAD", block)
-        # The table's Impulsum17 cell says what its PLAY would stop at.
-        rows = SharedBottleTests.table(result.stdout)
-        self.assertEqual(rows["FIFA 17"][5], "missing Impulsum DLL")
+        # The launcher table's Impulsum17 row says what its PLAY would stop at.
+        rows, launchers = SharedBottleTests.tables(result.stdout)
+        self.assertEqual(launchers[("Impulsum17", "FIFA 17")], "missing Impulsum DLL")
         self.assertEqual(rows["FIFA 17"][1], "found")
         self.assertIn(f"  FIFA 17: {self.game}", result.stdout)
 
@@ -2268,6 +2319,296 @@ class FolderGateTests(unittest.TestCase):
         self.assertIn("originals       3/3 in .crossover-fifa, match FIFA 17's final update", block)
         self.assertIn("aurora: 3 file(s) restored, cas_03.cas parked", block)
 
+
+    # ------------------------------------- starting states (2026-10-12 review)
+    def hash_log(self):
+        """A shasum on PATH that notes each file it hashes and whether the
+        gate run that asked was the after-start chores."""
+        bin_dir = self.work / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        calls = self.work / "hashed.txt"
+        wrapper = bin_dir / "shasum"
+        wrapper.write_text(
+            "#!/bin/zsh -f\n"
+            "c=\"$(/bin/ps -o command= -p $PPID)\"\n"
+            f"print -r -- \"${{c[(w)4]}} ${{@[-1]}}\" >> {shlex_quote(str(calls))}\n"
+            "exec /usr/bin/shasum \"$@\"\n")
+        wrapper.chmod(0o755)
+        return f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin", calls
+
+    @staticmethod
+    def hashed(calls):
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    def test_a_cas_start_never_hashes_or_waits(self):
+        # CAS's debugger hung its FIFA 17 when the gate took a second. The
+        # first start after CAS wrote its data used to hash and copy 75 MB
+        # (CAS's copies, and the live files of the game's size) right there.
+        self.install_cas()
+        self.cas_plays()
+        path, calls = self.hash_log()
+        rc, line = self.gate(parent="cas.exe", PATH=path)
+        self.assertEqual(rc, 0)
+        self.assertEqual(line[4], "nothing to do", line)
+        self.assertTrue(self.is_cas())
+        self.assertEqual([c for c in self.hashed(calls) if not c.startswith("--chores")], [])
+        # The copies are kept all the same, by the chores after the start,
+        # from CAS's copies only (not the live files, which are CAS's).
+        self.assertTrue(all(c.startswith("--chores") and "/original/" in c for c in self.hashed(calls)),
+                        self.hashed(calls))
+        self.assertIn("kept 3 original file(s)", self.chores_log()[-1][4])
+        for rel, (vanilla, _) in self.FILES.items():
+            self.assertEqual((self.stash / "vanilla" / rel).read_bytes(), vanilla)
+        # A CAS start never waits for the lock either.
+        (self.stash / "lock").mkdir()
+        (self.stash / "lock/pid").write_text(f"{self.lock_holder().pid} 0\n")
+        import time
+        t0 = time.monotonic()
+        rc, line = self.gate(parent="cas.exe", CX_FIFA_GATE_TEST_LOCK_WAIT="5")
+        self.assertLess(time.monotonic() - t0, 3)
+        self.assertEqual((rc, line[5]), (0, "ok"))
+        self.assertIn("folder busy", line[4])
+
+    def test_the_chores_run_after_the_gate_has_let_the_game_go(self):
+        self.install_cas()
+        self.cas_plays()
+        rc, line = self.gate(parent="cas.exe", CX_FIFA_GATE_TEST_CHORES="")
+        self.assertEqual(rc, 0)
+        import time
+        for _ in range(100):
+            if self.chores_log():
+                break
+            time.sleep(0.05)
+        self.assertIn("kept 3 original file(s)", self.chores_log()[-1][4])
+        self.assertTrue((self.stash / "snapshot").exists())
+        self.assertFalse((self.stash / "lock").exists())
+
+    def test_a_copy_found_not_to_be_the_games_is_not_hashed_again(self):
+        # CAS gone with its original/ folder, its data still in the game:
+        # no copy of the originals anywhere. Every start used to hash the
+        # live files of the game's size again.
+        content = self.install_cas()
+        self.cas_plays()
+        shutil.rmtree(content / "original")
+        path, calls = self.hash_log()
+        rc, line = self.gate(envnames="FUT17_GAME_CODE", PATH=path)
+        self.assertEqual((rc, line[5]), (0, "incomplete"))
+        first = self.hashed(calls)
+        self.assertTrue(any(c.endswith("layout.toc") for c in first), first)
+        rc, line = self.gate(envnames="FUT17_GAME_CODE", PATH=path)
+        self.assertEqual(self.hashed(calls), first)
+        # CAS's set is left whole, cas_03.cas with it: half of it put back
+        # and cas_03.cas parked would be neither CAS's game nor the game's.
+        self.assertTrue(self.is_cas())
+        self.assertIn("no original of", line[4])
+
+    def test_a_start_that_cannot_be_saved_says_so(self):
+        content = self.install_cas()
+        self.cas_plays()
+        shutil.rmtree(content / "original")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(rc, 0)          # it still starts: nothing is refused
+        self.assertIn("likely to close", self.dialogs())
+        self.assertIn("layout.toc", self.dialogs())
+        # CAS's own start is fine with its data.
+        (self.work / "dialogs").unlink()
+        self.gate(parent="cas.exe")
+        self.assertEqual(self.dialogs(), "")
+
+    def test_a_partly_kept_stash_is_completed_once_cas_is_gone(self):
+        # Two of three kept while CAS was around; CAS gone, the game's own
+        # files back in place. The third used to stay "no original" for good.
+        rel = "Update/Patch/Data/layout.toc"
+        self.put(self.stash / "vanilla" / rel, self.FILES[rel][0], self.OLD)
+        rc, line = self.gate(parent="Aurora.exe")
+        self.assertEqual((rc, line[5]), (0, "ok"), line)
+        for rel, (vanilla, _) in self.FILES.items():
+            self.assertEqual((self.stash / "vanilla" / rel).read_bytes(), vanilla)
+
+    def test_a_cracked_exe_over_the_final_updates_data_counts_as_that_build(self):
+        initfs = b"the final update's initfs"
+        self.put(self.game / "Update/Patch/Data/initfs_Win32", initfs, self.OLD)
+        self.builds.write_text(self.builds.read_text() + "Update/Patch/Data/initfs_Win32  "
+                               f"{len(initfs)}  {hashlib.sha256(initfs).hexdigest()}\n")
+        (self.game / "FIFA17.exe").write_bytes(fake_pe(0x0BADF00D))
+        self.install_cas()
+        self.cas_plays()
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual((rc, line[5]), (0, "ok"), line)
+        self.assertTrue(self.is_vanilla())
+        # Other data is another build: left alone.
+        self.cas_plays()
+        self.put(self.game / "Update/Patch/Data/initfs_Win32", b"another build's initfs!!", self.OLD)
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertIn("unknown FIFA 17 build", line[4])
+        self.assertTrue(self.is_cas())
+
+    def test_a_folder_wine_reaches_by_any_path(self):
+        # \\?\unix\... is how Wine names a folder no drive letter reaches.
+        self.install_cas()
+        for image in ["\\\\?\\unix" + str(self.game / "FIFA17.exe").replace("/", "\\"),
+                      "\\??\\unix" + str(self.game / "FIFA17.exe").replace("/", "\\")]:
+            with self.subTest(image=image):
+                self.cas_plays()
+                argv = self.argv("FIFA17.exe", "-", "FUT17_GAME_CODE")
+                argv[argv.index("--image") + 1] = image
+                subprocess.run(argv, env=self.env(), capture_output=True, timeout=60)
+                self.assertEqual(self.last_log()[2], str(self.game))
+                self.assertTrue(self.is_vanilla())
+
+    def test_odd_folder_names_and_other_drive_letters_work(self):
+        # Not a fix: the starting states with a D: drive, a folder in
+        # drive_c, and a name with an apostrophe, accents and spaces.
+        odd = self.work / "Mokhtar's Spiele/FIFA 17 – Édition"
+        shutil.move(str(self.game), str(odd))
+        self.game, self.stash = odd, odd / ".crossover-fifa"
+        (self.prefix / "dosdevices/d:").symlink_to(odd.parent, target_is_directory=True)
+        self.install_cas()
+        for image in ["D:\\" + odd.name + "\\FIFA17.exe", self.win(odd / "FIFA17.exe")]:
+            with self.subTest(image=image):
+                self.cas_plays()
+                argv = self.argv("FIFA17.exe", "-", "FUT17_GAME_CODE")
+                argv[argv.index("--image") + 1] = image
+                subprocess.run(argv, env=self.env(), capture_output=True, timeout=60)
+                self.assertEqual(self.last_log()[5], "ok", self.last_log())
+                self.assertTrue(self.is_vanilla())
+        inside = self.prefix / "drive_c/Games/FIFA 17"
+        shutil.move(str(odd), str(inside))
+        self.game, self.stash = inside, inside / ".crossover-fifa"
+        self.cas_plays()
+        argv = self.argv("FIFA17.exe", "-", "FUT17_GAME_CODE")
+        argv[argv.index("--image") + 1] = "C:\\Games\\FIFA 17\\FIFA17.exe"
+        subprocess.run(argv, env=self.env(), capture_output=True, timeout=60)
+        self.assertEqual(self.last_log()[2], str(inside))
+        self.assertTrue(self.is_vanilla())
+
+    def test_no_appledouble_file_is_left_beside_a_restored_file(self):
+        # On exFAT every file a process writes gets a ._<name> beside it
+        # (com.apple.provenance); the real game folder had seven of them in
+        # Update/Patch/Data after the first restore.
+        self.install_cas()
+        self.cas_plays()
+        rel = Path("Update/Patch/Data/layout.toc")
+        (self.game / rel.parent / ("._" + rel.name)).write_bytes(b"\0\5\26\7 xattrs")
+        self.gate(envnames="FUT17_GAME_CODE")
+        self.assertTrue(self.is_vanilla())
+        self.assertEqual([p.name for p in self.game.rglob("._*")], [])
+
+    def test_a_half_made_copy_with_no_journal_is_removed(self):
+        self.install_cas()
+        self.cas_plays()
+        self.gate(envnames="FUT17_GAME_CODE")
+        left = self.game / "Update/Patch/Data/Win32/chunks0.toc.cxtmp"
+        left.write_bytes(b"half")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertEqual(line[4], "nothing to do")
+        self.assertFalse(left.exists())
+
+    def test_a_lock_whose_pid_now_belongs_to_another_program_is_stale(self):
+        # A run killed with its lock held; after a restart its pid is some
+        # other program's. That used to hold every start up for 15 s, for
+        # ten minutes.
+        self.install_cas()
+        self.cas_plays()
+        (self.stash / "lock").mkdir(parents=True)
+        (self.stash / "lock/pid").write_text(f"{os.getpid()} 0\n")
+        rc, line = self.gate(envnames="FUT17_GAME_CODE", CX_FIFA_GATE_TEST_LOCK_WAIT="1")
+        self.assertEqual((rc, line[5]), (0, "ok"), line)
+        self.assertTrue(self.is_vanilla())
+
+    def cas_folder_name(self, folder):
+        win = ("z:" + str(folder).replace("/", "\\")).lower()
+        return "FIFA17-" + hashlib.sha256(win.encode()).hexdigest()[:12]
+
+    def test_only_this_folders_cas_content_is_used(self):
+        # CAS keeps one content folder per game folder. Another folder's
+        # (here a different build, whose ui.sb differs) must not be put
+        # into this one.
+        content = self.install_cas()
+        mine = content.parent / self.cas_folder_name(self.game)
+        content.rename(mine)
+        other = content.parent / "FIFA17-0123456789ab"
+        rel = "Update/Patch/Data/win32/ui.sb"
+        theirs = b"the other build's ui"
+        self.put(other / "original" / rel, theirs, 1700000000)
+        self.put(other / "installed.json", json.dumps(
+            {"mods": [], "files": [{"path": rel, "bytes": 3, "replaces": True}]}).encode())
+        self.put(other / "base-hashes.json", json.dumps({"entries": {
+            "Z:\\Other\\FIFA 17\\" + rel: {"bytes": len(theirs), "sha256": hashlib.sha256(theirs).hexdigest()}}}).encode())
+        os.utime(other, (1900000000, 1900000000))     # the newest, so first
+        self.put(self.game / rel, b"this folder's own ui", self.OLD)
+        self.cas_plays()
+        rc, line = self.gate(envnames="FUT17_GAME_CODE")
+        self.assertTrue(self.is_vanilla(), line)
+        self.assertEqual((self.game / rel).read_bytes(), b"this folder's own ui")
+        self.assertFalse((self.stash / "vanilla" / rel).exists())
+
+    def test_a_second_bottle_on_the_same_folder_does_not_copy_it_all_again(self):
+        self.install_cas()
+        self.cas_plays()
+        self.gate(envnames="FUT17_GAME_CODE")
+        self.assertTrue(self.is_vanilla())
+        other = self.work / "bottles/FIFA17"
+        (other / "dosdevices").mkdir(parents=True)
+        (other / "dosdevices/z:").symlink_to("/", target_is_directory=True)
+        def gate_in(prefix):
+            argv = self.argv("FIFA17.exe", "-", "FUT17_GAME_CODE")
+            argv[argv.index("--prefix") + 1] = str(prefix)
+            subprocess.run(argv, env=self.env(), capture_output=True, timeout=60)
+            return (prefix / "cxfifa-gate.log").read_text().splitlines()[-1].split("\t")
+        gate_in(other)                  # its first look may copy once
+        self.assertEqual(gate_in(self.prefix)[4], "nothing to do")
+        self.assertEqual(gate_in(other)[4], "nothing to do")
+        self.assertEqual(gate_in(self.prefix)[4], "nothing to do")
+        # CAS played from the first bottle: the second still puts it right.
+        self.cas_plays()
+        line = gate_in(other)
+        self.assertIn("3 file(s) restored", line[4])
+        self.assertTrue(self.is_vanilla())
+
+    def test_a_read_only_game_folder_is_skipped_not_failed(self):
+        self.game.chmod(0o555)
+        self.addCleanup(self.game.chmod, 0o755)
+        rc, line = self.gate(parent="Aurora.exe")
+        self.assertEqual(rc, 0)
+        self.assertEqual(line[5], "skipped: the game folder is read-only")
+
+    def test_verify_reads_a_cracked_exes_build_and_writes_nothing(self):
+        app, _ = self.shared_bottle()
+        initfs = b"the final update's initfs"
+        self.put(self.game / "Update/Patch/Data/initfs_Win32", initfs, self.OLD)
+        self.builds.write_text(self.builds.read_text() + "Update/Patch/Data/initfs_Win32  "
+                               f"{len(initfs)}  {hashlib.sha256(initfs).hexdigest()}\n")
+        (self.game / "FIFA17.exe").write_bytes(fake_pe(0x0BADF00D))
+        self.stash.mkdir()
+        before = self.tree()
+        block = self.block(self.setup_sh("--verify", app).stdout)
+        self.assertEqual(self.tree(), before, "--verify changed something")
+        self.assertNotIn("unknown FIFA 17 build", block)
+        self.assertIn("CAS mod data", block)
+
+    def test_fix_folder_takes_lost_originals_from_another_copy(self):
+        app, guess = self.shared_bottle()
+        shutil.rmtree(self.local / "CAS/content/FIFA17-test/original")
+        block = self.block(self.setup_sh("--verify", app).stdout)
+        self.assertIn("BAD", block)
+        self.assertIn("--fix-folder takes the files from it", block)
+        self.assertIn("and nothing to put the game's own back from", block)
+        self.assertNotIn("puts the game's own back", block)
+        # The stray copy in ~/Downloads is the same build, with the game's
+        # own files.
+        shutil.copy2(self.game / "FIFA17.exe", guess / "FIFA17.exe")
+        for rel, (vanilla, _) in self.FILES.items():
+            self.put(guess / rel, vanilla, self.OLD)
+        result = self.setup_sh("--fix-folder", app)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("kept 3 original file(s) from", result.stdout)
+        self.assertNotIn("no original", result.stdout)
+        for rel, (vanilla, _) in self.FILES.items():
+            self.assertEqual((self.stash / "vanilla" / rel).read_bytes(), vanilla)
+        self.assertTrue(self.is_cas())
+        rc, _ = self.gate(parent="Aurora15Connector.exe")
+        self.assertTrue(self.is_vanilla())
 
 if __name__ == "__main__":
     unittest.main()

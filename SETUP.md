@@ -114,16 +114,28 @@ Without the table, setup refuses to put a second game into a bottle and says
 why: the two games would run on one set of settings, and one of them would
 fail with nothing to say why.
 
-**What is ready?** `./setup.sh --verify` starts with one table for the
-bottle: a row per game, and a column per launcher (`Aurora.exe`, Impulsum17,
-CAS, RebornFUT, and the game run directly). Each cell says `ready`, `missing`
-and the first thing it lacks, or `unsupported` where that launcher does not
-start that game. It changes nothing, and it pastes as it is into a bug report.
+**What is ready?** `./setup.sh --verify` starts with two tables for the
+bottle. The first has a row per game: its folder, its settings, its DLL
+overrides, and whether it starts offline, with no launcher (`-` where the game
+has no offline start). The second has a row per game each launcher starts
+(`Aurora.exe`, Impulsum17, CAS, RebornFUT); a launcher that does not start a
+game has no row for it. Each state is `ready`, `missing` and the first thing
+it lacks, or `not installed`. It changes nothing, and it pastes as it is into
+a bug report.
 
 ```
-| game    | folder | settings | DLL overrides             | Aurora.exe | Impulsum17         | CAS   | RebornFUT | direct      |
-| FIFA 17 | found  | table    | version msvcr120 msvcp120 | ready      | missing Impulsum17 | ready | ready     | ready       |
-| FIFA 21 | found  | table    | ucrtbase                  | ready      | unsupported        | unsupported | unsupported | unsupported |
+  game     folder  settings  DLL overrides              offline
+  ─────────────────────────────────────────────────────────────
+  FIFA 17  found   table     version msvcr120 msvcp120  ready
+  FIFA 21  found   table     ucrtbase                   -
+
+  launcher    game     state
+  ───────────────────────────────
+  Aurora.exe  FIFA 17  ready
+              FIFA 21  ready
+  Impulsum17  -        not installed
+  CAS         FIFA 17  ready
+  RebornFUT   FIFA 17  ready
 ```
 
 ### Separate bottles still work
@@ -196,6 +208,18 @@ CAS session, putting the game's files back takes about a second on an SSD.
 Whatever the last launch, crash or force-quit left behind, the next start puts
 right. While another `FIFA17.exe` is running it changes nothing.
 
+A CAS start is kept short on purpose (CAS watches its game with a debugger,
+and its FIFA 17 hangs when the start takes a second): it never waits for
+another run of the gate, and the first copy of the game's files, 75 MB to
+check and copy, is made just after the game has started, not before. Each
+file is checked against the table once; a copy that is not the game's own is
+not checked again at every start. A cracked or repacked `FIFA17.exe` over the
+final update's data counts as the final update (the gate tells it by
+`Update/Patch/Data/initfs_Win32`, which no launcher writes). A game folder
+that cannot be written to (a read-only drive) is left alone. On an exFAT or
+FAT drive the gate removes the `._` file macOS leaves beside each file it puts
+back. `FIFA17_Trial.exe` is not gated.
+
 It stops a launch in one case only: Impulsum17 starts the game, its
 `version.dll` is not in the folder, and no copy is kept. A box says *Impulsum
 17's game file (version.dll) is no longer in your FIFA 17 folder. Another
@@ -203,6 +227,14 @@ launcher replaced it. Run Impulsum17-Setup again, then press Play.* Do that:
 the Impulsum17 installer puts its DLL back, and from then on the gate keeps a
 copy. Everything else goes wrong open: if the gate cannot do something, the
 game starts as it would have without it, and `--verify` says what happened.
+
+When CAS's data is in the game and this Mac has no copy of the game's own
+files (CAS was uninstalled with its `original` folder, say), the gate leaves
+CAS's data whole and a box says *FIFA 17 is likely to close about 30 seconds
+in* and what to do; the game still starts. **Fix my installation.command** and
+`./setup.sh --fix-folder` then look for those files in every other copy of
+FIFA 17 they find (`FIFA17_DIR='/path/to/FIFA 17'` adds one) and keep them
+when they match the final update.
 
 Every run is one line in `cxfifa-gate.log` in the bottle's folder.
 **Fix my installation.command** (`./setup.sh --repair`) and the installer put
@@ -242,8 +274,9 @@ FIFA 17 game folder
 - **BAD** when the bottle has two or more FIFA 17 launchers and the gate is
   off (an older copy, or `CX_FIFA_GATE=0`): run **Fix my installation.command**.
   **BAD** when CAS's data is in the game and the game's own copy of a file is
-  nowhere (not in `.crossover-fifa`, not in CAS's `original` folder): use CAS's
-  own restore button, or reinstall the game's files. **BAD** when the last
+  nowhere (not in `.crossover-fifa`, not in CAS's `original` folder): run
+  `./setup.sh --fix-folder` if another copy of FIFA 17 is on this Mac, else
+  use CAS's own restore button, or reinstall the game's files. **BAD** when the last
   start could not put the folder right; the next start tries again.
 - `version.dll.*` files are named after whoever made the backup, not what is
   in them, so `other files` says what each really is. They are the launchers'

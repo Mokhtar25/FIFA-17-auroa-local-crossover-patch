@@ -2658,9 +2658,12 @@ aurora_in_use() {
 # ------------------------------------------------ every game in the bottle
 # A bottle can now hold every game, and the launchers start them in it, so
 # "is FIFA 17 set up" is no longer the whole question. --verify with no game
-# named answers the rest: one row per game, one cell per launcher, each cell
-# "ready", "missing <the first thing it lacks>" or "unsupported" (the launcher
-# does not start that game). It reads files and changes nothing. A cell that
+# named answers the rest in two tables: the games (folder, settings, DLL
+# overrides, and the game started offline with no launcher), then the
+# launchers, one row per game each one starts. Each state is "ready",
+# "missing <the first thing it lacks>" or "not installed"; a launcher that
+# does not start a game has no row for it. It reads files and changes
+# nothing. A state that
 # says ready has passed the same static checks as the rest of --verify, which
 # is not the same as a launch: see the closing words of verify_install.
 #
@@ -2680,6 +2683,12 @@ GT_GAMES=( fifa13 fifa15 fifa16 fifa17 fifa21 )
 GT_LAUNCHERS=( aurora impulsum cas reborn direct )
 
 game_label_of() { print -r -- "FIFA ${1#fifa}"; }
+gt_launcher_label() {
+    case "$1" in
+        aurora) print -r -- Aurora.exe ;; impulsum) print -r -- Impulsum17 ;;
+        cas) print -r -- CAS ;; reborn) print -r -- RebornFUT ;; *) print -r -- "$1" ;;
+    esac
+}
 game_exe_of() {
     case "$1" in
         fifa13) print -r -- fifa13.exe ;; fifa15) print -r -- fifa15.exe ;;
@@ -2959,10 +2968,10 @@ gt_cell() {
         *) print -r -- "unsupported"; return 0 ;;
     esac
     case "$l" in
-        aurora)   aurora_launcher_dir >/dev/null 2>&1   || { print -r -- "missing Aurora.exe"; return 0; } ;;
-        impulsum) impulsum_launcher_exe >/dev/null 2>&1 || { print -r -- "missing Impulsum17"; return 0; } ;;
-        cas)      cas_launcher_exe >/dev/null 2>&1      || { print -r -- "missing CAS"; return 0; } ;;
-        reborn)   reborn_launcher_exe >/dev/null 2>&1   || { print -r -- "missing RebornFUT"; return 0; } ;;
+        aurora)   aurora_launcher_dir >/dev/null 2>&1   || { print -r -- "not installed"; return 0; } ;;
+        impulsum) impulsum_launcher_exe >/dev/null 2>&1 || { print -r -- "not installed"; return 0; } ;;
+        cas)      cas_launcher_exe >/dev/null 2>&1      || { print -r -- "not installed"; return 0; } ;;
+        reborn)   reborn_launcher_exe >/dev/null 2>&1   || { print -r -- "not installed"; return 0; } ;;
     esac
     # The game itself: its folder, its settings, its overrides.
     [ -n "${GT_DIR[$g]:-}" ] || { print -r -- "missing game folder"; return 0; }
@@ -3008,9 +3017,9 @@ gt_cell() {
 }
 
 verify_games_table() {
-    local app="$1" g l pae table_line w i dash=""
+    local app="$1" g l pae table_line w
     local -A GT_DIR GT_SET GT_DLL
-    local -a row head widths rows
+    local -a row head rows
     say ""
     say "Every game in the $BOTTLE bottle"
     say ""
@@ -3036,36 +3045,55 @@ verify_games_table() {
         GT_SET[$g]="$(game_settings_source "$g" 2>/dev/null || true)"
         GT_DLL[$g]="$(game_dlls "$g" 2>/dev/null || true)"
     done
-    head=( "game" "folder" "settings" "DLL overrides" "Aurora.exe" "Impulsum17" "CAS" "RebornFUT" "direct" )
-    rows=()
+    # Columns padded to their widest cell, a rule under the heading, no
+    # vertical bars: it reads in Terminal and pastes into a bug report.
+    gt_print_table() {
+        local w i n out rule=""; local -a r widths
+        for w in "$@"; do
+            r=( "${(@ps:\t:)w}" )
+            for i in {1..${#r}}; do (( ${#r[i]} > ${widths[i]:-0} )) && widths[i]=${#r[i]}; done
+        done
+        n=$(( ${#widths} * 2 - 2 )); for i in $widths; do n=$(( n + i )); done
+        repeat $n rule+="─"
+        for w in "$@"; do
+            r=( "${(@ps:\t:)w}" ); out=""
+            for i in {1..${#widths}}; do out+="${(r:${widths[i]}:)r[i]}  "; done
+            while [[ $out == *" " ]]; do out="${out% }"; done
+            print -r -- "  $out"
+            [ -n "$rule" ] && { print -r -- "  $rule"; rule=""; }
+        done
+    }
+    rows=( "game	folder	settings	DLL overrides	offline" )
     for g in $GT_GAMES; do
         row=( "$(game_label_of "$g")" "${${GT_DIR[$g]:+found}:-missing}" "${GT_SET[$g]:-?}" "${GT_DLL[$g]:-?}" )
-        for l in $GT_LAUNCHERS; do row+=( "$(gt_cell "$g" "$l" 2>/dev/null || print -r -- '?')" ); done
+        w="$(gt_cell "$g" direct 2>/dev/null || print -r -- '?')"
+        [ "$w" = unsupported ] && w="-"
+        row+=( "$w" )
         rows+=( "${(pj:\t:)row}" )
     done
-    # Columns padded to their widest cell, so it reads in Terminal and pastes
-    # as a Markdown table.
-    widths=()
-    for i in {1..${#head}}; do widths[i]=${#head[i]}; done
-    for w in $rows; do
-        row=( "${(@ps:\t:)w}" )
-        for i in {1..${#head}}; do (( ${#row[i]} > widths[i] )) && widths[i]=${#row[i]}; done
+    gt_print_table $rows
+    say ""
+    rows=( "launcher	game	state" )
+    for l in ${GT_LAUNCHERS:#direct}; do
+        head=( "$(gt_launcher_label "$l")" )
+        for g in $GT_GAMES; do
+            w="$(gt_cell "$g" "$l" 2>/dev/null || print -r -- '?')"
+            [ "$w" = unsupported ] && continue
+            if [ "$w" = "not installed" ]; then
+                rows+=( "${head[1]}	-	not installed" ); break
+            fi
+            rows+=( "${head[1]}	$(game_label_of "$g")	$w" )
+            head=( "" )
+        done
     done
-    gt_print_row() {
-        local out="|" i; local -a r; r=( "$@" )
-        for i in {1..${#head}}; do out+=" ${(r:${widths[i]}:)r[i]} |"; done
-        print -r -- "$out"
-    }
-    gt_print_row $head
-    row=(); for i in {1..${#head}}; do row+=( "${(l:${widths[i]}::-:)dash}" ); done
-    gt_print_row $row
-    for w in $rows; do gt_print_row "${(@ps:\t:)w}"; done
+    gt_print_table $rows
     say ""
     for g in $GT_GAMES; do
         [ -n "${GT_DIR[$g]}" ] && say "  $(game_label_of "$g"): ${GT_DIR[$g]}"
     done
     say "  settings: table = the copy's own per-game settings; AppDefaults = this"
     say "  bottle's choice for that program; bare env = the bottle's variables."
+    say "  offline = the game's own exe started with no launcher; - = it has none."
     say "  ready means every static check passed; only a launch proves it plays."
     return 0
 }
@@ -3117,6 +3145,7 @@ fifa17_gate_runs() {
 # FOLDER_PROBLEMS to the number of BAD lines, which verify_install counts.
 verify_fifa17_folders() {
     local app="$1" l src d gl gstate gtext pfx="$BOTTLE_DIR/$BOTTLE" shown=0 v x t
+    local CXG_RO=1      # the gate's functions only read from here on
     local -a cands lnch pointed runs bk cnt
     local -A FX
     FOLDER_PROBLEMS=0
@@ -3191,7 +3220,11 @@ verify_fifa17_folders() {
             v="${FX[cas_mod]:-CAS's}"
             cnt=( ${(s:,:)FX[changed]} ${(s:,:)FX[added]} )
             say "  data files      CAS mod data ($v, ${#cnt} files)"
-            say "                  the next launch that is not CAS's puts the game's own back"
+            if [ -n "${FX[unrecoverable]}" ]; then
+                say "                  and nothing to put the game's own back from (below)"
+            else
+                say "                  the next launch that is not CAS's puts the game's own back"
+            fi
         else
             cnt=( ${(s:,:)FX[own]} )
             say "  data files      mixed: ${#cnt} of ${FX[total]} are the game's own${FX[added]:+; ${FX[added]//,/, } in}"
@@ -3202,8 +3235,11 @@ verify_fifa17_folders() {
         if [ -n "${FX[unrecoverable]}" ] && ! cxg_running FIFA17.exe; then
             bad "CAS's data is in ${d/#$HOME/~} and the game's own copy of"
             say "        ${FX[unrecoverable]//,/, } is nowhere: not in .crossover-fifa, not in"
-            say "        CAS's original/ folder. Nothing can put it back. Use CAS's own"
-            say "        restore button, or reinstall the game's files."
+            say "        CAS's original/ folder. Until it is, FIFA 17 started from anything but"
+            say "        CAS closes about 30 seconds in. If another copy of FIFA 17 is on this"
+            say "        Mac, ./setup.sh --fix-folder takes the files from it (for a copy it"
+            say "        does not find: FIFA17_DIR='/path/to/that FIFA 17' ./setup.sh --fix-folder)."
+            say "        Otherwise use CAS's own restore button, or reinstall the game's files."
             FOLDER_PROBLEMS=$((FOLDER_PROBLEMS + 1))
         fi
         say "  version.dll     $(cxg_dll_label "${FX[dll]}")${FX[dll_sha8]:+ (${FX[dll_sha8]})}"
@@ -3295,13 +3331,17 @@ verify_fifa17_folders() {
 # Keeps the copies the folder gate puts back, in every FIFA 17 folder a
 # launcher uses: the game's own data files once CAS has anything to do with
 # the folder (each checked against the table, about 75 MB, once), and any
-# Impulsum17 version.dll found. It never changes a file of the game's own:
+# Impulsum17 version.dll found. A file whose original is in neither the
+# folder nor CAS's original/ (CAS uninstalled with its data still in the
+# game, say) is taken from any other copy of FIFA 17 it knows of, the
+# home-folder guesses included, when that copy's file is the table's. It
+# never changes a file of the game's own:
 # putting the game's files back is the gate's job, at the next start, when it
 # knows which launcher is starting. --fix-folder runs it, and so does step 9e
 # of the bottle setup, which the installer and --repair both run.
 fix_fifa17_folders() {
-    local l src d pfx="$BOTTLE_DIR/$BOTTLE" acts
-    local -a cands
+    local l src d pfx="$BOTTLE_DIR/$BOTTLE" acts o
+    local -a cands left
     cands=( ${(f)"$(fifa17_dir_candidates)"} )
     if [ ${#cands} -eq 0 ]; then
         note "no FIFA 17 folder found, so nothing to keep. For one kept elsewhere:"
@@ -3327,6 +3367,15 @@ fix_fifa17_folders() {
         CXG_ACTS=(); CXG_PROBS=()
         CXG_JOURNAL="$d/$CXG_STASH/journal"
         cxg_capture "$d" "$pfx" || true
+        if [ "$(cxg_build_of "$d")" = known ] && cxg_vanilla_wanted "$d" "$pfx" \
+           && [ -n "$(cxg_vanilla_unkept "$d")" ]; then
+            for o in $cands; do
+                cxg_capture_vanilla_from "$d" "${o#*$'\t'}" || true
+            done
+            CXG_PROBS=( ${CXG_PROBS:#no original of *} )
+            left=( ${${(f)"$(cxg_vanilla_unkept "$d")"}%% *} )
+            [ ${#left} -gt 0 ] && CXG_PROBS+=( "no original of ${(j:, :)${left:t}}" )
+        fi
         rm -f "$CXG_JOURNAL"
         CXG_JOURNAL=""
         cxg_unlock "$d/$CXG_STASH"
