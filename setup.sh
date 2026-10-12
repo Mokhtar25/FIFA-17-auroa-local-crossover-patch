@@ -78,7 +78,7 @@
 #                                         no FUT, no EA account. See SETUP.md.
 #
 #   ./setup.sh --fifa15                   set FIFA 15 up: the copy if it is missing,
-#                                         the Aurora15 bottle, its settings and files
+#                                         Aurora's bottle, its settings and files
 #   ./setup.sh --fifa15 --verify          check the FIFA 15 setup, change nothing
 #                                         (experimental; see SETUP.md "FIFA 15")
 #   ./setup.sh --fifa16                   set FIFA 16 up: the copy if it is missing,
@@ -641,10 +641,62 @@ esac
 # game in the bottle (verify_games_table); a named one checks that game only.
 GAME_EXPLICIT=0
 [ -n "${AURORA_GAME:-}" ] && GAME_EXPLICIT=1
-# FIFA 21 has no bottle of its own: it plays only from the Aurora launcher,
-# and that is in FIFA 17's bottle unless AURORA_BOTTLE names another.
+# Aurora.exe installs under the old connector's name too. Its multi-game
+# keys, in the ini or executable metadata, distinguish it from the standalone
+# FIFA 15 connector. A leftover ini without a program is never an install.
+aurora_bottle_kind() {
+    local d exe ini legacy=0
+    [ -f "$BOTTLE_DIR/$1/cxbottle.conf" ] || return 1
+    for d in "$BOTTLE_DIR/$1/drive_c/users"/*/AppData/Local/Aurora15Connector(N/); do
+        [ -f "$d/Aurora.exe" ] && { print -r -- modern; return 0; }
+        exe="$d/Aurora15Connector.exe"; ini="$d/Aurora15Connector.ini"
+        [ -f "$exe" ] || continue
+        if LC_ALL=C grep -aqE 'Fifa(13|16|17|21)Path' "$exe" \
+           || LC_ALL=C grep -qE '^Fifa(13|16|17|21)Path=' "$ini" 2>/dev/null; then
+            print -r -- modern; return 0
+        fi
+        legacy=1
+    done
+    [ "$legacy" = 1 ] || return 1
+    print -r -- legacy
+}
+
+f15_default_bottle() {
+    local common="${FIFA17_BOTTLE:-Aurora17}" d name
+    local -a other
+    if [ -n "${AURORA_BOTTLE:-}" ]; then print -r -- "$AURORA_BOTTLE"; return 0; fi
+    if [ -n "${FIFA15_BOTTLE:-}" ]; then print -r -- "$FIFA15_BOTTLE"; return 0; fi
+    for name in "$common" Aurora15; do
+        if [ "$(aurora_bottle_kind "$name" 2>/dev/null || true)" = modern ]; then
+            print -r -- "$name"; return 0
+        fi
+    done
+    # Other bottles require an explicit choice until discovery's consent
+    # ledger is implemented. Do not silently make a different bottle instead.
+    other=()
+    for d in "$BOTTLE_DIR"/*(N/); do
+        name="${d:t}"
+        [ "$name" != "$common" ] && [ "$name" != Aurora15 ] || continue
+        [ "$(aurora_bottle_kind "$name" 2>/dev/null || true)" = modern ] && other+=( "$name" )
+    done
+    if (( ${#other} )); then
+        print -u2 -r -- "Aurora is installed in another bottle. Choose the one you play FIFA 15 in:"
+        for name in "${(@)other[1,5]}"; do
+            print -u2 -r -- "    AURORA_BOTTLE=${(qq)name} ./setup.sh --fifa15"
+        done
+        print -u2 -r -- "Nothing has been changed."
+        return 1
+    fi
+    if [ "$(aurora_bottle_kind Aurora15 2>/dev/null || true)" = legacy ]; then
+        print -r -- Aurora15
+    else
+        print -r -- "$common"
+    fi
+}
+
+# FIFA 21 uses FIFA 17's common bottle unless AURORA_BOTTLE names another.
 case "$GAME" in
-    fifa15) BOTTLE="${AURORA_BOTTLE:-${FIFA15_BOTTLE:-Aurora15}}" ;;
+    fifa15) BOTTLE="$(f15_default_bottle)" || exit $E_UNSUPPORTED ;;
     fifa16) BOTTLE="${AURORA_BOTTLE:-${FIFA16_BOTTLE:-FIFA16}}" ;;
     *)      BOTTLE="${AURORA_BOTTLE:-${FIFA17_BOTTLE:-Aurora17}}" ;;
 esac
@@ -869,7 +921,7 @@ for OTHER_GAME in fifa17 fifa15 fifa16; do
          each game its own settings (the per-game profile table), and
          $SHARE_WHY
          Or keep them apart: separate FIFA17_BOTTLE, FIFA15_BOTTLE and
-         FIFA16_BOTTLE names (defaults: Aurora17, Aurora15 and FIFA16).
+         FIFA16_BOTTLE names (for example: Aurora17, Aurora15 and FIFA16).
          Nothing has been changed."
     fi
 done
@@ -6646,8 +6698,13 @@ if [ "$MODE" = bottle ]; then
     if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
         remove_cleanup_agent && note "removed the old background cleanup agent; use Stop.command instead"
         if [ "$GAME" = fifa15 ]; then
-            green "Done. Open ${TARGET:t:r}, then run Aurora15Connector in the $BOTTLE bottle (or"
-            say "      fifa15.exe from the game folder, after  ./fifa15/fifa15-offline.sh apply)."
+            if [ "$(aurora_bottle_kind "$BOTTLE" 2>/dev/null || true)" = modern ]; then
+                green "Done. Open ${TARGET:t:r}, pick the $BOTTLE bottle, and play FIFA 15"
+                say "      from the Aurora launcher."
+            else
+                green "Done. Open ${TARGET:t:r}, then run Aurora15Connector in the $BOTTLE bottle (or"
+                say "      fifa15.exe from the game folder, after  ./fifa15/fifa15-offline.sh apply)."
+            fi
             say ""
             say "In Aurora15Connector, never press \"Repair connection\": under Wine it"
             say "kills its own Origin stand-in and the game then hangs at the flag."
@@ -7092,6 +7149,29 @@ $APP_MGMT_HINT"
     return 0
 }
 
+# FIFA 15 launched by Aurora.exe needs its overrides in this same bottle.
+# Repair only a game whose folder is found here; a child failure is reported
+# while the remaining FIFA 17 repairs and checks still run.
+REPAIR_FIFA15_OK=1
+repair_fifa15() {
+    local folder
+    [ "$(aurora_bottle_kind "$BOTTLE" 2>/dev/null || true)" = modern ] || return 0
+    if ! folder="$(game_dir_of fifa15 2>/dev/null)"; then
+        note "FIFA 15: no game folder found, so its setup was skipped"
+        return 0
+    fi
+    say ""
+    say "        FIFA 15 in the $BOTTLE bottle ($folder)"
+    if AURORA_BOTTLE="$BOTTLE" "$HERE/setup.sh" --fifa15 \
+       && AURORA_BOTTLE="$BOTTLE" "$HERE/setup.sh" --fifa15 --verify; then
+        ok "FIFA 15: set up and checked in the $BOTTLE bottle"
+    else
+        REPAIR_FIFA15_OK=0
+        note "FIFA 15: not finished; continuing with FIFA 17's repairs"
+    fi
+    return 0
+}
+
 # ------------------------------------------------------------- --repair
 # Puts an install that once worked right again, on this Mac or on one the
 # folder was carried to, without copying CrossOver again. It is the repairs
@@ -7109,6 +7189,8 @@ $APP_MGMT_HINT"
 #                     there is none, the WebView2 runtime the RebornFUT
 #                     launcher's window needs (a 165 MB download, once), and
 #                     the CAS launcher's device check and cas:// handler.
+#                     Then FIFA 15's setup and verification in the same bottle,
+#                     when Aurora.exe and a FIFA 15 folder are found there.
 #   4. the licence    the game's own loader writes a fresh one over whatever
 #                     is there. A file that exists but is wrong passes every
 #                     other check while the game relaunches itself with no
@@ -7164,6 +7246,7 @@ if [ "$MODE" = repair ]; then
     REPAIR_HAD_LICENCE=0
     [ -f "$(bottle_licence_file)" ] && REPAIR_HAD_LICENCE=1
     "$HERE/setup.sh" --bottle || exit $?
+    repair_fifa15
 
     say ""
     say "4 of 5. The licence file"
@@ -7190,14 +7273,19 @@ if [ "$MODE" = repair ]; then
 
     say ""
     say "5 of 5. Checking"
-    if "$HERE/setup.sh" --verify; then
+    if "$HERE/setup.sh" --verify && [ "$REPAIR_FIFA15_OK" = 1 ]; then
         say ""
         green "Fixed. Open ${TARGET:t:r}, then the $BOTTLE bottle, and press PLAY."
         say ""
         exit 0
     fi
     say ""
-    red "NOT FIXED — the check above names what is still wrong."
+    if [ "$REPAIR_FIFA15_OK" != 1 ]; then
+        red "NOT FIXED — FIFA 15's setup or check failed in the $BOTTLE bottle."
+        say "To check it:  AURORA_BOTTLE=${(qq)BOTTLE} ./setup.sh --fifa15 --verify"
+    else
+        red "NOT FIXED — the check above names what is still wrong."
+    fi
     say "If it is something this cannot change (a game folder that moved, a"
     say "bottle that does not exist), put that right and run this again."
     say ""
@@ -7712,8 +7800,12 @@ if [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ]; then
         say "          with no flag."
     elif [ "$GAME" = fifa15 ]; then
         say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
-        say "          $BOTTLE bottle and run Aurora15Connector, or fifa15.exe from the"
-        say "          game folder after fifa15-offline.sh apply (SETUP.md, FIFA 15)."
+        if [ "$(aurora_bottle_kind "$BOTTLE" 2>/dev/null || true)" = modern ]; then
+            say "          $BOTTLE bottle and play FIFA 15 from the Aurora launcher."
+        else
+            say "          $BOTTLE bottle and run Aurora15Connector, or fifa15.exe from the"
+            say "          game folder after fifa15-offline.sh apply (SETUP.md, FIFA 15)."
+        fi
         say "          In the connector never press \"Repair connection\": under Wine it"
         say "          kills its own Origin stand-in and the game hangs at the flag."
         say "          Port 3216 in use afterwards?  ./setup.sh --unstick"

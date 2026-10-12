@@ -150,9 +150,10 @@ the tables each folder is printed in full with the same source.
 
 ### Separate bottles still work
 
-Each game can still have a bottle of its own: `Aurora17` for FIFA 17,
-`Aurora15` for FIFA 15 and `FIFA16` for FIFA 16 are the defaults, and the
-installers make the last two.
+Each game can still have a bottle of its own. **Both games.command** keeps
+the separate `Aurora17` and `Aurora15` defaults and makes the FIFA 15 bottle
+if needed. The individual **FIFA 15.command** uses Aurora's common bottle
+instead; **FIFA 16.command** still uses `FIFA16`.
 
 1. Prepare `Aurora17` as described below; the installer creates `Aurora15`.
 2. Quit CrossOver completely, then double-click **Both games.command**.
@@ -392,7 +393,7 @@ Double-click **START HERE offline.command** (or run `./setup.sh --offline`).
 
 It installs the CrossOver copy, the fixes and the bottle settings, then adds a
 **FIFA 17 (offline)** entry to the bottle. If the `Aurora17` bottle is not
-there yet it is made for you, the same way FIFA 15 setup makes `Aurora15`;
+there yet it is made for you, the same way FIFA 15 setup makes its chosen bottle;
 CrossOver must be closed while that happens. It installs nothing that talks to
 EA: no PowerShell stand-in, no EA name redirects, no certificate.
 
@@ -1436,24 +1437,44 @@ It is a raw menu entry that runs `_fifa17.exe` from your game folder.
 
 ### FIFA 15 (experimental)
 
-The same CrossOver-FIFA copy also runs FIFA 15 (the 2015 CPY release), in its
-own `Aurora15` bottle by default, or in the Aurora17 bottle with
-`AURORA_BOTTLE=Aurora17` (see [Several games in one bottle](#several-games-in-one-bottle)).
-FIFA 17 is not affected.
+The same CrossOver-FIFA copy also runs FIFA 15 (the 2015 CPY release).
+**FIFA 15.command** uses the bottle where the multi-game Aurora launcher is
+installed: `Aurora17` by default, or `Aurora15` if that is its common bottle.
+If only the old standalone FIFA 15 connector is installed in `Aurora15`,
+setup keeps using it. With neither launcher installed, the default is
+`Aurora17` (or `FIFA17_BOTTLE` if you named it).
 
 ```sh
 ./setup.sh --fifa15          # or double-click "FIFA 15.command"
-./setup-both.sh              # both games, or double-click "Both games.command"
+./setup.sh --fifa15 --verify
 ```
 
-It makes the copy if needed, adds `gdiplus.dll`, makes the `Aurora15` bottle
-(CrossOver must be closed), sets the bottle settings including the `dinput8`
-override that Aurora15Connector needs, and reports which `ItsAMe_Origin.dll`
-your game folder has. Game folder: the one the Aurora launcher was given (its
+`AURORA_BOTTLE='name'` or `FIFA15_BOTTLE='name'` chooses a bottle explicitly;
+`AURORA_BOTTLE` wins when both are set. If Aurora is found only in another
+bottle, setup prints the command to choose it and stops before changing
+anything. A leftover launcher folder or ini without its program is ignored.
+For a new standalone connector install, use
+`AURORA_BOTTLE=Aurora15 ./setup.sh --fifa15` first.
+
+Setup makes the copy and chosen bottle if needed (CrossOver must be closed),
+adds `gdiplus.dll`, and writes `dinput8`, `msvcr110` and `msvcp110` overrides
+for `fifa15.exe` in that bottle. An older copy gets the per-game table updated
+before FIFA 15 is added to a shared bottle. See
+[Several games in one bottle](#several-games-in-one-bottle).
+**Fix my installation.command** also sets up and checks FIFA 15 in the same
+bottle when it finds both Aurora.exe and a FIFA 15 folder. If that setup
+fails, FIFA 17's remaining repairs still run and the final result reports
+that repair is not finished.
+
+Setup reports which `ItsAMe_Origin.dll` your game folder has. Game folder: the one the Aurora launcher was given (its
 `FifaPath`), else `~/Downloads/FIFA 15` and the other usual places, a drive in
 `/Volumes` included; for anywhere else, `FIFA15_DIR=/path ./setup.sh --fifa15`.
 
-Two ways to play:
+Play FIFA 15 from the multi-game Aurora launcher in the bottle setup names.
+Keep `ItsAMe_Origin.dll` on the version that launcher expects; revert the
+manual offline patch before online play.
+
+The standalone alternatives still work:
 
 - **With Aurora15Connector:** start `Aurora15Connector-*.exe` in the `Aurora15`
   bottle, sign in, press PLAY. It needs the CPY original `ItsAMe_Origin.dll`.
@@ -1466,7 +1487,7 @@ Two ways to play:
   > 🟢 If the connector complains about port 3216 at start, close it and run `./setup.sh --unstick`.
 
 - **Without it:** `./fifa15/fifa15-offline.sh apply "/path/to/FIFA 15"`, then
-  run `fifa15.exe` in the `Aurora15` bottle. Run `fifa15-offline.sh revert`
+  run `fifa15.exe` in the bottle setup names. Run `fifa15-offline.sh revert`
   before going back to the connector.
 
 If `apply` finds a different installed DLL, it can use a verified original from

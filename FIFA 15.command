@@ -15,11 +15,12 @@ print -r -- "  FIFA 15 on a Mac — setup (experimental)"
 print -r -- "  ======================================="
 print -r -- ""
 print -r -- "  This uses the CrossOver-FIFA copy (making it if it is not there,"
-print -r -- "  about 1 GB), makes an Aurora15 bottle in it, and puts the settings"
-print -r -- "  FIFA 15 needs in that bottle."
+print -r -- "  about 1 GB), and puts FIFA 15's settings in Aurora's existing bottle."
+print -r -- "  An installed old FIFA 15 connector keeps its Aurora15 bottle;"
+print -r -- "  otherwise the common bottle is Aurora17."
 print -r -- ""
-print -r -- "  Your own CrossOver is not touched, and neither is the Aurora17"
-print -r -- "  bottle. The game is never modified. Nothing is downloaded."
+print -r -- "  Your own CrossOver is not touched. Setup prints the bottle it uses."
+print -r -- "  The game executable and Origin DLL are never modified by setup."
 print -r -- "  CrossOver must be closed while this runs."
 print -r -- ""
 
@@ -30,8 +31,8 @@ print -r -- ""
 case $rc in
     0)
         print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA (not your normal CrossOver),"
-        print -r -- "  open the Aurora15 bottle, and run Aurora15Connector -- or, without it,"
-        print -r -- "  patch the game with  ./fifa15/fifa15-offline.sh apply  and run fifa15.exe."
+        print -r -- "  use the bottle named above, and play FIFA 15 from its Aurora launcher."
+        print -r -- "  For direct offline play, follow the steps in SETUP.md."
         print -r -- "  SETUP.md, \"FIFA 15\", explains both."
         ;;
     3)

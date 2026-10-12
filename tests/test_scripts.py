@@ -193,7 +193,8 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
 
     def test_profile_payload_and_settings(self):
         # Run the actual read-only initialization, stopping before platform
-        # checks or installation. This inspects what each real install uses.
+        # checks or installation. Explicit bottles keep the legacy profiles
+        # test independent of the new common-bottle default.
         source = (ROOT / "setup.sh").read_text().split(
             "# --------------------------------------------------------- safety guards", 1)[0]
         probe = self.work / "profile.sh"
@@ -207,7 +208,7 @@ sys.exit(int(os.environ.get('TEST_RC_' + game, '0')))
         ]:
             with self.subTest(game=game):
                 result = subprocess.run(["/bin/zsh", str(probe), "--verify"],
-                                        env={**self.env, "AURORA_GAME": game},
+                                        env={**self.env, "AURORA_GAME": game, "AURORA_BOTTLE": bottle},
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 lines = result.stdout.splitlines()
@@ -724,6 +725,87 @@ class SharedBottleTests(unittest.TestCase):
         body = function_source("gt_cell")
         self.assertIn('aurora|impulsum) dll_native_global version || { print -r -- "missing version override"', body)
 
+    def fifa15_bottle_choice(self, **env):
+        self.shipped(True)
+        source = (ROOT / "setup.sh").read_text().split(
+            "# --------------------------------------------------------- safety guards", 1)[0]
+        script = self.work / "bottle-choice.sh"
+        script.write_text(source + '\nprint -r -- "CHOSEN=$BOTTLE"\n')
+        return subprocess.run(["/bin/zsh", str(script), "--fifa15"],
+                              env={**self.env, **env}, capture_output=True,
+                              text=True, timeout=10)
+
+    def test_fifa15_defaults_to_the_multi_game_aurora_bottle(self):
+        self.aurora_bottle("Aurora17", "FifaPath=\r\nFifa21Path=\r\n")
+        before = self.snapshot("Aurora17")
+        result = self.fifa15_bottle_choice()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CHOSEN=Aurora17", result.stdout)
+        self.assertFalse((self.bottles / "Aurora15").exists())
+        self.assertEqual(self.snapshot("Aurora17"), before)
+
+    def test_fifa15_default_setup_writes_its_overrides_in_auroras_bottle(self):
+        # The tester regression: the launcher lives in Aurora17, so dinput8
+        # and the CRT overrides must be written there by the plain --fifa15.
+        app = self.copy(marker=True)
+        self.shipped(True)
+        self.aurora_bottle("Aurora17", "FifaPath=\r\nFifa21Path=\r\n")
+        reg = self.bottles / "Aurora17/user.reg"
+        reg.write_text("WINE REGISTRY Version 2\n")
+        source = (ROOT / "setup.sh").read_text().split(
+            "# ------------------------------------------------- the launch that is watched", 1)[0]
+        script = self.work / "setup15.sh"
+        # CRT file provisioning has separate real-file coverage. This test
+        # runs the actual settings and registry writes in the selected bottle.
+        script.write_text(source + '\nf15_ensure_crt_dlls() { return 0; }\n'
+                          'configure_bottle "$TARGET"\n')
+        result = subprocess.run(["/bin/zsh", str(script), "--fifa15"],
+                                env={**self.env, "AURORA_TARGET": str(app),
+                                     "TMPDIR": str(self.work)},
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        values = self.section_lines(reg, r'[Software\\Wine\\AppDefaults\\fifa15.exe\\DllOverrides]')
+        self.assertEqual(values, ['"dinput8"="native,builtin"',
+                                  '"msvcp110"="native,builtin"', '"msvcr110"="native,builtin"'])
+        self.assertFalse((self.bottles / "Aurora15").exists())
+
+    def test_fifa15_keeps_explicit_bottles_and_the_installed_legacy_connector(self):
+        self.aurora_bottle("Aurora15", "FifaPath=\r\n")
+        for env, name in [({}, "Aurora15"), ({"FIFA15_BOTTLE": "My 15"}, "My 15"),
+                          ({"FIFA15_BOTTLE": "My 15", "AURORA_BOTTLE": "Explicit"}, "Explicit")]:
+            with self.subTest(env=env):
+                result = self.fifa15_bottle_choice(**env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("CHOSEN=" + name, result.stdout)
+        self.aurora_bottle("Aurora17", "Fifa21Path=\r\n")
+        result = self.fifa15_bottle_choice()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CHOSEN=Aurora17", result.stdout)
+
+    def test_fifa15_finds_the_renamed_multi_game_launcher_before_its_first_run(self):
+        ini = self.aurora_bottle("Aurora15", "FifaPath=\r\n")
+        ini.unlink()
+        (ini.parent / "Aurora15Connector.exe").write_bytes(b"MZ get_Fifa21Path")
+        result = self.fifa15_bottle_choice()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CHOSEN=Aurora15", result.stdout)
+
+    def test_fifa15_uses_the_common_default_without_a_launcher_and_ignores_stale_ini(self):
+        ini = self.aurora_bottle("Aurora15", "Fifa21Path=\r\n")
+        (ini.parent / "Aurora15Connector.exe").unlink()
+        result = self.fifa15_bottle_choice(FIFA17_BOTTLE="Common")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CHOSEN=Common", result.stdout)
+
+    def test_fifa15_requires_an_explicit_choice_for_an_unrelated_aurora_bottle(self):
+        self.aurora_bottle("Other Games", "Fifa21Path=\r\n")
+        before = self.snapshot("Other Games")
+        result = self.fifa15_bottle_choice()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("AURORA_BOTTLE='Other Games'", result.stdout + result.stderr)
+        self.assertFalse((self.bottles / "Aurora17").exists())
+        self.assertEqual(self.snapshot("Other Games"), before)
+
     # ---------------------------------------------------- where each game is
 
     def game_folder(self, path, exe="fifa15.exe"):
@@ -1044,6 +1126,49 @@ class RepairTests(unittest.TestCase):
         self.assertIn('if [ "$MODE" = repair ]; then', setup)
         for doc in ("README.md", "SETUP.md", "diagnostics/README.md"):
             self.assertIn("Fix my installation.command", (ROOT / doc).read_text(), doc)
+
+    def test_repair_sets_up_fifa15_in_auroras_bottle_and_keeps_going_after_failure(self):
+        with tempfile.TemporaryDirectory(prefix="fifa15-repair-") as directory:
+            work = Path(directory)
+            script = work / "setup.sh"
+            script.write_text('#!/bin/zsh\nprint -r -- "$AURORA_BOTTLE|$*" >> "$CALLS"\n'
+                              'if [ "$#" = 2 ]; then exit "$TEST_VERIFY_RC"; fi\n'
+                              'exit "${TEST_RC:-0}"\n')
+            script.chmod(0o755)
+            calls = work / "calls"
+            harness = '''set -eu
+HERE="$PWD"
+BOTTLE="Shared Aurora"
+REPAIR_FIFA15_OK=1
+say() { print -r -- "$*"; }
+ok() { print -r -- "$*"; }
+note() { print -r -- "$*"; }
+aurora_bottle_kind() { print -r -- "$KIND"; }
+game_dir_of() { [ -n "$FOLDER" ] && print -r -- "$FOLDER"; }
+'''
+            harness += function_source("repair_fifa15")
+            harness += '\nrepair_fifa15\nprint -r -- "NEXT OK=$REPAIR_FIFA15_OK"\n'
+            for kind, folder, rc, verify_rc, ok, wanted in [
+                ("modern", "/game/FIFA 15", "0", "0", "1", ["--fifa15", "--fifa15 --verify"]),
+                ("modern", "/game/FIFA 15", "5", "0", "0", ["--fifa15"]),
+                ("modern", "/game/FIFA 15", "0", "5", "0", ["--fifa15", "--fifa15 --verify"]),
+                ("modern", "", "0", "0", "1", []),
+                ("legacy", "/game/FIFA 15", "0", "0", "1", []),
+            ]:
+                with self.subTest(kind=kind, folder=folder, rc=rc):
+                    calls.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["/bin/zsh", "-c", harness], cwd=work,
+                        env={**os.environ, "CALLS": str(calls), "KIND": kind,
+                             "FOLDER": folder, "TEST_RC": rc, "TEST_VERIFY_RC": verify_rc},
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("NEXT OK=" + ok, result.stdout)
+                    actual = calls.read_text().splitlines() if calls.exists() else []
+                    self.assertEqual(actual, ["Shared Aurora|" + args for args in wanted])
+            source = (ROOT / "setup.sh").read_text().split('if [ "$MODE" = repair ]; then', 1)[1]
+            self.assertIn('"$HERE/setup.sh" --bottle || exit $?\n    repair_fifa15', source)
+            self.assertIn('"$HERE/setup.sh" --verify && [ "$REPAIR_FIFA15_OK" = 1 ]', source)
 
     def refresh(self, stale_dll, signature_ok):
         with tempfile.TemporaryDirectory(prefix="a17-refresh-") as directory:

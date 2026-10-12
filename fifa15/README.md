@@ -6,14 +6,14 @@ top, and where each piece is:
 | piece | where |
 |---|---|
 | Wine patch `crossover-26.3-topdown-alloc-limit.patch` (the start-up crash) | applied by `build.sh`; inert unless the bottle sets `CX_TOPDOWN_LIMIT` |
-| bottle settings `CX_TOPDOWN_LIMIT=0x1ffffffff`, `CX_GRAPHICS_BACKEND=d3dmetal`, `WINE_SIMULATE_WRITECOPY=1`, the `dinput8` override, windowed `fifasetup.ini` | `./setup.sh --fifa15` (makes the `Aurora15` bottle too) |
+| bottle settings `CX_TOPDOWN_LIMIT=0x1ffffffff`, `CX_GRAPHICS_BACKEND=d3dmetal`, `WINE_SIMULATE_WRITECOPY=1`, the `dinput8` override, windowed `fifasetup.ini` | `./setup.sh --fifa15` (uses Aurora's common bottle; explicit separate bottles still work) |
 | the language-screen freeze | `fifa15-offline.sh` (this folder), *or* Aurora15Connector's own Origin stand-in |
 
 ## Without Aurora (offline)
 
-1. `./setup.sh --fifa15` — makes the CrossOver copy if needed, the `Aurora15` bottle, and its settings.
+1. `./setup.sh --fifa15` — makes the CrossOver copy if needed and configures Aurora's bottle (`Aurora17` by default). Setup prints the bottle it uses.
 2. Close FIFA 15 and Aurora15Connector, then run `./fifa15/fifa15-offline.sh apply "/path/to/FIFA 15"`.
-3. In the CrossOver copy, run `fifa15.exe` from the game folder in the `Aurora15` bottle.
+3. In the CrossOver copy, run `fifa15.exe` from the game folder in the bottle setup named.
 
 Verified 2026-09-02 on Apple silicon (CrossOver 26.3.0): language screen, title, intro, attract-mode
 match. Keyboard, controller, sound and saves are not yet play-tested.
@@ -28,8 +28,21 @@ Confirmed 2026-09-07: direct launch froze at language selection with a
 connector-installed DLL; patching the verified Aurora15 backup allowed the
 user to pass language selection. No game or emulator DLL is included here.
 
+## With the multi-game Aurora launcher
+
+Quit CrossOver, then double-click **FIFA 15.command** or run
+`./setup.sh --fifa15`. It configures the bottle where Aurora is installed,
+including FIFA 15's `dinput8` and C runtime overrides. It keeps an installed
+old standalone connector in `Aurora15`; otherwise the common default is
+`Aurora17`. An explicit `AURORA_BOTTLE` or `FIFA15_BOTTLE` still wins.
+Other bottles require an explicit choice, which setup prints before changing
+anything. **Fix my installation.command** also repairs FIFA 15 in its Aurora
+bottle when the game folder is found. Setup does not test an online match.
+
 ## With Aurora15Connector
-Run `Aurora15Connector-*.exe` in the `Aurora15` bottle after `./setup.sh --fifa15`. The connector
+
+For a new standalone install, run `AURORA_BOTTLE=Aurora15 ./setup.sh --fifa15`
+first. Run `Aurora15Connector-*.exe` in the `Aurora15` bottle after `./setup.sh --fifa15`. The connector
 replaces `ItsAMe_Origin.dll` with its own version, checks the original's hash first, and hosts the
 Origin service the game's SDK connects to on 127.0.0.1:3216 — so the freeze does not occur with it,
 and `fifa15-offline.sh` must be **reverted** before running it. Sign-in, content download, game
