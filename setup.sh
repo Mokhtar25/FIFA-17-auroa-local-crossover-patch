@@ -132,6 +132,8 @@ E_UNSUPPORTED=2
 E_PERMISSION=3
 E_PAYLOAD=4
 E_INCOMPLETE=5
+# A cancelled folder prompt ends setup before any app or bottle changes.
+E_CANCELLED=130
 
 CHOICES_FILE="$HOME/Library/Application Support/FIFA-CrossOver/choices.conf"
 game_exe_of() {
@@ -323,7 +325,7 @@ if [ "$MODE" = choose-folder ] || [ "$MODE" = forget-folder ]; then
             ui_gui_ok || die $E_UNSUPPORTED "No desktop dialog is available. Give the folder path:
          ./setup.sh --choose-folder $CHOICE_GAME '/path/to/FIFA ${CHOICE_GAME#fifa}'"
             CHOICE_EXE="$(game_exe_of "$CHOICE_GAME")"
-            if ! CHOICE_PATH="$(ui_choose_folder "Choose your FIFA ${CHOICE_GAME#fifa} folder (the one with $CHOICE_EXE in it)" /Volumes)"; then
+            if ! CHOICE_PATH="$(ui_choose_folder "Select FIFA ${CHOICE_GAME#fifa} game files. Select the folder containing $CHOICE_EXE." /Volumes)"; then
                 say "No folder chosen. Your previous choice was kept."
                 exit 0
             fi
@@ -2597,6 +2599,8 @@ bottle_licence_file() {
 #   Aurora17          the old connector's connector.json gameDirectory
 #   EA registry       EA Sports\FIFA 17  Install Dir
 #   guess             ~/Downloads, ~/Desktop, ~/Games, ~ (and FIFA17_DIR)
+# The player's saved FIFA 17 choice follows AURORA_GAME_DIR and precedes
+# every launcher's record, so loader operations use the chooser's folder too.
 # Until the launchers' own records were read here, the home-folder guesses
 # came second and won: on a Mac with a stray ~/Downloads/FIFA 17, --verify,
 # the licence seeding and Impulsum17's check all looked at a folder no
@@ -2618,6 +2622,7 @@ fifa17_dir_candidates() {
     }
     _fifa17_win() { local u; u="$(win_path_to_unix "$2" 2>/dev/null)" && _fifa17_cand "$1" "$u"; return 0; }
     _fifa17_cand AURORA_GAME_DIR "${AURORA_GAME_DIR:-}"
+    _fifa17_cand chosen "$(game_dir_choice fifa17 2>/dev/null || true)"
     log="$BOTTLE_DIR/$BOTTLE/cxfifa-gate.log"
     if [ -f "$log" ]; then
         d="$(awk -F'\t' 'tolower($2) == "fifa17.exe" && $3 != "-" { d = $3 } END { print d }' "$log" 2>/dev/null)"
@@ -6057,6 +6062,37 @@ configure_bottle() {
     say "9e. Keeping copies of the FIFA 17 files launchers replace"
     fix_fifa17_folders
 }
+
+# Locate an explicitly requested game's files before install/repair can touch
+# an app or bottle. Terminal scripts, SSH, and read-only modes stay silent.
+prompt_for_missing_game_files() {
+    local folder exe label
+    [ "${CX_DIALOGS:-0}" = 1 ] && [ "$GAME_EXPLICIT" = 1 ] || return 0
+    case "$MODE" in install|bottle|repair) ;; *) return 0 ;; esac
+    game_dir_of "$GAME" >/dev/null 2>&1 && return 0
+    source "$HERE/lib/ui.zsh"
+    ui_gui_ok || return 0
+    exe="$(game_exe_of "$GAME")"
+    label="FIFA ${GAME#fifa}"
+    say "$label game files were not found. Select the folder containing $exe."
+    while true; do
+        if ! folder="$(ui_choose_folder "Select $label game files. Select the folder containing $exe." "$VOLUMES_DIR")"; then
+            say "$label setup cancelled. No app or bottle was changed."
+            return $E_CANCELLED
+        fi
+        if folder="$(choice_folder_validated "$GAME" "$folder")"; then
+            choice_write "$GAME" "$folder"
+            ok "saved $label game files: $folder"
+            return 0
+        fi
+        if ! ui_ask "Select $label game files" "Select the folder containing $exe. If you select its parent, it must contain only one copy of the game." 'Select again' 'Cancel' no; then
+            say "$label setup cancelled. No app or bottle was changed."
+            return $E_CANCELLED
+        fi
+    done
+}
+
+prompt_for_missing_game_files || exit $?
 
 # ------------------------------------------------- the launch that is watched
 # Why this exists: --verify checks files, UUIDs, signatures and registry keys,

@@ -38,11 +38,15 @@ print -r -- "  where with AURORA_GAME_DIR. The Aurora17 bottle it lives in is ma
 print -r -- "  for you if it is not there yet."
 print -r -- ""
 
-./setup.sh --offline
+CX_DIALOGS=1 AURORA_GAME="${AURORA_GAME:-fifa17}" ./setup.sh --offline
 rc=$?
 
 print -r -- ""
 case $rc in
+    130)
+        print -r -- "  Cancelled. No app or bottle was changed."
+        rc=0
+        ;;
     0)
         print -r -- "  ${GRN}Finished.${OFF} To play, double-click  PLAY FIFA 17 offline.command"
         print -r -- ""

@@ -150,6 +150,15 @@ the tables each folder is printed in full with the same source.
 
 ### Choose your game folders
 
+The double-click **FIFA 15.command**, **FIFA 16.command**, **START HERE.command**,
+**START HERE offline.command**, and **Fix my installation.command** open the
+folder picker automatically if the selected game's files cannot be found.
+The prompt names the game, for example: **Select FIFA 17 game files. Select the
+folder containing FIFA17.exe.** A valid choice is saved and setup continues.
+Cancel stops before app or bottle changes. Files already found through your
+variables, saved choice, Aurora's records or usual locations cause no prompt.
+Checks such as `--verify` never ask for a folder.
+
 Double-click **Choose game folders.command** to remember a game on an
 external drive or anywhere else. Choose FIFA 15, 16, 17 or 21, then select its
 folder. The folder must contain that game's executable. Selecting its parent
@@ -179,7 +188,10 @@ The Terminal equivalents are:
 
 Use `fifa16`, `fifa17` or `fifa21` for another game (`fifa13` is also accepted
 by the folder commands). Leave the path out of `--choose-folder` to open the
-native picker. Over SSH, or with `CX_NO_DIALOGS=1`, provide the path explicitly.
+native picker. Plain Terminal setup and SSH do not open automatic dialogs;
+`CX_DIALOGS=1` enables them for an explicitly selected game, and
+`CX_NO_DIALOGS=1` disables them. A cancelled automatic picker returns exit 130;
+the double-click commands show Cancelled and stop cleanly.
 Saving a choice changes no CrossOver app, bottle or game file.
 
 ### Separate bottles still work

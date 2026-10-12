@@ -39,7 +39,10 @@ details.
 **Game on an external drive or somewhere else?** Double-click
 **Choose game folders.command**, select the game and its folder, then choose
 **Later** to save it or **Apply and quit CrossOver** to run that game's setup.
-The choice survives downloading a new package.
+The choice survives downloading a new package. The individual game installers
+and START HERE also open the picker automatically if their game files are not
+found. It says **Select FIFA 17 game files** (or the game you selected) and
+names the executable its folder must contain.
 
 **FIFA 15 only?** Quit CrossOver and double-click **FIFA 15.command**; it uses
 Aurora's common bottle. **FIFA 16?** Use **FIFA 16.command**. Folders already

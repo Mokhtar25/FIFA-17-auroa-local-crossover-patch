@@ -24,11 +24,15 @@ print -r -- "  The game executable and Origin DLL are never modified by setup."
 print -r -- "  CrossOver must be closed while this runs."
 print -r -- ""
 
-./setup.sh --fifa15
+CX_DIALOGS=1 ./setup.sh --fifa15
 rc=$?
 
 print -r -- ""
 case $rc in
+    130)
+        print -r -- "  Cancelled. No app or bottle was changed."
+        rc=0
+        ;;
     0)
         print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA (not your normal CrossOver),"
         print -r -- "  use the bottle named above, and play FIFA 15 from its Aurora launcher."

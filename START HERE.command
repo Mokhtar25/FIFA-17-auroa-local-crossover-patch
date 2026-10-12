@@ -28,11 +28,15 @@ print -r -- "  runtime 99 (165 MB, once), which the RebornFUT launcher needs."
 print -r -- "  CrossOver must be closed while this runs."
 print -r -- ""
 
-./setup.sh
+CX_DIALOGS=1 AURORA_GAME="${AURORA_GAME:-fifa17}" ./setup.sh
 rc=$?
 
 print -r -- ""
 case $rc in
+    130)
+        print -r -- "  Cancelled. No app or bottle was changed."
+        rc=0
+        ;;
     0)
         print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA (not your normal CrossOver),"
         print -r -- "  open the Aurora17 bottle, and press PLAY FIFA 17."

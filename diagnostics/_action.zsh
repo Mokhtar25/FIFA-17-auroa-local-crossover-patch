@@ -213,6 +213,10 @@ for line in "${BLURB[@]}"; do
 done
 print -r -- ""
 
+if [ "$FLAG" = --repair ]; then
+    export CX_DIALOGS=1 AURORA_GAME="${AURORA_GAME:-fifa17}"
+fi
+
 if [ "${AURORA_GAME:-}" = fifa15 ]; then
     ./setup.sh --fifa15 "$FLAG"
 elif [ "${AURORA_GAME:-}" = fifa16 ]; then
@@ -224,6 +228,7 @@ rc=$?
 
 print -r -- ""
 case $rc in
+    130) print -r -- "  Cancelled. No app or bottle was changed."; rc=0 ;;
     0) print -r -- "  ${GRN}Finished.${OFF}" ;;
     2) print -r -- "  ${RED}Stopped: this Mac or this command is not supported here.${OFF}"
        print -r -- "  The reason is printed above." ;;

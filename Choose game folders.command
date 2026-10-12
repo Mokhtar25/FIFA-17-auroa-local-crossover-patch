@@ -46,7 +46,7 @@ if [ -f "$choices" ]; then
     [ -d "$saved" ] && location="$saved"
 fi
 while true; do
-    folder="$(ui_choose_folder "Choose your $selected folder (the one with $exe in it)" "$location")" || exit 0
+    folder="$(ui_choose_folder "Select $selected game files. Select the folder containing $exe." "$location")" || exit 0
     if /bin/zsh "$HERE/setup.sh" --choose-folder "$game" "$folder"; then
         break
     else
@@ -55,7 +55,7 @@ while true; do
             ui_notify 'Could not save the choice' 'The Terminal window shows the reason. Your previous choices were kept.'
             exit "$rc"
         fi
-        ui_ask 'Choose a game folder' "That folder does not identify one $selected game. Choose the folder containing $exe, or its parent if it contains only one copy." 'Choose again' 'Cancel' no || exit 0
+        ui_ask "Select $selected game files" "That folder does not identify one $selected game. Select the folder containing $exe, or its parent if it contains only one copy." 'Choose again' 'Cancel' no || exit 0
         location="$folder"
     fi
 done
@@ -63,7 +63,7 @@ done
 ui_ask 'Folder saved' "Apply $selected settings now? This quits CrossOver and any running game before setup. Choose Later to keep the folder choice without applying settings." 'Apply and quit CrossOver' 'Later' no || exit 0
 /bin/zsh "$HERE/setup.sh" --shutdown || exit $?
 case "$game" in
-    fifa17) /bin/zsh "$HERE/setup.sh" ;;
+    fifa17) AURORA_GAME=fifa17 /bin/zsh "$HERE/setup.sh" ;;
     *) /bin/zsh "$HERE/setup.sh" "--$game" ;;
 esac
 rc=$?

@@ -443,10 +443,13 @@ from pathlib import Path
 args = sys.argv[1:]
 with Path(os.environ['SETUP_LOG']).open('a') as out:
     out.write(json.dumps(args) + '\\n')
+if os.environ.get('SETUP_ENV_LOG'):
+    with Path(os.environ['SETUP_ENV_LOG']).open('a') as out:
+        out.write(json.dumps([os.environ.get('CX_DIALOGS'), os.environ.get('AURORA_GAME')]) + '\\n')
 if args and args[0] == '--shutdown': sys.exit(int(os.environ.get('SHUTDOWN_RC', '0')))
 if args and args[0] == '--choose-folder' and os.environ.get('VALID_FOLDER'):
     sys.exit(0 if args[-1] == os.environ['VALID_FOLDER'] else 2)
-sys.exit(0)
+sys.exit(int(os.environ.get('SETUP_RC', '0')))
 ''')
         # The command deliberately invokes setup.sh through zsh; use a shell
         # stub that forwards its arguments to the Python fixture.
@@ -466,6 +469,108 @@ sys.exit(0)
 
     def setup_calls(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def run_setup_preflight(self, args=(), replies=(), **env):
+        # Run the actual initialization, resolver, and folder preflight. Stop
+        # before install actions so fixtures never reach real apps/processes.
+        fixes = self.package / "fixes/x86_64-unix"
+        fixes.mkdir(parents=True, exist_ok=True)
+        (fixes / "ntdll.so").write_bytes(b"CX_GAME_PROFILES")
+        shutil.copy2(ROOT / "fixes/x86_64-unix/cx-fifa17-gate", fixes / "cx-fifa17-gate")
+        source = (ROOT / "setup.sh").read_text().split(
+            "# ------------------------------------------------- the launch that is watched", 1)[0]
+        script = self.package / "preflight.sh"
+        script.write_text(source + '\nprint -r -- "CONTINUED folder=$(game_dir_of "$GAME" || true)"\n')
+        command = '/bin/zsh ' + shlex_quote(str(script))
+        command += ''.join(' ' + shlex_quote(arg) for arg in args)
+        return self.run_shell(command, replies, CX_VOLUMES_DIR=str(self.work / 'no-volumes'), **env)
+
+    def test_missing_game_files_prompt_before_any_install_changes(self):
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        for game, exe, args in [('fifa15', 'fifa15.exe', ['--fifa15']),
+                                ('fifa16', 'fifa16.exe', ['--fifa16']),
+                                ('fifa17', 'FIFA17.exe', []),
+                                ('fifa21', 'FIFA21.exe', ['--fifa21'])]:
+            with self.subTest(game=game):
+                self.log.unlink(missing_ok=True)
+                choices.unlink(missing_ok=True)
+                folder = self.work / ('Selected ' + game)
+                folder.mkdir()
+                (folder / exe).write_bytes(b'MZ')
+                result = self.run_setup_preflight(args, [str(folder)], AURORA_GAME=game)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('CONTINUED folder=' + str(folder.resolve()), result.stdout)
+                record = json.loads(self.log.read_text())
+                self.assertIn('Select FIFA ' + game[4:] + ' game files', record['args'][1])
+                self.assertIn(exe, record['args'][1])
+                self.assertIn(f'{game}.folder={folder.resolve()}\n', choices.read_text())
+                self.assertFalse((self.work / 'no-app.app').exists())
+                self.assertFalse((self.work / 'no-bottles').exists())
+
+    def test_missing_files_cancel_or_disabled_dialogs_never_save_a_choice(self):
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        result = self.run_setup_preflight(['--fifa15'], ['__cancel__'])
+        self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+        self.assertNotIn('CONTINUED', result.stdout)
+        self.assertFalse(choices.exists())
+        for env in ({'CX_NO_DIALOGS': '1'}, {'SSH_CONNECTION': 'test'}, {'CX_DIALOGS': '0'}):
+            with self.subTest(env=env):
+                self.log.unlink(missing_ok=True)
+                result = self.run_setup_preflight(['--fifa15'], **env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('CONTINUED', result.stdout)
+                self.assertFalse(self.log.exists())
+                self.assertFalse(choices.exists())
+
+    def test_found_game_files_and_read_only_modes_never_prompt(self):
+        folder = self.work / 'Found FIFA 15'
+        folder.mkdir()
+        (folder / 'fifa15.exe').write_bytes(b'MZ')
+        result = self.run_setup_preflight(['--fifa15'], FIFA15_DIR=str(folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CONTINUED folder=' + str(folder.resolve()), result.stdout)
+        self.assertFalse(self.log.exists())
+        for args in (['--fifa15', '--verify'], ['--shutdown'], ['--report'], ['--bundle']):
+            with self.subTest(args=args):
+                result = self.run_setup_preflight(args, AURORA_BOTTLE='Explicit bottle',
+                                                  AURORA_GAME='fifa15' if '--fifa15' in args else 'fifa17')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(self.log.exists())
+
+    def test_install_wrappers_enable_prompts_and_report_cancel_without_success(self):
+        env_log = self.work / 'setup-env.jsonl'
+        cases = [('FIFA 15.command', [], ['--fifa15'], None),
+                 ('FIFA 16.command', [], ['--fifa16'], None),
+                 ('START HERE.command', [], [], 'fifa17'),
+                 ('START HERE offline.command', [], ['--offline'], 'fifa17'),
+                 ('diagnostics/_action.zsh', ['--repair'], ['--repair'], 'fifa17')]
+        for name, args, wanted, game in cases:
+            with self.subTest(name=name):
+                self.calls.unlink(missing_ok=True)
+                env_log.unlink(missing_ok=True)
+                target = self.package / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / name, target)
+                if name.startswith('diagnostics/'):
+                    (target.parent / 'placeholder.command').write_text('#!/bin/zsh\n')
+                command = '/bin/zsh ' + shlex_quote(str(target))
+                command += ''.join(' ' + shlex_quote(arg) for arg in args)
+                result = self.run_shell(command, SETUP_RC='130', SETUP_ENV_LOG=str(env_log))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.setup_calls(), [wanted])
+                self.assertEqual(json.loads(env_log.read_text()), ['1', game])
+                self.assertIn('Cancelled. No app or bottle was changed.', result.stdout)
+                self.assertNotIn('Finished.', result.stdout)
+
+    def test_missing_files_invalid_selection_can_be_retried_before_save(self):
+        folder = self.work / 'Selected FIFA 15'
+        folder.mkdir()
+        (folder / 'fifa15.exe').write_bytes(b'MZ')
+        result = self.run_setup_preflight(['--fifa15'], ['/wrong', 'Select again', str(folder)])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CONTINUED folder=' + str(folder.resolve()), result.stdout)
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        self.assertIn(f'fifa15.folder={folder.resolve()}\n', choices.read_text())
 
     def test_native_game_selection_handles_a_pick_and_cancel(self):
         # Execute the real AppleScript through its assignment and return path.
@@ -548,6 +653,9 @@ sys.exit(0)
         command = '/bin/zsh ' + shlex_quote(str(ROOT / 'setup.sh')) + ' --choose-folder fifa15'
         result = self.run_shell(command, [str(folder)])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads(self.log.read_text())
+        self.assertIn('Select FIFA 15 game files', record['args'][1])
+        self.assertIn('fifa15.exe', record['args'][1])
         choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
         before = choices.read_bytes()
         self.log.unlink()
@@ -1112,6 +1220,22 @@ class SharedBottleTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return [tuple(line.split("\t")) for line in result.stdout.splitlines()]
+
+    def test_fifa17_loader_operations_use_the_saved_game_files(self):
+        chosen = self.game_folder('Selected FIFA 17', 'FIFA17.exe')
+        (chosen / '_fifa17.exe').write_bytes(b'MZ')
+        stray = self.game_folder('Downloads/FIFA 17', 'FIFA17.exe')
+        (stray / '_fifa17.exe').write_bytes(b'MZ')
+        self.choose('fifa17', chosen)
+        harness = ('set -eu\nBOTTLE_DIR=' + shlex_quote(str(self.bottles))
+                   + '\nBOTTLE=Aurora17\n' + resolver_source() + function_source('game_dir_find')
+                   + '\ngame_dir_find\n')
+        for env, wanted in [({}, chosen), ({'AURORA_GAME_DIR': str(stray)}, stray)]:
+            with self.subTest(env=env):
+                result = subprocess.run(['/bin/zsh', '-c', harness],
+                                        env={**self.env, **env}, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), str(wanted.resolve()))
 
     def test_a_folder_is_what_was_said_then_chosen_then_recorded_then_guessed(self):
         app = self.copy(marker=True)
