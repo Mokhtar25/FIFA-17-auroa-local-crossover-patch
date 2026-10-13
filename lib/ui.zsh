@@ -13,7 +13,9 @@ ui_ask() {
         print -u2 -r -- "$title: $message"
         [ "$default" = yes ]; return
     fi
-    answer="$(osascript - "$title" "$message" "$yes" "$no" "$default" <<'EOS'
+    # 2>/dev/null: the button that is not "yes" is the cancel button, and
+    # osascript reports pressing it as "execution error: User canceled (-128)".
+    answer="$(osascript - "$title" "$message" "$yes" "$no" "$default" 2>/dev/null <<'EOS'
 on run argv
     set defaultButton to item 4 of argv
     if item 5 of argv is "yes" then set defaultButton to item 3 of argv
@@ -39,7 +41,7 @@ ui_choose_folder() {
     ui_gui_ok || return 1
     local location="${2:-/Volumes}" answer
     [ -d "$location" ] || location="$HOME"
-    answer="$(osascript - "$1" "$location" <<'EOS'
+    answer="$(osascript - "$1" "$location" 2>/dev/null <<'EOS'
 on run argv
     set folderChosen to choose folder with prompt (item 1 of argv) default location (POSIX file (item 2 of argv))
     return POSIX path of folderChosen

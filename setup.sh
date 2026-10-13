@@ -1678,6 +1678,7 @@ f15_check_game() {
     fi
     d="${l#*$'\t'}"
     ok "fifa15.exe in $d  ($(game_dir_source_says "$l"))"
+    macos_blocks_reading "$d" fifa15.exe && return 0
     [ -x "$off" ] || { note "fifa15/fifa15-offline.sh is not here, so ItsAMe_Origin.dll was not checked"; return 0; }
     # "if VAR=$(...)": under set -e a failing substitution in a bare assignment
     # ends the script, and "not the CPY file" is exit 3 there, not a failure.
@@ -2197,6 +2198,32 @@ f15_crt_donor_dir() {
 # pair already sitting in a FIFA 17 folder on this Mac, then the VS2012
 # redistributable FIFA 15 itself carries in _Redist, then a note asking for the
 # files. Never a stop: only an online match cares.
+# macOS lets a program read Desktop, Documents, Downloads and other drives
+# only after the person allowed it (Privacy & Security > Files and Folders).
+# Setup runs as Terminal, and without that permission every read of a game
+# kept there fails with "Operation not permitted": the C runtime cannot be
+# put beside the game, its installer cannot be read, and the Origin DLL
+# cannot be checked (a run on 2026-10-13, FIFA 15 on the Desktop). Prints how
+# to allow it and returns 0 when the folder is blocked like that.
+macos_blocks_reading() {
+    local d="$1" exe="$2" where
+    [ -f "$d/$exe" ] || return 1
+    head -c 1 -- "$d/$exe" >/dev/null 2>&1 && return 1
+    case "${d:A}/" in
+        "${HOME:A}/Desktop/"*)   where="Desktop Folder" ;;
+        "${HOME:A}/Documents/"*) where="Documents Folder" ;;
+        "${HOME:A}/Downloads/"*) where="Downloads Folder" ;;
+        /Volumes/*)              where="Removable Volumes (or Network Volumes)" ;;
+        *)                       where="" ;;
+    esac
+    note "macOS is not letting Terminal read $d"
+    say "        Either allow it: System Settings > Privacy & Security > Files and"
+    say "        Folders > Terminal${where:+, turn on \"$where\"} (or Full Disk Access),"
+    say "        or move the game folder into your home folder, for example ~/Games."
+    say "        Then quit Terminal and run this again."
+    return 0
+}
+
 f15_ensure_crt_dlls() {
     local app="$1" d src dll redist rwin wine sys wpid waited=0
     d="$(f15_game_dir 2>/dev/null || true)"
@@ -2209,6 +2236,7 @@ f15_ensure_crt_dlls() {
         ok "${(j: + :)CRT_OVERRIDE_DLLS} — Microsoft's own, already beside fifa15.exe"
         return 0
     fi
+    macos_blocks_reading "$d" fifa15.exe && return 1
     if src="$(f15_crt_donor_dir)"; then
         # Added beside the game, not over it: these two files are not part of
         # FIFA 15 and nothing of the game's own is touched.
@@ -6378,6 +6406,17 @@ configure_bottle() {
         # own and needs nothing here.
         if [ "$GAME" = fifa15 ]; then
             f15_ensure_crt_dlls "$APP" || true
+        fi
+        # The VS2012 installer above, and cxbottle's wineboot when the bottle
+        # was only just made, leave a wineserver holding this bottle's
+        # registry in memory. It writes that copy back when it exits, over
+        # every setting written below: a run on 2026-10-13 said "ok" to
+        # dinput8, the C runtime, the proxy and the controller, and its own
+        # check straight after found none of them. Ending the session here
+        # saves the installer's own changes and leaves the files to us.
+        if [ -z "$(crossovers_running)" ] && [ -n "$(wineserver_pids)" ]; then
+            shutdown_wineservers
+            ok "ended the Wine session the steps above started, before writing the settings"
         fi
         # See the comment on set_version_override. Nothing else puts this there,
         # and without it every other part of the install is wasted.

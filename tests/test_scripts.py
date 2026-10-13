@@ -757,6 +757,30 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
                     self.assertEqual(record['args'][1:5][2:], ['Quit CrossOver and continue', 'Stop'])
                     self.assertIn('7 leftover process(es)', record['args'][2])
 
+    def test_a_game_folder_macos_will_not_let_terminal_read_says_how_to_allow_it(self):
+        # FIFA 15 on the Desktop without Terminal's Files and Folders permission:
+        # every read failed with "Operation not permitted" and nothing said why.
+        harness = ('set -eu\nsay() { print -r -- "$*"; }; note() { say "note  $*"; }\n'
+                   + function_source("macos_blocks_reading")
+                   + '\nmacos_blocks_reading "$1" fifa15.exe && print BLOCKED || print READABLE\n')
+        desktop = self.work / 'Desktop/FIFA 15'
+        desktop.mkdir(parents=True)
+        exe = desktop / 'fifa15.exe'
+        exe.write_bytes(b'MZ')
+        result = self.run_shell(harness.replace('"$1"', shlex_quote(str(desktop))))
+        self.assertIn('READABLE', result.stdout)
+        exe.chmod(0)   # a read that fails, as macOS's privacy block makes it fail
+        self.addCleanup(exe.chmod, 0o644)
+        result = self.run_shell(harness.replace('"$1"', shlex_quote(str(desktop))))
+        self.assertIn('BLOCKED', result.stdout)
+        self.assertIn('macOS is not letting Terminal read', result.stdout)
+        self.assertIn('turn on "Desktop Folder"', result.stdout)
+        self.assertIn('~/Games', result.stdout)
+        # Its two callers stop trying to read the folder once it says so.
+        source = (ROOT / "setup.sh").read_text()
+        self.assertIn('macos_blocks_reading "$d" fifa15.exe && return 1\n    if src="$(f15_crt_donor_dir)"', source)
+        self.assertIn('macos_blocks_reading "$d" fifa15.exe && return 0\n', source)
+
     def test_no_fifa17_is_skipped_and_never_stops_the_other_games(self):
         # START HERE and Fix my installation are for every game. Skip, Cancel
         # in the picker, or giving up after a wrong folder all carry on.
@@ -2756,6 +2780,11 @@ class CrtOverrideTests(unittest.TestCase):
         source = self.source()
         self.assertIn('if [ "$GAME" = fifa15 ]; then\n            f15_ensure_crt_dlls "$APP"',
                       source)
+        # The installer's wineserver holds the registry in memory and writes it
+        # back on exit: it has to be gone before the settings are written, or
+        # they vanish (dinput8 "ok", then BAD in the check right after).
+        after = source.split('f15_ensure_crt_dlls "$APP" || true\n        fi\n', 1)[1]
+        self.assertLess(after.index('shutdown_wineservers'), after.index('elif set_version_override'))
 
 
 class WebView2RuntimeTests(unittest.TestCase):
