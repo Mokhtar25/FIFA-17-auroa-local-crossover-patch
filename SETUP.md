@@ -194,16 +194,18 @@ native picker. Plain Terminal setup and SSH do not open automatic dialogs;
 the double-click commands show Cancelled and stop cleanly.
 Saving a choice changes no CrossOver app, bottle or game file.
 
-### Separate bottles still work
+### Both games at once
 
-Each game can still have a bottle of its own. **Both games.command** keeps
-the separate `Aurora17` and `Aurora15` defaults and makes the FIFA 15 bottle
-if needed. The individual **FIFA 15.command** uses Aurora's common bottle
-instead; **FIFA 16.command** still uses `FIFA16`.
+**Both games.command** sets up FIFA 17 in `Aurora17` and FIFA 15 in the
+bottle the Aurora launcher starts it from: `Aurora17` too by default, or
+`Aurora15` when Aurora is installed there. **START HERE** and **Fix my
+installation** also add FIFA 15 to that bottle whenever they find a FIFA 15
+folder. **FIFA 16.command** still uses `FIFA16`.
 
-1. Prepare `Aurora17` as described below; the installer creates `Aurora15`.
+1. Prepare `Aurora17` as described below.
 2. Quit CrossOver completely, then double-click **Both games.command**.
-3. Open CrossOver-FIFA and launch each game from its own bottle.
+3. Open CrossOver-FIFA, open the bottle setup named, and play either game from
+   the Aurora launcher.
 
 The terminal equivalent is `./setup-both.sh`; `./setup-both.sh --offline`
 sets up FIFA 17 without Aurora17, followed by the normal FIFA 15 setup.
@@ -213,17 +215,17 @@ If the FIFA 17 half stops as **not finished** (exit 5), the FIFA 15 half still
 runs, because FIFA 15 only needs the shared copy; the final message says what
 FIFA 17 is missing.
 
-For custom names, use:
+For a custom name, `FIFA17_BOTTLE="My FIFA 17" ./setup-both.sh` puts both
+games in that bottle. A separate FIFA 15 bottle is the exception, made only
+when you name it:
 
 ```sh
 FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh
 ```
 
-Use the same variables for later checks. The combined installer is the
-two-bottle way, so it rejects `AURORA_BOTTLE`, identical names and paths
-pointing at the same bottle; for one bottle, run `./setup.sh` and then
-`AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15`. No saves or existing bottles are
-deleted by setup.
+Use the same variables for later checks. The combined installer rejects
+`AURORA_BOTTLE`; use `FIFA17_BOTTLE` and `FIFA15_BOTTLE` instead. No saves or
+existing bottles are deleted by setup.
 
 Every profile installs the complete shared DLL payload, so rerunning the FIFA 17
 installer keeps the FIFA 15 and FIFA 16 fixes. FIFA 16 is set up on its own:
@@ -1229,7 +1231,8 @@ against: FIFA 17 the Visual Studio 2013 pair, FIFA 15 the 2012 pair.
 "msvcp120"="native,builtin"
 ```
 
-In the **Aurora15** bottle add:
+In the bottle FIFA 15 is in (the one the Aurora launcher is in, **Aurora17**
+by default) also add:
 
 ```
 "msvcr110"="native,builtin"
@@ -1499,7 +1502,8 @@ setup keeps using it. With neither launcher installed, the default is
 `AURORA_BOTTLE` wins when both are set. If Aurora is found only in another
 bottle, setup prints the command to choose it and stops before changing
 anything. A leftover launcher folder or ini without its program is ignored.
-For a new standalone connector install, use
+A new install never makes `Aurora15`. Only if you want the old standalone
+connector in a bottle of its own, use
 `AURORA_BOTTLE=Aurora15 ./setup.sh --fifa15` first.
 
 Setup makes the copy and chosen bottle if needed (CrossOver must be closed),
@@ -1507,20 +1511,30 @@ adds `gdiplus.dll`, and writes `dinput8`, `msvcr110` and `msvcp110` overrides
 for `fifa15.exe` in that bottle. An older copy gets the per-game table updated
 before FIFA 15 is added to a shared bottle. See
 [Several games in one bottle](#several-games-in-one-bottle).
-**Fix my installation.command** also sets up and checks FIFA 15 in the same
-bottle when it finds both Aurora.exe and a FIFA 15 folder. If that setup
-fails, FIFA 17's remaining repairs still run and the final result reports
-that repair is not finished.
+**START HERE.command** (plain `./setup.sh`) and **Fix my installation.command**
+also set up and check FIFA 15 in that bottle whenever they find a FIFA 15
+folder; Aurora.exe does not have to be installed yet. Fix my installation
+without a FIFA 17 folder skips FIFA 17's steps and fixes FIFA 15 alone. If none is found, setup
+says that **FIFA 15.command** or **Choose game folders.command** adds it
+later. If the FIFA 15 part fails, FIFA 17 still reports Done, then
+**FIFA 15 is NOT FINISHED** in red, and setup exits 5.
+
+FIFA 15 opens but never connects? Its `dinput8`, `msvcr110` and `msvcp110`
+settings are missing from the bottle Aurora starts it from. Quit CrossOver,
+double-click **FIFA 15.command** or **Fix my installation.command**, then run
+**Check the install**: FIFA 15's row must not say "missing dinput8".
 
 Setup reports which `ItsAMe_Origin.dll` your game folder has. Game folder: the one the Aurora launcher was given (its
 `FifaPath`), else `~/Downloads/FIFA 15` and the other usual places, a drive in
 `/Volumes` included; for anywhere else, `FIFA15_DIR=/path ./setup.sh --fifa15`.
 
-Play FIFA 15 from the multi-game Aurora launcher in the bottle setup names.
+Play FIFA 15 from the multi-game Aurora launcher in the bottle setup names
+(`Aurora17` by default): open CrossOver-FIFA, open that bottle, start FIFA 15
+from the Aurora launcher. Never press **Repair connection**.
 Keep `ItsAMe_Origin.dll` on the version that launcher expects; revert the
 manual offline patch before online play.
 
-The standalone alternatives still work:
+The standalone alternatives still work, as exceptions:
 
 - **With Aurora15Connector:** start `Aurora15Connector-*.exe` in the `Aurora15`
   bottle, sign in, press PLAY. It needs the CPY original `ItsAMe_Origin.dll`.

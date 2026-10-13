@@ -832,6 +832,8 @@ f15_default_bottle() {
     fi
 }
 
+# What the person named, before --repair exports its own bottle for its steps.
+AURORA_BOTTLE_GIVEN="${AURORA_BOTTLE:-}"
 # FIFA 21 uses FIFA 17's common bottle unless AURORA_BOTTLE names another.
 case "$GAME" in
     fifa15) BOTTLE="$(f15_default_bottle)" || exit $E_UNSUPPORTED ;;
@@ -7329,25 +7331,38 @@ $APP_MGMT_HINT"
     return 0
 }
 
-# FIFA 15 launched by Aurora.exe needs its overrides in this same bottle.
-# Repair only a game whose folder is found here; a child failure is reported
-# while the remaining FIFA 17 repairs and checks still run.
-REPAIR_FIFA15_OK=1
-repair_fifa15() {
-    local folder
-    [ "$(aurora_bottle_kind "$BOTTLE" 2>/dev/null || true)" = modern ] || return 0
+# FIFA 15 goes in the bottle Aurora.exe starts it from: without its dinput8
+# override there the game opens but never connects. That is the bottle
+# --fifa15 picks on its own (f15_default_bottle: the common one, or Aurora15
+# when Aurora.exe or the old connector lives there), so a player with
+# Aurora17 and Aurora15 gets it where they play. The full install and
+# --repair add it whenever a FIFA 15 folder is found. A failure is reported
+# while FIFA 17's own steps still run.
+FIFA15_OK=1
+FIFA15_FOUND=0
+FIFA15_IN=""
+add_fifa15_to_bottle() {
+    local folder f15
     if ! folder="$(game_dir_of fifa15 2>/dev/null)"; then
-        note "FIFA 15: no game folder found, so its setup was skipped"
+        note "FIFA 15: no game folder found, so it was not added to a bottle"
+        say "        (FIFA 15.command or Choose game folders.command adds it later)"
         return 0
     fi
+    if ! f15="$(AURORA_BOTTLE="$AURORA_BOTTLE_GIVEN" f15_default_bottle)"; then
+        FIFA15_OK=0
+        note "FIFA 15: not set up; name the bottle you play it in (above)"
+        return 0
+    fi
+    FIFA15_FOUND=1
+    FIFA15_IN="$f15"
     say ""
-    say "        FIFA 15 in the $BOTTLE bottle ($folder)"
-    if AURORA_BOTTLE="$BOTTLE" "$HERE/setup.sh" --fifa15 \
-       && AURORA_BOTTLE="$BOTTLE" "$HERE/setup.sh" --fifa15 --verify; then
-        ok "FIFA 15: set up and checked in the $BOTTLE bottle"
+    say "        FIFA 15 in the $f15 bottle ($folder)"
+    if AURORA_BOTTLE="$f15" "$HERE/setup.sh" --fifa15 \
+       && AURORA_BOTTLE="$f15" "$HERE/setup.sh" --fifa15 --verify; then
+        ok "FIFA 15: set up and checked in the $f15 bottle"
     else
-        REPAIR_FIFA15_OK=0
-        note "FIFA 15: not finished; continuing with FIFA 17's repairs"
+        FIFA15_OK=0
+        note "FIFA 15: not finished; continuing with FIFA 17's steps"
     fi
     return 0
 }
@@ -7370,7 +7385,7 @@ repair_fifa15() {
 #                     launcher's window needs (a 165 MB download, once), and
 #                     the CAS launcher's device check and cas:// handler.
 #                     Then FIFA 15's setup and verification in the same bottle,
-#                     when Aurora.exe and a FIFA 15 folder are found there.
+#                     when a FIFA 15 folder is found.
 #   4. the licence    the game's own loader writes a fresh one over whatever
 #                     is there. A file that exists but is wrong passes every
 #                     other check while the game relaunches itself with no
@@ -7422,15 +7437,32 @@ if [ "$MODE" = repair ]; then
     zshexit() { :; }
 
     say ""
-    say "3 of 5. The $BOTTLE bottle"
+    # FIFA 17's bottle steps, its licence and its check are for people who
+    # have FIFA 17. Without a FIFA 17 folder they could only fail (no
+    # _fifa17.exe to write the licence) and end a FIFA 15 player's repair
+    # NOT FIXED, so they are skipped and FIFA 15 is judged on its own.
+    REPAIR_F17=1
+    game_dir_of fifa17 >/dev/null 2>&1 || REPAIR_F17=0
+    if [ "$REPAIR_F17" = 1 ]; then
+        say "3 of 5. The $BOTTLE bottle"
+    else
+        say "3 of 5. The bottles"
+        note "no FIFA 17 folder found (a drive not connected?), so FIFA 17's"
+        say "        settings, licence and checks are skipped. If you have FIFA 17,"
+        say "        double-click Choose game folders.command, then run this again."
+    fi
     REPAIR_HAD_LICENCE=0
     [ -f "$(bottle_licence_file)" ] && REPAIR_HAD_LICENCE=1
-    "$HERE/setup.sh" --bottle || exit $?
-    repair_fifa15
+    if [ "$REPAIR_F17" = 1 ]; then
+        "$HERE/setup.sh" --bottle || exit $?
+    fi
+    add_fifa15_to_bottle
 
     say ""
     say "4 of 5. The licence file"
-    if [ "$REPAIR_HAD_LICENCE" = 1 ]; then
+    if [ "$REPAIR_F17" = 0 ]; then
+        ok "FIFA 17's; there is no FIFA 17 here, and FIFA 15 needs none"
+    elif [ "$REPAIR_HAD_LICENCE" = 1 ]; then
         if ! seed_bottle_licence "$TARGET" 1; then
             note "the licence file could not be re-made; the check below says whether"
             say "        the one that is there still counts"
@@ -7453,16 +7485,35 @@ if [ "$MODE" = repair ]; then
 
     say ""
     say "5 of 5. Checking"
-    if "$HERE/setup.sh" --verify && [ "$REPAIR_FIFA15_OK" = 1 ]; then
+    if [ "$REPAIR_F17" = 0 ]; then
+        say ""
+        if [ "$FIFA15_FOUND" = 1 ] && [ "$FIFA15_OK" = 1 ]; then
+            green "Fixed. Open ${TARGET:t:r}, then the $FIFA15_IN bottle, and play FIFA 15 from Aurora."
+            say ""
+            exit 0
+        elif [ "$FIFA15_FOUND" = 1 ] || [ "$FIFA15_OK" != 1 ]; then
+            red "NOT FIXED — FIFA 15's setup or check failed (the reason is in step 3)."
+            say "To check it:  ./setup.sh --fifa15 --verify"
+        else
+            red "NOT FIXED — no FIFA 17 or FIFA 15 folder was found, so there was nothing to set up."
+            say "Double-click Choose game folders.command, pick your game, then run this again."
+        fi
+        say ""
+        exit $E_INCOMPLETE
+    fi
+    if "$HERE/setup.sh" --verify && [ "$FIFA15_OK" = 1 ]; then
         say ""
         green "Fixed. Open ${TARGET:t:r}, then the $BOTTLE bottle, and press PLAY."
+        if [ "$FIFA15_FOUND" = 1 ] && [ "$FIFA15_IN" != "$BOTTLE" ]; then
+            say "FIFA 15 is in the $FIFA15_IN bottle, where your Aurora launcher is."
+        fi
         say ""
         exit 0
     fi
     say ""
-    if [ "$REPAIR_FIFA15_OK" != 1 ]; then
-        red "NOT FIXED — FIFA 15's setup or check failed in the $BOTTLE bottle."
-        say "To check it:  AURORA_BOTTLE=${(qq)BOTTLE} ./setup.sh --fifa15 --verify"
+    if [ "$FIFA15_OK" != 1 ]; then
+        red "NOT FIXED — FIFA 15's setup or check failed (the reason is in step 3)."
+        say "To check it:  ./setup.sh --fifa15 --verify"
     else
         red "NOT FIXED — the check above names what is still wrong."
     fi
@@ -7941,6 +7992,14 @@ configure_bottle "$APP"
 [ "$GAME" = fifa16 ] && f16_check_game map
 [ "$GAME" = fifa21 ] && f21_check_game
 end_own_wine_session
+# The copy is finished, so the lock goes before the FIFA 15 run takes its own.
+if [ "$GAME" = fifa17 ]; then
+    rm -rf "$SETUP_LOCK" 2>/dev/null || true
+    zshexit() { :; }
+    say ""
+    say "10. FIFA 15 in the same bottle"
+    add_fifa15_to_bottle
+fi
 
 # ------------------------------------------------------------- the receipt
 # Uninstall reads this instead of guessing at default locations.
@@ -8028,6 +8087,12 @@ if setup_steps_ok; then
     say "                                  that folder: see diagnostics/README.md."
     say "To undo everything:               ./uninstall.sh"
     say ""
+    if [ "$FIFA15_OK" != 1 ]; then
+        red "FIFA 15 is NOT FINISHED (the reason is in step 10)."
+        say "FIFA 17 is not affected. To try FIFA 15 again:  ./setup.sh --fifa15"
+        say ""
+        exit $E_INCOMPLETE
+    fi
     exit 0
 fi
 

@@ -12,7 +12,10 @@
 # It is setup.sh twice: the FIFA 17 install first (the copy, the nine files,
 # the Aurora17 bottle, the stand-in, the EA names, the licence, the WebView2
 # runtime the RebornFUT launcher needs), then
-# setup.sh --fifa15 (the Aurora15 bottle, its settings, the game-folder check).
+# setup.sh --fifa15 (FIFA 15's settings, the game-folder check). FIFA 15 goes
+# in the bottle the Aurora launcher starts it from, the one --fifa15 picks:
+# FIFA 17's (Aurora17), or Aurora15 when Aurora lives there. FIFA15_BOTTLE
+# names another.
 # The FIFA 15 half needs only the copy, so it runs when the FIFA 17 half
 # finished (exit 0) and also when it stopped "not finished" (exit 5: the copy
 # is patched, something in the Aurora17 bottle is missing). Any other stop
@@ -55,21 +58,20 @@ if [ "$#" -gt 1 ] || [[ "${1:-}" == -* ]] \
 fi
 
 # A legacy AURORA_BOTTLE override is ambiguous for two games. Require the
-# per-game names rather than silently configuring that same bottle twice.
+# per-game names rather than guessing which game it was meant for.
 if [ -n "${AURORA_BOTTLE:-}" ]; then
     print -r -- "For both games, unset AURORA_BOTTLE and use FIFA17_BOTTLE and FIFA15_BOTTLE."
     exit 2
 fi
 F17="${FIFA17_BOTTLE:-Aurora17}"
-F15="${FIFA15_BOTTLE:-Aurora15}"
-BOTTLES="${CX_BOTTLE_PATH:-$HOME/Library/Application Support/CrossOver/Bottles}"
-P17="$BOTTLES/$F17"; P15="$BOTTLES/$F15"
-if [ "${(L)P17:A}" = "${(L)P15:A}" ]; then
-    print -r -- "FIFA 17 and FIFA 15 need separate bottles. Choose different FIFA17_BOTTLE and FIFA15_BOTTLE names."
-    exit 2
-fi
-run17() { env AURORA_GAME=fifa17 AURORA_BOTTLE="$F17" ./setup.sh "$@"; }
-run15() { env AURORA_GAME=fifa15 AURORA_BOTTLE="$F15" ./setup.sh --fifa15 "$@"; }
+run17() { env AURORA_GAME=fifa17 FIFA17_BOTTLE="$F17" ./setup.sh "$@"; }
+run15() {
+    if [ -n "${FIFA15_BOTTLE:-}" ]; then
+        env AURORA_GAME=fifa15 AURORA_BOTTLE="$FIFA15_BOTTLE" ./setup.sh --fifa15 "$@"
+    else
+        env AURORA_GAME=fifa15 FIFA17_BOTTLE="$F17" ./setup.sh --fifa15 "$@"
+    fi
+}
 
 case "$ACTION" in
     unstick|shutdown|agent|repair) run17 "--$ACTION"; exit $? ;;
@@ -126,8 +128,9 @@ fi
 
 print -r -- ""
 print -r -- "Both games are set up in the same CrossOver-FIFA. Open it (not your normal"
-print -r -- "CrossOver): $F17 bottle for FIFA 17, $F15 bottle for FIFA 15."
-print -r -- "FIFA 15: launch through Aurora15Connector's PLAY button. For direct offline"
+print -r -- "CrossOver), then the bottle each half named above, and play from the Aurora"
+print -r -- "launcher there."
+print -r -- "Never press the launcher's \"Repair connection\". For direct offline FIFA 15"
 print -r -- "play, follow fifa15/README.md first; this installer does not apply that patch."
 print -r -- "To check later:  ./setup-both.sh --verify"
 exit 0

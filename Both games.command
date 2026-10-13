@@ -14,12 +14,12 @@ print -r -- "  FIFA 17 + FIFA 15 on a Mac — installer"
 print -r -- "  ======================================"
 print -r -- ""
 print -r -- "  This makes a separate copy of CrossOver called CrossOver-FIFA, puts"
-print -r -- "  the FIFA 17 fixes in it, then makes an Aurora15 bottle for FIFA 15."
+print -r -- "  the FIFA 17 fixes in it, then adds FIFA 15 to the bottle Aurora is in."
 print -r -- "  Your own CrossOver is not touched. The copy needs about 1 GB."
 print -r -- "  Neither game is modified. One download, for FIFA 17: Microsoft's"
 print -r -- "  Edge WebView2 runtime 99 (165 MB, once), for the RebornFUT launcher."
 print -r -- "  CrossOver must be closed while this runs. Running this again later"
-print -r -- "  copies CrossOver again (about 1 GB) and sets both bottles up again."
+print -r -- "  copies CrossOver again (about 1 GB) and sets both games up again."
 print -r -- ""
 
 ./setup-both.sh
@@ -27,8 +27,8 @@ rc=$?
 
 print -r -- ""
 case $rc in
-    0) print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA: Aurora17 bottle for FIFA 17,"
-       print -r -- "  Aurora15 bottle for FIFA 15 (SETUP.md, \"FIFA 15\", says how to play it)." ;;
+    0) print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA, then the bottle named above, and play"
+       print -r -- "  from its Aurora launcher (SETUP.md, \"FIFA 15\", says how to play FIFA 15)." ;;
     3) print -r -- "  ${RED}Stopped: macOS would not allow a change, or CrossOver is open.${OFF}"
        print -r -- "  Follow the steps above, then run this again." ;;
     4) print -r -- "  ${RED}Stopped: something did not match what it expected.${OFF} The reason is above." ;;

@@ -33,7 +33,8 @@ details.
 - **CrossOver 26.3** exactly. Other versions are refused.
 - Apple's command line tools. In Terminal: `xcode-select --install`
 - Your own copy of whichever games you want to play
-- Aurora17 for FIFA 17 online play; Aurora15Connector for FIFA 15 online play
+- Aurora17 for online play. Its Aurora launcher starts FIFA 17 and FIFA 15 from
+  the same bottle
 
 ## Before you install
 
@@ -62,9 +63,10 @@ or both games.
 The normal install stops if the bottle is not there. SETUP.md explains each step.
 
 Steps 2 and 3 are only for the normal install. The offline install makes the
-`Aurora17` bottle for you if it is not there. FIFA 15 makes its selected
-bottle if needed (`Aurora17` by default, or the installed old connector's
-`Aurora15`). Quit CrossOver first either way.
+`Aurora17` bottle for you if it is not there. FIFA 15 goes in the
+bottle your Aurora launcher is in: `Aurora17` by default, the same as FIFA 17,
+or `Aurora15` if Aurora (or the old standalone Aurora15Connector) is installed
+there. Quit CrossOver first either way.
 
 ## Install
 
@@ -74,15 +76,22 @@ Pick one:
 |---|---|
 | Online play, Ultimate Team, career, everything (needs Aurora17) | **START HERE.command** |
 | Single player only, no Aurora17 | **START HERE offline.command** |
-| Both games, in separate Aurora17 and Aurora15 bottles | **Both games.command** |
+| Both games, in the bottle your Aurora launcher is in | **Both games.command** |
 | FIFA 15 only (makes the copy first if it is not there) | **FIFA 15.command** |
 | FIFA 16 (makes the copy first if it is not there) | **FIFA 16.command** |
+
+START HERE also adds FIFA 15 to Aurora's bottle when it finds a FIFA 15
+folder (Aurora's record, a saved choice, or Downloads). If it finds none, it
+says so; **FIFA 15.command** or **Choose game folders.command** adds it later.
+If the FIFA 15 part fails, FIFA 17 is still done and the end of the output
+says what FIFA 15 is missing.
 
 If macOS says "Apple could not verify..." go to **System Settings → Privacy &
 Security**, scroll down, and click **Open Anyway**. You only do this once.
 
 Already have FIFA 17 installed? **Both games.command** copies CrossOver again
-(about 1 GB, which is how an update reaches the copy) and sets both bottles up.
+(about 1 GB, which is how an update reaches the copy) and sets both games up
+again, FIFA 15 in the bottle your Aurora launcher is in.
 If the FIFA 17 half is not finished, FIFA 15 is still set up, and the message
 at the end says what FIFA 17 is missing.
 For FIFA 17 offline plus FIFA 15, run `./setup-both.sh --offline`.
@@ -93,9 +102,11 @@ replaces any fix file in the CrossOver-FIFA copy that is missing or out of
 date and re-signs it, sets the Aurora17 bottle up again (settings, overrides,
 hosts, menu entries, and the WebView2 runtime the RebornFUT launcher needs if
 it is not there yet), has the game's own loader write a fresh licence file,
-and checks the lot. CrossOver is not copied again, so it takes a minute or
-two. From Terminal it is `./setup.sh --repair`; for FIFA 15, `./setup.sh
---fifa15` brings that bottle up to date, and `./setup.sh --fifa16` does the
+and checks the lot. When it finds a FIFA 15 folder it adds FIFA 15 to the
+bottle your Aurora launcher is in too. Without FIFA 17 it skips FIFA 17's
+steps and fixes FIFA 15 alone. CrossOver is not copied again, so it takes a minute or
+two. From Terminal it is `./setup.sh --repair`; for FIFA 15 alone, `./setup.sh
+--fifa15` brings its setup up to date, and `./setup.sh --fifa16` does the
 same for FIFA 16.
 
 The **RebornFUT** launcher needs two more fixes from version 3.1.45 on, the
@@ -125,8 +136,9 @@ verify this device." and sign-in never starts), and a small app in
 `cas://` sign-in link back to the bottle. `CAS_SUPPORT=skip` leaves both out.
 SETUP.md, "9c. The CAS launcher", says what each one does and what it sends.
 
-Custom bottle names: `FIFA17_BOTTLE="My FIFA 17" FIFA15_BOTTLE="My FIFA 15" ./setup-both.sh`.
-Use distinct bottles. Unset `AURORA_BOTTLE` before running the combined installer.
+Custom bottle name: `FIFA17_BOTTLE="My FIFA 17" ./setup-both.sh` puts both
+games in that bottle. `FIFA15_BOTTLE="My FIFA 15"` puts FIFA 15 in a bottle of
+its own instead. Unset `AURORA_BOTTLE` before running the combined installer.
 
 **One bottle for every game.** The Aurora launcher plays FIFA 13, 15, 16, 17
 and 21 from the bottle it is installed in, so a game no longer needs a bottle
@@ -146,11 +158,14 @@ fix right under it.
 - **Offline install:** open **CrossOver-FIFA**, open the Aurora17 bottle, click
   **FIFA 17 (offline)**. Or double-click **PLAY FIFA 17 offline.command** and
   keep that window open while you play.
-- **FIFA 15:** open **CrossOver-FIFA**, open the **Aurora15** bottle, and run
-  **Aurora15Connector**. Without Aurora, run
+- **FIFA 15:** open **CrossOver-FIFA**, open the bottle setup names (the one
+  your Aurora launcher is in, usually **Aurora17**), and play FIFA 15 from the
+  Aurora launcher. An old standalone **Aurora15Connector** in an `Aurora15`
+  bottle still works from that bottle.
+  Without Aurora, run
   `./fifa15/fifa15-offline.sh apply` once and then run `fifa15.exe` from that
   bottle instead. The patch can recover from Aurora15Connector’s verified
-  original backup and preserves the currently installed DLL. Never press the connector's **Repair connection** button —
+  original backup and preserves the currently installed DLL. Never press **Repair connection** —
   under Wine it kills the connector's own client and the game hangs.
   `fifa15/README.md` covers both ways in full.
 - **FIFA 16:** open **CrossOver-FIFA**, open the **FIFA16** bottle, choose
@@ -195,6 +210,10 @@ For FIFA 17, double-click **Diagnostics.command**. It collects the logs a bug re
 into one zip in the **diagnostics** folder and opens that folder for you.
 
 For FIFA 15, use **diagnostics/13 Check the install (FIFA 15).command**.
+FIFA 15 opens but does not connect? Its settings are missing from the bottle
+Aurora starts it from. Quit CrossOver, double-click **FIFA 15.command** (or
+**Fix my installation.command**), then run that check again: FIFA 15's row
+must not say "missing dinput8".
 If it freezes at the language screen, see [the launch-mode check](fifa15/README.md#frozen-at-the-language-screen).
 For FIFA 16, use **diagnostics/16 Check the install (FIFA 16).command**.
 

@@ -32,17 +32,21 @@ user to pass language selection. No game or emulator DLL is included here.
 
 Quit CrossOver, then double-click **FIFA 15.command** or run
 `./setup.sh --fifa15`. It configures the bottle where Aurora is installed,
-including FIFA 15's `dinput8` and C runtime overrides. It keeps an installed
-old standalone connector in `Aurora15`; otherwise the common default is
-`Aurora17`. An explicit `AURORA_BOTTLE` or `FIFA15_BOTTLE` still wins.
+including FIFA 15's `dinput8` and C runtime overrides. That is `Aurora17` by default,
+the same bottle as FIFA 17, or `Aurora15` when Aurora (or the old standalone
+connector) is installed there. An explicit `AURORA_BOTTLE` or `FIFA15_BOTTLE` still wins.
 Other bottles require an explicit choice, which setup prints before changing
-anything. **Fix my installation.command** also repairs FIFA 15 in its Aurora
-bottle when the game folder is found. Setup does not test an online match.
+anything. **START HERE.command**, **Both games.command** and **Fix my
+installation.command** also add FIFA 15 to that bottle whenever they find
+its folder. If the game opens but never connects, run **FIFA 15.command**
+again and check that FIFA 15's row in **Check the install** does not say
+"missing dinput8". Setup does not test an online match.
 
 ## With Aurora15Connector
 
-For a new standalone install, run `AURORA_BOTTLE=Aurora15 ./setup.sh --fifa15`
-first. Run `Aurora15Connector-*.exe` in the `Aurora15` bottle after `./setup.sh --fifa15`. The connector
+This is the exception, not the default: a new install never makes
+`Aurora15`. Only for a new standalone connector install, run
+`AURORA_BOTTLE=Aurora15 ./setup.sh --fifa15` first. Run `Aurora15Connector-*.exe` in the `Aurora15` bottle after `./setup.sh --fifa15`. The connector
 replaces `ItsAMe_Origin.dll` with its own version, checks the original's hash first, and hosts the
 Origin service the game's SDK connects to on 127.0.0.1:3216 — so the freeze does not occur with it,
 and `fifa15-offline.sh` must be **reverted** before running it. Sign-in, content download, game
@@ -54,7 +58,7 @@ port 3216 is in use, quit CrossOver and run `./setup.sh --unstick`.
 
 ## Frozen at the language screen
 
-`Both games.command` configures the bottles; it does not launch FIFA 15 or
+`Both games.command` configures the bottle; it does not launch FIFA 15 or
 apply its offline patch. A successful setup does not check the Origin connection
 that the game waits for at the language screen.
 
