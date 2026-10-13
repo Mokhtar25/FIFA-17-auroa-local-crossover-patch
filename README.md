@@ -208,8 +208,16 @@ Say which version you have. Setup prints it under its title, and
 **Check the install** shows the package's version next to the one that last
 installed or repaired your copy.
 
-For FIFA 17, double-click **Diagnostics.command**. It collects the logs a bug report needs
-into one zip in the **diagnostics** folder and opens that folder for you.
+Whatever the game, and even when setup stopped before it made anything,
+double-click **Diagnostics.command**. It collects what a bug report needs into
+one `fifa-diagnostics-<date>.zip` in the **diagnostics** folder, prints its full
+path, and opens that folder for you. Send that zip. Its `summary.txt` is a page
+that says what was found: the bottles and their launchers, where each game is,
+which bottle has each game's DLL overrides, every `BAD` from the checks, and the
+end of the newest setup run. Every double-click that runs setup also saves its
+window in `~/Library/Logs/FIFA-CrossOver`, and the zip includes those. Your home
+folder, e-mail addresses and anything that looks like a password, token or
+session value are blanked out of every file in it.
 
 For FIFA 15, use **diagnostics/13 Check the install (FIFA 15).command**.
 FIFA 15 opens but does not connect? Its settings are missing from the bottle
@@ -230,7 +238,7 @@ The same actions from Terminal, if you prefer:
 ./setup.sh --verify     # checks everything, changes nothing; starts with a table
                         # of every game and launcher in the bottle
 ./setup.sh --unstick    # bottle stuck loading forever? quit CrossOver, run this
-./setup.sh --bundle     # zips FIFA 17 logs for a bug report (no passwords or keys)
+./setup.sh --bundle     # zips everything a bug report needs, every game (redacted)
 ./setup.sh --play-log   # FIFA 17 crashes on every PLAY? identifies the module
 
 ./setup.sh --fifa15            # set FIFA 15 up

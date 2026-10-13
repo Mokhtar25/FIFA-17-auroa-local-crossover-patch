@@ -558,12 +558,16 @@ double-click **Diagnostics.command**, or:
 ./setup.sh --bundle
 ```
 
-It writes `aurora17-bundle-<date>.zip` into the **diagnostics** folder beside
-`setup.sh`, with the report, the Aurora logs, the bottle's hosts file and
-settings, the Mac's network set-up (interfaces and resolvers, no hardware
-addresses), and the checksums. It contains no account, password or session
-token. `./setup.sh --report` prints the same diagnosis
-without the logs and saves it as `diagnostics/report.txt`.
+It writes `fifa-diagnostics-<date>.zip` into the **diagnostics** folder beside
+`setup.sh`, for every game and with or without a CrossOver-FIFA copy: a
+one-page `summary.txt`, the checks of FIFA 17, 15, 16 and 21, the saved setup
+runs (`~/Library/Logs/FIFA-CrossOver`), each FIFA bottle's settings, DLL
+overrides, hosts file and launcher logs, where each game was found, what is
+running, the report, the Mac's network set-up (interfaces and resolvers, no
+hardware addresses), and the checksums. Your home folder, e-mail addresses and
+anything that looks like a password, token or session value are blanked out of
+every file; `diagnostics/README.md` lists it all. `./setup.sh --report` prints
+the same diagnosis without the logs and saves it as `diagnostics/report.txt`.
 
 Every other check and repair is a double-click in that folder too — one
 `.command` file each, listed in `diagnostics/README.md`. Nothing there needs

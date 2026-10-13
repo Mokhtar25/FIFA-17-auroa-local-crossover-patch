@@ -252,8 +252,11 @@ fi
 # Colour, only when the output is a terminal. Piped or saved output -- the
 # report file, the bundle -- stays plain. NO_COLOR=1 turns it off anywhere.
 # Checked on every call, not once: --report runs these inside a pipe to tee.
+# CX_COLOR=1 is the double-click commands saying the pipe ends in a Terminal
+# window: they save a copy of the run (lib/runlog.zsh) and take the colour
+# out of that copy themselves.
 _paint() {
-    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    if { [ -t 1 ] || [ "${CX_COLOR:-}" = 1 ]; } && [ -z "${NO_COLOR:-}" ]; then
         C_RED=$'\e[1;31m' C_GRN=$'\e[32m' C_YEL=$'\e[33m' C_OFF=$'\e[0m'
     else
         C_RED='' C_GRN='' C_YEL='' C_OFF=''
@@ -4532,13 +4535,22 @@ launch_progress() {
 report_mode() {
     local app="$1"
     local out; out="$(diagnostics_dir)/report.txt"
+    # report.txt is a file even when a double-click's Terminal is at the end
+    # of the pipe: no colour codes in it.
+    local CX_COLOR=0
 
     {
         print -r -- "==== aurora17 report ===================================="
         print -r -- "when      $(date '+%Y-%m-%d %H:%M:%S %z')"
         print -r -- "macOS     $(sw_vers -productVersion) ($(uname -m)), build $(sw_vers -buildVersion 2>/dev/null)"
         print -r -- "mac       $(sysctl -n hw.model 2>/dev/null), $(( $(sysctl -n hw.memsize 2>/dev/null || print 0) / 1073741824 )) GB"
-        print -r -- "app       $app"
+        # A setup that stopped before the copy was made is exactly when a
+        # report is asked for, so a missing copy is said, not a stop.
+        if [ -d "$app" ]; then
+            print -r -- "app       $app"
+        else
+            print -r -- "app       $app  -- NOT THERE: no CrossOver-FIFA copy has been made"
+        fi
         print -r -- "version   $(crossover_version "$app")"
         print -r -- "bottle    $BOTTLE_DIR/$BOTTLE"
         # Which package wrote this. A report from an older setup.sh has fewer
@@ -5086,6 +5098,582 @@ collect_network_snapshot() {
     return 0
 }
 
+# ---------------------------------------------------- the diagnostics bundle
+# One zip that answers "what is wrong" without a second round trip: a page of
+# summary first, then the checks of every game, the saved setup runs, each
+# FIFA bottle's settings and launcher logs, where each game was found and
+# what is running. Everything here only reads; nothing is changed or sent.
+
+# Where the double-click commands save each run (lib/runlog.zsh).
+SETUP_LOG_DIR="${CX_RUNLOG_DIR:-$HOME/Library/Logs/FIFA-CrossOver}"
+# The most of one file a bundle carries, from its end, which is where the
+# failure is. A CrossOver log of a launch gets more: its head is in the
+# extract beside it, and the whole log was the point of making one.
+BUNDLE_FILE_CAP=1048576
+BUNDLE_CXLOG_CAP=4194304
+# How long one check may take before it is stopped. A --verify that hangs
+# must not cost the rest of the bundle.
+BUNDLE_CHECK_TIMEOUT="${CX_BUNDLE_CHECK_TIMEOUT:-90}"
+
+# The one privacy filter. Every file in the bundle goes through it on the way
+# into the zip (bundle_finish_tree), so what the end message promises holds
+# for each file, including ones added here later:
+#   * the home folder becomes ~, so the Mac's account name is not in it
+#   * the value after a key naming a token, password, passwd, secret,
+#     session, auth, ticket, cookie, bearer or API key becomes <redacted>,
+#     in key=value, key: value, "key": "value", "key"=value (the registry's
+#     form) and "Authorization: Bearer x". A short number, true/false and the
+#     like stay: "auth=0" in a launch summary is a count, not a secret.
+#   * e-mail addresses become <email>
+# awk, not sed: the keys must match without case, and macOS awk has no flag
+# for that, so each pattern is matched against a lowered copy of the line.
+# Under LC_ALL=C tolower changes no byte's place, so where it matched in the
+# copy is where it is in the line.
+bundle_redact() {
+    LC_ALL=C R_HOME="$HOME" R_HOMEA="${HOME:A}" awk '
+        function lit(s, f, r,   out, i) {
+            if (length(f) < 2) return s
+            out = ""
+            while ((i = index(s, f)) > 0) { out = out substr(s, 1, i - 1) r; s = substr(s, i + length(f)) }
+            return out s
+        }
+        function harmless(v,   l) {
+            l = tolower(v)
+            if (l == "" || l ~ /^[0-9]$/ || l ~ /^[0-9][0-9]$/ || l ~ /^[0-9][0-9][0-9]$/ || l ~ /^[0-9][0-9][0-9][0-9]$/) return 1
+            return (l ~ /^(true|false|null|none|yes|no|ok|empty|missing|<redacted>)$/)
+        }
+        # Every match of WHOLE in s: PRE is the key and separator it starts
+        # with, kept; the rest is the value, replaced, except a closing
+        # quote (POST), which is kept too.
+        function scrub(s, whole, pre, post,   out, st, ln, m, pl, v, q) {
+            out = ""
+            while (match(tolower(s), whole)) {
+                st = RSTART; ln = RLENGTH
+                m = substr(s, st, ln)
+                match(tolower(m), pre); pl = RLENGTH
+                v = substr(m, pl + 1); q = ""
+                if (post != "" && substr(v, length(v)) == post) { q = post; v = substr(v, 1, length(v) - 1) }
+                if (harmless(v)) out = out substr(s, 1, st + ln - 1)
+                else out = out substr(s, 1, st - 1) substr(m, 1, pl) "<redacted>" q
+                s = substr(s, st + ln)
+            }
+            return out s
+        }
+        function emails(s,   out) {
+            out = ""
+            while (match(tolower(s), MAIL)) { out = out substr(s, 1, RSTART - 1) "<email>"; s = substr(s, RSTART + RLENGTH) }
+            return out s
+        }
+        BEGIN {
+            K = "[a-z0-9_.-]*(token|password|passwd|secret|session|auth|ticket|cookie|bearer|apikey|api_key)[a-z0-9_.-]*"
+            Q = "\""
+            SEP = "[ \t]*[=:][ \t]*"
+            MAIL = "[a-z0-9._%+-]+@[a-z0-9-]+(\\.[a-z0-9-]+)*\\.[a-z][a-z]+"
+        }
+        {
+            s = lit(lit($0, ENVIRON["R_HOMEA"], "~"), ENVIRON["R_HOME"], "~")
+            s = scrub(s, Q K Q SEP Q "[^" Q "]*" Q, "^" Q K Q SEP Q, Q)
+            s = scrub(s, Q K Q SEP "[^ \t" Q "]+", "^" Q K Q SEP, "")
+            s = scrub(s, "bearer[ \t]+[^ \t" Q "\047,;<]+", "^bearer[ \t]+", "")
+            s = scrub(s, K SEP "[^ \t" Q "\047,;&<]+", "^" K SEP, "")
+            print emails(s)
+        }
+    '
+}
+
+# Copies one file into the bundle, its last CAP bytes when it is bigger. The
+# filter and the binary check are bundle_finish_tree's, for every file at once.
+bundle_copy() {
+    local src="$1" dest="$2" cap="${3:-$BUNDLE_FILE_CAP}" size
+    [ -f "$src" ] || return 0
+    mkdir -p "${dest:h}" 2>/dev/null || return 0
+    size="$(stat -f %z "$src" 2>/dev/null || print 0)"
+    if [ "$size" -gt "$cap" ]; then
+        { print -r -- "[the first $((size - cap)) of $size bytes are left out; this is the end of ${src:t}]"
+          tail -c "$cap" "$src"; } > "$dest" 2>/dev/null || true
+    else
+        cp "$src" "$dest" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# The newest N files of a list, newest first.
+bundle_newest() {
+    local n="$1"; shift
+    (( $# )) || return 0
+    /bin/ls -t -- "$@" 2>/dev/null | head -"$n"
+    return 0
+}
+
+# First 16 hex digits of a file's SHA-256, the form the rest of setup.sh prints.
+bundle_sha16() { shasum -a 256 "$1" 2>/dev/null | cut -c1-16; }
+
+# The last pass before the zip, over every file: UTF-16 text (Windows
+# programs write it) made UTF-8, anything else binary taken out and named in
+# left-out.txt, every file cut to its cap and run through bundle_redact.
+bundle_finish_tree() {
+    setopt localoptions nullglob
+    local dir="$1" f tmp bom n1 n2 cap size
+    local -a dropped
+    dropped=()
+    for f in "$dir"/**/*(.D); do
+        tmp="$f.redact-tmp"
+        bom="$(head -c 2 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+        if [ "$bom" = fffe ] || [ "$bom" = feff ]; then
+            iconv -f UTF-16 -t UTF-8 "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" || rm -f "$tmp"
+        fi
+        n1="$(head -c 65536 "$f" 2>/dev/null | wc -c | tr -d ' ')"
+        n2="$(head -c 65536 "$f" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')"
+        if [ "$n1" != "$n2" ]; then
+            dropped+=( "${f#$dir/}" ); rm -f "$f"; continue
+        fi
+        cap=$BUNDLE_FILE_CAP
+        [[ "$f" == *.cxlog ]] && cap=$BUNDLE_CXLOG_CAP
+        size="$(stat -f %z "$f" 2>/dev/null || print 0)"
+        if [ "$size" -gt "$cap" ]; then
+            { print -r -- "[the first $((size - cap)) of $size bytes are left out]"; tail -c "$cap" "$f"; } > "$tmp" 2>/dev/null \
+                && mv -f "$tmp" "$f" || rm -f "$tmp"
+        fi
+        if bundle_redact < "$f" > "$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$f"
+        else
+            # A file the filter could not read is not sent unfiltered.
+            rm -f "$tmp" "$f"; dropped+=( "${f#$dir/} (could not be filtered)" )
+        fi
+    done
+    if (( ${#dropped} )); then
+        { print -r -- "Left out because they are not text:"
+          for f in $dropped; do print -r -- "  $f"; done; } | bundle_redact > "$dir/left-out.txt"
+    fi
+    return 0
+}
+
+# The Windows users of a bottle that are people's: every CrossOver bottle has
+# "crossover"; Public is shared files, never a user.
+bundle_bottle_users() {
+    local u
+    for u in "$BOTTLE_DIR/$1/drive_c/users"/*(N/); do
+        [ "${u:t}" = Public ] || print -r -- "$u"
+    done
+    return 0
+}
+
+# The launchers bottle $1 has, one name per line, found by the files each one
+# leaves, so this needs no Wine and no copy.
+bundle_bottle_launchers() {
+    local b="$1" u kind
+    local -a got
+    got=()
+    for u in ${(f)"$(bundle_bottle_users "$b")"}; do
+        [ -f "$u/AppData/Local/Aurora15Connector/Aurora.exe" ] && got+=( "Aurora.exe" )
+        if [ -f "$u/AppData/Local/Aurora15Connector/Aurora15Connector.exe" ]; then
+            kind="$(aurora_bottle_kind "$b" 2>/dev/null || true)"
+            if [ "$kind" = modern ]; then got+=( "Aurora launcher (as Aurora15Connector.exe)" )
+            else got+=( "old Aurora15Connector (FIFA 15 only)" ); fi
+        fi
+        [ -d "$u/AppData/Local/Aurora17" ] && got+=( "Aurora17Connector record" )
+        { [ -f "$u/AppData/Local/CAS/cas.exe" ] || [ -f "$u/AppData/Roaming/CAS/launcher.log" ]; } && got+=( "CAS" )
+        [ -d "$u/AppData/Local/Impulsum" ] && got+=( "Impulsum17 logs" )
+        local -a rb; rb=( "$u/AppData/Local"/RebornFUT*(N/) )
+        (( ${#rb} )) && got+=( "RebornFUT" )
+    done
+    local -a rp; rp=( "$BOTTLE_DIR/$b/drive_c/Program Files"/RebornFUT*(N/) )
+    (( ${#rp} )) && got+=( "RebornFUT" )
+    (( ${#got} )) && print -l -- ${(u)got}
+    return 0
+}
+
+# A FIFA program has its own Wine settings in this registry file.
+bundle_reg_names_fifa() {
+    LC_ALL=C grep -qiE '^\[Software\\\\Wine\\\\AppDefaults\\\\(fifa1[3-7]|_fifa17|fifa21)\.exe' "$1" 2>/dev/null
+}
+
+# Whether bottle $1 is worth collecting: it is a bottle, and something FIFA is
+# in it, or it is one of the bottles setup.sh makes or was last told to use.
+bundle_bottle_is_fifa() {
+    local b="$1" rb=""
+    [ -f "$BOTTLE_DIR/$b/cxbottle.conf" ] || return 1
+    [ -f "$RECEIPT" ] && rb="$(sed -n 's/^bottle=//p' "$RECEIPT" 2>/dev/null | head -1)"
+    case "$b" in
+        "$BOTTLE"|Aurora17|Aurora15|FIFA16|"${FIFA17_BOTTLE:-Aurora17}"|"${FIFA15_BOTTLE:-Aurora15}"|"${FIFA16_BOTTLE:-FIFA16}") return 0 ;;
+    esac
+    [ -n "$rb" ] && [ "$b" = "$rb" ] && return 0
+    [ -f "$BOTTLE_DIR/$b/cxfifa-gate.log" ] && return 0
+    [ -n "$(bundle_bottle_launchers "$b")" ] && return 0
+    bundle_reg_names_fifa "$BOTTLE_DIR/$b/user.reg"
+}
+
+# The sections of a registry file whose key starts with one of the given
+# prefixes, without case. Only these ever leave the Mac: user.reg and
+# system.reg as a whole hold far more than Wine's settings.
+bundle_reg_sections() {
+    local reg="$1"; shift
+    [ -f "$reg" ] || return 0
+    LC_ALL=C A17_PREFIXES="${(pj:\n:)@}" awk '
+        BEGIN { n = split(tolower(ENVIRON["A17_PREFIXES"]), p, "\n") }
+        substr($0,1,1)=="[" {
+            on = 0
+            for (i = 1; i <= n; i++) if (index(tolower($0), p[i]) == 1) on = 1
+            if (on) print ""
+        }
+        on { print }
+    ' "$reg" 2>/dev/null
+    return 0
+}
+
+# One bottle's folder in the bundle: its settings, its registry's Wine
+# sections, its hosts file, its launchers and their newest logs.
+bundle_collect_bottle() {
+    setopt localoptions nullglob
+    local b="$1" out="$2" bd="$BOTTLE_DIR/$1" u f kind keep a ini
+    local -a candidates found
+    mkdir -p "$out/logs" 2>/dev/null || return 0
+
+    sed -n '/^\[EnvironmentVariables\]/,$p' "$bd/cxbottle.conf" > "$out/environment.txt" 2>/dev/null || true
+    {
+        print -r -- "From $bd/user.reg: the DLL overrides, bottle-wide and per program."
+        bundle_reg_sections "$bd/user.reg" '[Software\\Wine\\DllOverrides]' '[Software\\Wine\\AppDefaults\\'
+        print -r -- ""
+        print -r -- "From $bd/system.reg: the DNS Client service (FIFA 21 needs it)."
+        if LC_ALL=C grep -qiF '[System\\CurrentControlSet\\Services\\Dnscache' "$bd/system.reg" 2>/dev/null; then
+            bundle_reg_sections "$bd/system.reg" '[System\\CurrentControlSet\\Services\\Dnscache'
+        else
+            print -r -- "(no Dnscache key)"
+        fi
+    } > "$out/registry.txt" 2>&1
+    bundle_copy "$bd/drive_c/windows/system32/drivers/etc/hosts" "$out/hosts.txt"
+    [ -f "$out/hosts.txt" ] || print -r -- "(no hosts file in this bottle)" > "$out/hosts.txt"
+
+    {
+        print -r -- "Launchers found in $b:"
+        f="$(bundle_bottle_launchers "$b")"
+        print -r -- "${f:-  (none)}" | sed 's/^\([^ ]\)/  \1/'
+        print -r -- ""
+        for u in ${(f)"$(bundle_bottle_users "$b")"}; do
+            for f in "$u/AppData/Local/Aurora15Connector"/*.exe "$u/AppData/Local/CAS/cas.exe" \
+                     "$u/AppData/Local"/RebornFUT*/*.exe "$bd/drive_c/Program Files"/RebornFUT*/*.exe; do
+                [ -f "$f" ] && print -r -- "  $(bundle_sha16 "$f")  $(stat -f %z "$f" 2>/dev/null) bytes  ${f#$bd/}"
+            done
+            ini="$u/AppData/Local/Aurora15Connector/Aurora15Connector.ini"
+            if [ -f "$ini" ]; then
+                print -r -- ""
+                print -r -- "${ini#$bd/}: the game folders and servers it names"
+                LC_ALL=C grep -E '^[A-Za-z0-9]*(Path|Server|Host|Url)=' "$ini" | tr -d '\r' | sed 's/^/  /'
+            fi
+        done
+        print -r -- ""
+        print -r -- "PowerShell in the bottle (system32/WindowsPowerShell/v1.0):"
+        found=( "$bd/drive_c/windows/system32/WindowsPowerShell/v1.0"/*.exe )
+        (( ${#found} )) || print -r -- "  (none)"
+        for f in $found; do
+            kind="not one of this package's stand-ins"
+            cmp -s "$f" "$HERE/aurora17/powershell.exe" 2>/dev/null && kind="the shipped Aurora17 stand-in"
+            cmp -s "$f" "$CAS_PS" 2>/dev/null && kind="the shipped CAS stand-in"
+            print -r -- "  $(bundle_sha16 "$f")  ${f:t}  $kind"
+        done
+    } > "$out/launchers.txt" 2>&1
+
+    for u in ${(f)"$(bundle_bottle_users "$b")"}; do
+        # The Aurora launcher (Aurora.exe, or under its old name): its newest
+        # 20 log files, one folder per game, kept where they were.
+        a="$u/AppData/Local/Aurora15Connector/logs"
+        if [ -d "$a" ]; then
+            for f in ${(f)"$(bundle_newest 20 "$a"/**/*(.))"}; do
+                [ -n "$f" ] && bundle_copy "$f" "$out/logs/aurora/${f#$a/}"
+            done
+        fi
+        # Aurora17Connector. Every connector log, and the newest few of the
+        # other two kinds. Aurora writes one connector log per PLAY and that
+        # is where the launcher's error codes land (ERROR [Code 25]: ...), so
+        # keeping only the newest three lost the code for most of the launches
+        # in a bundle: one bundle held 21 whole sessions in redirect-shim.log
+        # and 3 connector logs. They are 1-7 KB each. Server and client logs
+        # are the big ones and the newest answer the question; the server's
+        # stderr (server-*.log.err) is where a crash lands, and the old glob
+        # (server-*.log) never matched it.
+        a="$u/AppData/Local/Aurora17/Logs"
+        if [ -d "$a" ]; then
+            for kind in connector server client; do
+                keep=8; [ "$kind" = connector ] && keep=200
+                candidates=( "$a"/$kind-*.log "$a"/$kind-*.log.err )
+                for f in ${(f)"$(bundle_newest "$keep" "${candidates[@]}")"}; do
+                    [ -n "$f" ] && bundle_copy "$f" "$out/logs/aurora17/${f:t}"
+                done
+            done
+            for f in redirect-shim.log wire-transcript.log; do
+                bundle_copy "$a/$f" "$out/logs/aurora17/$f"
+            done
+        fi
+        bundle_copy "$u/AppData/Roaming/CAS/launcher.log" "$out/logs/cas/launcher.log"
+        for f in "$u/AppData/Local/CAS/content"/*/installed.json; do
+            bundle_copy "$f" "$out/logs/cas/${${f:h}:t}-installed.json"
+        done
+        for f in ${(f)"$(bundle_newest 10 "$u/AppData/Local/Impulsum"/*.log)"}; do
+            [ -n "$f" ] && bundle_copy "$f" "$out/logs/impulsum/${f:t}"
+        done
+    done
+    bundle_copy "$bd/cxfifa-gate.log" "$out/logs/cxfifa-gate.log"
+    return 0
+}
+
+# The bottle each game is set up in by default, as setup.sh --<game> picks it.
+bundle_game_bottle() {
+    case "$1" in
+        fifa15) ( unset AURORA_BOTTLE; f15_default_bottle 2>/dev/null ) || print -r -- "${FIFA17_BOTTLE:-Aurora17}" ;;
+        fifa16) print -r -- "${FIFA16_BOTTLE:-FIFA16}" ;;
+        *)      print -r -- "${AURORA_BOTTLE_GIVEN:-${FIFA17_BOTTLE:-Aurora17}}" ;;
+    esac
+}
+
+# The override a game cannot start right without, as "dll for exe", and
+# whether bottle $2 has it. version counts only bottle-wide (OVERRIDE_EXES).
+bundle_key_override() {
+    local g="$1"
+    case "$g" in
+        fifa15) print -r -- "dinput8 for fifa15.exe" ;;
+        fifa17) print -r -- "version (bottle-wide, for FIFA17.exe)" ;;
+        fifa21) print -r -- "version (bottle-wide, for FIFA21.exe)" ;;
+        fifa13) print -r -- "version (bottle-wide, for fifa13.exe)" ;;
+        *) return 1 ;;
+    esac
+}
+bundle_key_override_set() {
+    local g="$1" BOTTLE="$2"
+    case "$g" in
+        fifa15) dll_native_for dinput8 fifa15.exe ;;
+        fifa13|fifa17|fifa21) dll_native_global version ;;
+        *) return 1 ;;
+    esac
+}
+
+# games.txt: every folder each game could be played from, and what is in the
+# one it is played from.
+bundle_games() {
+    setopt localoptions nullglob
+    local g gb l d f exe size
+    for g in $GT_GAMES; do
+        exe="$(game_exe_of "$g")"
+        gb="$(bundle_game_bottle "$g")"
+        print -r -- "==== $(game_label_of "$g") ($exe), looked for as from the $gb bottle"
+        l="$( BOTTLE="$gb"; game_dir_candidates "$g" 2>/dev/null || true )"
+        if [ -z "$l" ]; then
+            print -r -- "not found"
+            d="$(game_dir_choice "$g" 2>/dev/null || true)"
+            [ -n "$d" ] && print -r -- "(the saved choice is $d, which has no $exe today)"
+            print -r -- ""
+            continue
+        fi
+        print -r -- "candidates, best first (sources, folder):"
+        print -r -- "$l" | sed 's/^/  /'
+        d="${${l%%$'\n'*}#*$'\t'}"
+        print -r -- ""
+        print -r -- "in $d:"
+        for f in "$d"/*.(dll|DLL|exe|EXE|ini|INI)(.); do
+            size="$(stat -f %z "$f" 2>/dev/null || print 0)"
+            if [ "$size" -lt 20971520 ]; then
+                print -r -- "  $(bundle_sha16 "$f")  $(printf '%10s' "$size")  ${f:t}"
+            else
+                print -r -- "  (not hashed)      $(printf '%10s' "$size")  ${f:t}"
+            fi
+        done
+        if [ -f "$d/aurora17-redirect.ini" ]; then
+            print -r -- ""
+            print -r -- "aurora17-redirect.ini:"
+            head -c 65536 "$d/aurora17-redirect.ini" | tr -d '\r' | sed 's/^/  /'
+        fi
+        if [ "$g" = fifa15 ]; then
+            print -r -- ""
+            print -r -- "fifa15-offline.sh check:"
+            /bin/zsh "$HERE/fifa15/fifa15-offline.sh" check "$d" < /dev/null 2>&1 | head -20 | sed 's/^/  /' || true
+            if [ -f "$d/.aurora15/legends/state.json" ]; then
+                print -r -- ""
+                print -r -- ".aurora15/legends/state.json:"
+                head -c 65536 "$d/.aurora15/legends/state.json" | sed 's/^/  /'
+                print -r -- ""
+            fi
+        fi
+        if [ "$g" = fifa17 ] && [ -d "$d/.crossover-fifa" ]; then
+            print -r -- ""
+            print -r -- ".crossover-fifa (the folder gate's copies):"
+            ( cd "$d/.crossover-fifa" && ls -lR . 2>&1 | head -200 | sed 's/^/  /' )
+        fi
+        print -r -- ""
+    done
+    return 0
+}
+
+# processes.txt: what of Wine, CrossOver and the launchers is running, and
+# which ports they listen on.
+bundle_processes() {
+    local pat='wine|crossover|cxrun|cxbottle|fifa|aurora|cas[.]exe|impulsum|reborn|msedgewebview2'
+    local ps_out pids
+    ps_out="$(ps -axo pid,ppid,etime,command 2>/dev/null || true)"
+    # By the program, not the whole line: this package's own folder is
+    # often called FIFA-something, and every shell started in it would
+    # match. A Windows program shows as its Windows path (C:\...).
+    local pick='NR > 1 && (tolower($4) ~ pat || $4 ~ /^[A-Za-z]:\\/)'
+    print -r -- "---- processes (ps -axo pid,ppid,etime,command, programs named like: $pat)"
+    print -r -- "$ps_out" | awk -v pat="$pat" "NR == 1 || ($pick)" | cut -c1-400
+    pids="$(print -r -- "$ps_out" | awk -v pat="$pat" "$pick {print \$1}" | tr '\n' ',')"
+    pids="${pids%,}"
+    print -r -- ""
+    print -r -- "---- TCP ports they listen on"
+    if [ -n "$pids" ]; then
+        /usr/sbin/lsof -nP -a -p "$pids" -iTCP -sTCP:LISTEN 2>/dev/null || print -r -- "(none)"
+    else
+        print -r -- "(none of them is running)"
+    fi
+    print -r -- ""
+    print -r -- "---- ports 3216 and 47170-47173 (Aurora's), whoever holds them"
+    /usr/sbin/lsof -nP -iTCP:3216,47170-47173 2>/dev/null || print -r -- "(all free)"
+    return 0
+}
+
+# One read-only check as its own process: stdin from /dev/null, no dialogs,
+# no colour, and stopped after BUNDLE_CHECK_TIMEOUT seconds. A watcher that
+# polls, rather than one sleep for the whole time, ends as soon as the check
+# does and leaves nothing behind. Prints the exit code.
+bundle_run_check() {
+    local out="$1" pid watcher rc=0; shift
+    env -u AURORA_GAME -u AURORA_BOTTLE -u CX_COLOR -u CX_DIALOGS -u CX_RUNLOG_ACTIVE \
+        CX_NO_DIALOGS=1 NO_COLOR=1 "$@" < /dev/null > "$out" 2>&1 &
+    pid=$!
+    ( n=0
+      while kill -0 "$pid" 2>/dev/null; do
+          if [ "$n" -ge "$BUNDLE_CHECK_TIMEOUT" ]; then
+              print -r -- "" >> "$out"
+              print -r -- "[stopped after $BUNDLE_CHECK_TIMEOUT seconds]" >> "$out"
+              kill -TERM "$pid" 2>/dev/null; /bin/sleep 3; kill -KILL "$pid" 2>/dev/null
+              break
+          fi
+          /bin/sleep 1; n=$((n + 1))
+      done ) < /dev/null > /dev/null 2>&1 &
+    watcher=$!
+    wait "$pid" || rc=$?
+    wait "$watcher" 2>/dev/null || true
+    print -r -- "$rc"
+}
+
+# checks/: --verify for each game, each picking its own bottle.
+bundle_checks() {
+    local dir="$1" name rc
+    local -a args
+    mkdir -p "$dir" 2>/dev/null || return 0
+    for name in verify fifa15-verify fifa16-verify fifa21-verify; do
+        case "$name" in
+            verify) args=( --verify ) ;;
+            *) args=( "--${name%-verify}" --verify ) ;;
+        esac
+        say "  ./setup.sh ${(j: :)args}"
+        rc="$(bundle_run_check "$dir/$name.txt" /bin/zsh "$SELF" "${args[@]}")"
+        { print -r -- ""; print -r -- "==== exit code $rc"; } >> "$dir/$name.txt"
+        print -r -- "$name	$rc" >> "$dir/exit-codes.txt"
+    done
+    return 0
+}
+
+# The newest saved setup run that is not a diagnostics collection itself.
+bundle_newest_setup_log() {
+    setopt localoptions nullglob
+    local f
+    for f in ${(f)"$(bundle_newest 50 "$SETUP_LOG_DIR"/*.log)"}; do
+        case "${f:t}" in diagnostics-bundle*|diagnostics-report*) continue ;; esac
+        [ -n "$f" ] && { print -r -- "$f"; return 0; }
+    done
+    return 1
+}
+
+# summary.txt: one page that says what is wrong, for a person to read first.
+bundle_summary() {
+    local app="$1" work="$2" b l g gb d name rc f
+    local -a fifa other with without
+    local -A GT_DIR
+    print -r -- "FIFA CrossOver diagnostics, $(date '+%Y-%m-%d %H:%M:%S %z')"
+    print -r -- "================================================================"
+    print -r -- "patch       $PATCH_VERSION; last install or repair: $(installed_patch_version 2>/dev/null || print -r -- none recorded)"
+    print -r -- "macOS       $(sw_vers -productVersion 2>/dev/null) build $(sw_vers -buildVersion 2>/dev/null), $(uname -m), $(sysctl -n hw.model 2>/dev/null)"
+    if [ -d "$SRC" ]; then
+        print -r -- "CrossOver   $SRC, version $(crossover_version "$SRC")"
+    else
+        print -r -- "CrossOver   none at $SRC"
+    fi
+    if [ -d "$app" ]; then
+        print -r -- "copy        $app, version $(crossover_version "$app")"
+    else
+        print -r -- "copy        NONE: there is no CrossOver-FIFA copy at $app"
+        print -r -- "            (setup stopped before making it, or it was moved or deleted)"
+    fi
+    print -r -- ""
+
+    print -r -- "Bottles in $BOTTLE_DIR"
+    fifa=(); other=()
+    for d in "$BOTTLE_DIR"/*(N/); do
+        b="${d:t}"
+        if bundle_bottle_is_fifa "$b"; then fifa+=( "$b" ); else other+=( "$b" ); fi
+    done
+    (( ${#fifa} )) || print -r -- "  (no FIFA bottle)"
+    for b in $fifa; do
+        l="$(bundle_bottle_launchers "$b")"
+        print -r -- "  $b: ${${l:-no launcher}//$'\n'/, }$([ -f "$BOTTLE_DIR/$b/cxfifa-gate.log" ] && print -r -- ', FIFA 17 gate log')"
+    done
+    (( ${#other} )) && print -r -- "  others, not collected: ${(j:, :)other}"
+    print -r -- ""
+
+    print -r -- "Games"
+    for g in $GT_GAMES; do
+        gb="$(bundle_game_bottle "$g")"
+        l="$( BOTTLE="$gb"; game_dir_line "$g" 2>/dev/null || true )"
+        # game_dlls reads the folder from verify_games_table's GT_DIR.
+        GT_DIR[$g]="${l#*$'\t'}"
+        if [ -n "$l" ]; then
+            print -r -- "  $(game_label_of "$g")  found: ${l#*$'\t'}  ($(game_dir_source_says "$l"))"
+        else
+            print -r -- "  $(game_label_of "$g")  not found"
+        fi
+        if d="$(game_dir_choice_lost "$g" 2>/dev/null)"; then
+            print -r -- "           the saved choice $d has no $(game_exe_of "$g") today (drive not connected?)"
+        fi
+        if name="$(bundle_key_override "$g")"; then
+            with=(); without=()
+            for b in $fifa; do
+                if ( bundle_key_override_set "$g" "$b" ) 2>/dev/null; then with+=( "$b" ); else without+=( "$b" ); fi
+            done
+            l="$name: set in ${${(j:, :)with}:-no bottle}"
+            (( ${#without} )) && l="$l; not in ${(j:, :)without}"
+            print -r -- "           $l"
+        fi
+        if [ -d "$BOTTLE_DIR/$gb" ]; then
+            print -r -- "           in $gb, its bottle by default: overrides $( BOTTLE="$gb"; game_dlls "$g" 2>/dev/null || print -r -- '?' )"
+        else
+            print -r -- "           its bottle by default, $gb, does not exist"
+        fi
+    done
+    print -r -- ""
+
+    print -r -- "Checks (the BAD and STOPPED lines; all of it is in checks/)"
+    if [ -f "$work/checks/exit-codes.txt" ]; then
+        while IFS=$'\t' read -r name rc; do
+            print -r -- "  $name: exit code $rc"
+            LC_ALL=C grep -E '(^|[[:space:]])BAD[[:space:]]|STOPPED:|\[stopped after' "$work/checks/$name.txt" 2>/dev/null \
+                | head -25 | sed 's/^[[:space:]]*/      /'
+        done < "$work/checks/exit-codes.txt"
+    else
+        print -r -- "  (not run)"
+    fi
+    print -r -- ""
+
+    if f="$(bundle_newest_setup_log)"; then
+        rc="$(sed -n 's/^==== exit code \([0-9]*\).*/\1/p' "$f" | tail -1)"
+        print -r -- "Newest setup run: ${f:t}, exit code ${rc:-unknown (still running, or the window was closed)}"
+        print -r -- "---- its last 40 lines"
+        tail -40 "$f" | sed 's/^/  /'
+    else
+        print -r -- "No saved setup run in $SETUP_LOG_DIR"
+        print -r -- "(only runs from a double-click command of this version or later are saved)"
+    fi
+    return 0
+}
+
 # Everything --report prints, plus the log files themselves, in one zip. A
 # tester's first run is the only cheap chance to collect this: by the time they
 # have been asked three questions they have already deleted the bottle.
@@ -5094,41 +5682,38 @@ collect_network_snapshot() {
 bundle_mode() {
     setopt localoptions nullglob
     local app="$1"
+    # Every file here is plain text, even run from a double-click whose
+    # Terminal asked for colour (CX_COLOR, lib/runlog.zsh).
+    local CX_COLOR=0
     local stamp; stamp="$(date '+%Y%m%d-%H%M%S')"
     local dest; dest="$(diagnostics_dir)"
+    local name="fifa-diagnostics-$stamp" n=1
+    # Two in one second (a test, or a double double-click) get -2, -3.
+    while [ -e "$dest/$name.zip" ]; do n=$((n + 1)); name="fifa-diagnostics-$stamp-$n"; done
+    local zipf="$dest/$name.zip"
     # Collected in the temp folder and deleted once it is zipped: the zip is
     # the thing that gets sent, and a second unzipped copy of it beside the
     # commands is only something else to mistake for the one to attach.
-    local work
-    work="$(mktemp -d "${TMPDIR:-/tmp}/aurora17-bundle-$stamp.XXXXXX")" || return 1
-    local zipf="$dest/${work:t}.zip"
-
-    mkdir -p "$work/logs"
+    local root
+    root="$(mktemp -d "${TMPDIR:-/tmp}/fifa-diagnostics.XXXXXX")" || return 1
+    local work="$root/$name"
+    mkdir -p "$work"
 
     say "Collecting..."
     report_mode "$app" > "$work/report.txt" 2>&1 || true
 
-    local logs="$BOTTLE_DIR/$BOTTLE/drive_c/users/crossover/AppData/Local/Aurora17/Logs"
-    local f kind keep
-    # Every connector log, and the newest few of the other two kinds. Aurora
-    # writes one connector log per PLAY and that is where the launcher's error
-    # codes land (ERROR [Code 25]: ...), so keeping only the newest three lost
-    # the code for most of the launches in a bundle: one bundle held 21 whole
-    # sessions in redirect-shim.log and 3 connector logs. They are 1-7 KB each.
-    # Server and client logs are the big ones and the newest answer the
-    # question; the server's stderr (server-*.log.err) is where a crash lands,
-    # and the old glob (server-*.log) never matched it.
-    for kind in connector server client; do
-        keep=8; [ "$kind" = connector ] && keep=200
-        local -a candidates
-        candidates=( "$logs"/$kind-*.log(N) "$logs"/$kind-*.log.err(N) )
-        (( ${#candidates} )) || continue
-        for f in ${(f)"$(/bin/ls -t -- "${candidates[@]}" 2>/dev/null | head -"$keep")"}; do
-            [ -n "$f" ] && cp "$f" "$work/logs/" 2>/dev/null || true
-        done
-    done
-    for f in redirect-shim.log wire-transcript.log; do
-        [ -f "$logs/$f" ] && cp "$logs/$f" "$work/logs/" 2>/dev/null || true
+    # The checks, as their own processes, before the summary that quotes them.
+    if whence -w bundle_checks >/dev/null 2>&1; then
+        say "Running the checks (each stops after $BUNDLE_CHECK_TIMEOUT seconds at most):"
+        bundle_checks "$work/checks" || true
+    fi
+
+    # Each bottle with anything FIFA in it, whole; the rest by name only.
+    local d b
+    for d in "$BOTTLE_DIR"/*(N/); do
+        b="${d:t}"
+        bundle_bottle_is_fifa "$b" 2>/dev/null || continue
+        bundle_collect_bottle "$b" "$work/bottles/$b" || true
     done
 
     # The faulting module, when macOS caught the fault at all. Aurora's own logs
@@ -5149,14 +5734,19 @@ bundle_mode() {
         collect_network_snapshot "$work/network.txt" || true
     fi
 
-    local bh; bh="$(bottle_hosts_file)"
-    [ -f "$bh" ] && cp "$bh" "$work/bottle-hosts.txt" 2>/dev/null || true
     local rc; rc="$(hosts_receipt_file 2>/dev/null || true)"
     [ -n "$rc" ] && [ -f "$rc" ] && cp "$rc" "$work/hosts-mapping.json" 2>/dev/null || true
-    [ -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] \
-        && sed -n '/^\[EnvironmentVariables\]/,$p' "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" \
-           > "$work/bottle-environment.txt" 2>/dev/null || true
     [ -f "$RECEIPT" ] && cp "$RECEIPT" "$work/install-receipt.conf" 2>/dev/null || true
+    [ -f "$CHOICES_FILE" ] && cp "$CHOICES_FILE" "$work/choices.conf" 2>/dev/null || true
+
+    # The double-click commands' saved runs, newest ten.
+    local f
+    for f in ${(f)"$(bundle_newest 10 "$SETUP_LOG_DIR"/*.log)"}; do
+        [ -n "$f" ] && bundle_copy "$f" "$work/setup-logs/${f:t}"
+    done
+
+    bundle_games > "$work/games.txt" 2>&1 || true
+    bundle_processes > "$work/processes.txt" 2>&1 || true
 
     # What is actually installed, so a mismatched or half-copied payload shows
     # up without another round trip.
@@ -5165,48 +5755,63 @@ bundle_mode() {
         ( cd "$HERE/fixes" && shasum -a 256 -c SHA256SUMS 2>&1 ) || true
         ( cd "$HERE/aurora17" && shasum -a 256 -c SHA256SUMS 2>&1 ) || true
         print -r -- ""
-        print -r -- "installed in $app: (the .so hashes differ from the shipped"
-        print -r -- "ones by design -- they are re-signed on install. --verify"
-        print -r -- "compares Mach-O UUIDs, which signing does not change.)"
-        local w="$app/Contents/SharedSupport/CrossOver/lib/wine"
-        for f in $FILES $RESOLVER $GATE x86_64-unix/ws2_32.so; do
-            if [ -f "$w/$f" ]; then
-                print -r -- "  $(shasum -a 256 "$w/$f" | cut -c1-16)  $f"
-            else
-                print -r -- "  MISSING                    $f"
-            fi
-        done
-        print -r -- ""
-        print -r -- "minimum macOS each Mach-O file declares (LC_BUILD_VERSION minos; the"
-        print -r -- "shipped ones were built with the macOS 26 SDK for a 15.0 target):"
-        for f in $FILES $RESOLVER x86_64-unix/ws2_32.so; do
-            case "$f" in *.so|*.dylib) ;; *) continue ;; esac
-            [ -f "$w/$f" ] || continue
-            print -r -- "  $(otool -l "$w/$f" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')  $f"
-        done
+        if [ ! -d "$app" ]; then
+            print -r -- "installed: nothing, there is no copy at $app"
+        else
+            print -r -- "installed in $app: (the .so hashes differ from the shipped"
+            print -r -- "ones by design -- they are re-signed on install. --verify"
+            print -r -- "compares Mach-O UUIDs, which signing does not change.)"
+            local w="$app/Contents/SharedSupport/CrossOver/lib/wine"
+            for f in $FILES $RESOLVER $GATE x86_64-unix/ws2_32.so; do
+                if [ -f "$w/$f" ]; then
+                    print -r -- "  $(shasum -a 256 "$w/$f" | cut -c1-16)  $f"
+                else
+                    print -r -- "  MISSING                    $f"
+                fi
+            done
+            print -r -- ""
+            print -r -- "minimum macOS each Mach-O file declares (LC_BUILD_VERSION minos; the"
+            print -r -- "shipped ones were built with the macOS 26 SDK for a 15.0 target):"
+            for f in $FILES $RESOLVER x86_64-unix/ws2_32.so; do
+                case "$f" in *.so|*.dylib) ;; *) continue ;; esac
+                [ -f "$w/$f" ] || continue
+                print -r -- "  $(otool -l "$w/$f" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')  $f"
+            done
+        fi
     } > "$work/payload.txt" 2>&1
 
-    ( cd "${work:h}" && zip -qr "$zipf" "${work:t}" ) \
-        || { say "Could not write $zipf"; rm -rf "$work"; return 1 }
+    # Last, so it can quote the rest.
+    bundle_summary "$app" "$work" > "$work/summary.txt" 2>&1 || true
 
-    rm -rf "$work"
+    # The one filter, over every file, then the zip, summary.txt first in it.
+    bundle_finish_tree "$work"
+    ( cd "$root" && zip -q "$zipf" "$name/summary.txt" && zip -qr "$zipf" "$name" ) \
+        || { say "Could not write $zipf"; rm -rf "$root"; return 1 }
+
+    rm -rf "$root"
 
     # Keep the three newest zips and drop the rest, so running this after every
-    # failed attempt does not fill the folder up.
+    # failed attempt does not fill the folder up. The older name goes too.
     local old
-    for old in ${(f)"$(/bin/ls -t -- "$dest"/aurora17-bundle-*.zip(N) 2>/dev/null | tail -n +4)"}; do
+    for old in ${(f)"$(/bin/ls -t -- "$dest"/fifa-diagnostics-*.zip(N) 2>/dev/null | tail -n +4)"} \
+               "$dest"/aurora17-bundle-*.zip(N); do
         [ -n "$old" ] && rm -f "$old"
     done
 
     say ""
+    if [ ! -d "$app" ]; then
+        say "There is no CrossOver-FIFA copy at $app; everything else was collected."
+    fi
     say "Wrote $zipf"
     say ""
-    say "Send that file. It contains the checks above, the Aurora17 logs, any"
-    say "crash report macOS kept for the game or Wine, any CrossOver log of a"
-    say "launch (see --play-log), the bottle's hosts file and its settings, the"
-    say "Mac's network set-up (interfaces and resolvers, no hardware addresses),"
-    say "and the hashes of what is installed. It contains no account, password or"
-    say "session token."
+    say "Send that file. summary.txt in it is the page to read first. It holds the"
+    say "checks of every game, the saved setup runs, each FIFA bottle's settings,"
+    say "Wine DLL overrides and launcher logs, where each game was found, what is"
+    say "running, any crash report or CrossOver log of a launch, the Mac's network"
+    say "set-up (no hardware addresses) and the hashes of what is installed."
+    say "Your home folder, e-mail addresses and every value that looks like a"
+    say "password, token or session are blanked out, and no whole registry or"
+    say "program file is in it."
     say ""
     return 0
 }
@@ -6889,9 +7494,12 @@ if [ "$MODE" = report ]; then
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
     fi
-    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET.
-         Run ./setup.sh first. If the copy is somewhere else:
-             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --report"
+    # No copy is no reason to say nothing: the bottles, the logs and the
+    # checks are what tell why a setup stopped before it made one.
+    if [ ! -d "$TARGET" ]; then
+        note "there is no CrossOver-FIFA copy at $TARGET; reporting on the rest"
+        say "        (if the copy is somewhere else: AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --report)"
+    fi
     report_mode "$TARGET"
     exit 0
 fi
@@ -6901,9 +7509,12 @@ if [ "$MODE" = bundle ]; then
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
     fi
-    [ -d "$TARGET" ] || die $E_PAYLOAD "Nothing to report on at $TARGET.
-         Run ./setup.sh first. If the copy is somewhere else:
-             AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --bundle"
+    # Collected with or without the copy: a START HERE that stopped before
+    # making it is the case that most needs a bundle. summary.txt says so.
+    if [ ! -d "$TARGET" ]; then
+        note "there is no CrossOver-FIFA copy at $TARGET; collecting everything else"
+        say "        (if the copy is somewhere else: AURORA_TARGET=/path/to/CrossOver-FIFA.app ./setup.sh --bundle)"
+    fi
     bundle_mode "$TARGET" || exit $E_PERMISSION
     exit 0
 fi

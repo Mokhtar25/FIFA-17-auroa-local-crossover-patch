@@ -1,6 +1,7 @@
 .DS_Store
 *.orig
 diagnostics/aurora17-bundle-*.zip
+diagnostics/fifa-diagnostics-*.zip
 diagnostics/report.txt
 __pycache__/
 diagnostics/crash-logs/

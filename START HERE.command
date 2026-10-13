@@ -12,7 +12,11 @@ cd "${0:A:h}" || exit 1
 xattr -dr com.apple.quarantine . 2>/dev/null || true
 chmod +x ./setup.sh ./uninstall.sh 2>/dev/null || true
 
-if [ -t 1 ]; then RED=$'\e[1;31m' GRN=$'\e[32m' OFF=$'\e[0m'; else RED='' GRN='' OFF=''; fi
+# The whole run is also saved in ~/Library/Logs/FIFA-CrossOver, for
+# "1 Collect diagnostics" to send (lib/runlog.zsh).
+[ -f ./lib/runlog.zsh ] && source ./lib/runlog.zsh && runlog_start start-here "${0:A}" "$@"
+
+if [ -t 1 ] || [ "${CX_COLOR:-}" = 1 ]; then RED=$'\e[1;31m' GRN=$'\e[32m' OFF=$'\e[0m'; else RED='' GRN='' OFF=''; fi
 
 clear
 print -r -- ""

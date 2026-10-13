@@ -45,7 +45,16 @@ chmod +x "$HERE"/*.command "$HERE"/_action.zsh 2>/dev/null || true
 FLAG="${1:-}"
 [ -n "$FLAG" ] || { print -r -- "No action given."; exit 2 }
 
-if [ -t 1 ]; then RED=$'\e[1;31m' GRN=$'\e[32m' YEL=$'\e[33m' OFF=$'\e[0m'
+# The whole run is also saved in ~/Library/Logs/FIFA-CrossOver, which is
+# where "1 Collect diagnostics" looks (lib/runlog.zsh). Named after what ran:
+# fix-my-installation, diagnostics-verify-fifa15 and so on.
+RUNLOG_LABEL="diagnostics-${FLAG#--}"
+[ "$FLAG" = --repair ] && RUNLOG_LABEL=fix-my-installation
+case "${AURORA_GAME:-}" in fifa15|fifa16) RUNLOG_LABEL="$RUNLOG_LABEL-$AURORA_GAME" ;; esac
+[ -f "$RELEASE/lib/runlog.zsh" ] && source "$RELEASE/lib/runlog.zsh" \
+    && runlog_start "$RUNLOG_LABEL" "${0:A}" "$@"
+
+if [ -t 1 ] || [ "${CX_COLOR:-}" = 1 ]; then RED=$'\e[1;31m' GRN=$'\e[32m' YEL=$'\e[33m' OFF=$'\e[0m'
 else RED='' GRN='' YEL='' OFF=''; fi
 
 TITLE=''; typeset -a BLURB; BLURB=()
@@ -54,11 +63,13 @@ case "$FLAG" in
         TITLE="Collect diagnostics"
         BLURB=(
           "This gathers everything a bug report needs into one zip and puts it"
-          "in this diagnostics folder: the checks below, the newest Aurora17"
-          "logs, the bottle's settings and the hashes of what is installed."
+          "in this diagnostics folder: a one-page summary, the checks for every"
+          "game, the saved logs of setup runs, each FIFA bottle's settings and"
+          "launcher logs, where each game was found, and what is running."
           ""
-          "It changes nothing, and it sends nothing anywhere. It holds no"
-          "account, no password and no session token."
+          "It changes nothing, and it sends nothing anywhere. Your home folder,"
+          "e-mail addresses and anything that looks like a password, token or"
+          "session value are blanked out of every file in it."
         ) ;;
     --report)
         TITLE="Report"
@@ -248,7 +259,12 @@ case "$FLAG" in
         print -r -- ""
         print -r -- "  The files are in this folder:"
         print -r -- "    $HERE"
-        open "$HERE" 2>/dev/null || true ;;
+        # Finder only for a double-click on this Mac's own screen: never over
+        # ssh, never with dialogs turned off, never without a terminal (tests).
+        if [ -t 0 ] && [ -f "$RELEASE/lib/ui.zsh" ]; then
+            source "$RELEASE/lib/ui.zsh"
+            CX_DIALOGS=1 ui_gui_ok && { open "$HERE" 2>/dev/null || true; }
+        fi ;;
 esac
 
 print -r -- ""

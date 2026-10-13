@@ -78,7 +78,10 @@ class ScriptTests(unittest.TestCase):
 
     def test_bundle_empty_logs_and_unique_archives(self):
         source = (ROOT / "setup.sh").read_text()
-        function = source.split("bundle_mode() {", 1)[1].split("\n}\n", 1)[0]
+        # The whole bundle section: bundle_mode and the helpers before it.
+        section = source.split("# ---------------------------------------------------- the diagnostics bundle", 1)[1]
+        function = section.split("bundle_mode() {", 1)[0]
+        function += "bundle_mode() {" + section.split("bundle_mode() {", 1)[1].split("\n}\n", 1)[0]
         with tempfile.TemporaryDirectory(prefix="a17-tests-") as directory:
             work = Path(directory)
             (work / "diagnostics").mkdir()
@@ -102,24 +105,169 @@ bottle_hosts_file() { print -r -- "$PWD/missing-hosts"; }
 hosts_receipt_file() { return 1; }
 shasum() { return 0; }
 collect_crash_reports() { print -r -- "stub" > "$2"; }
+CHOICES_FILE="$PWD/missing-choices"
 '''
-            harness += "\nbundle_mode() {" + function + "\n}\n"
+            harness += "\n" + function + "\n}\n"
+            harness += '''
+bundle_checks() { :; }
+bundle_games() { print -r -- "games stub"; }
+bundle_processes() { print -r -- "processes stub"; }
+bundle_summary() { print -r -- "summary stub"; }
+'''
             harness += '\nbundle_mode "$PWD/missing.app"\nbundle_mode "$PWD/missing.app"\n'
+            (work / "diagnostics" / "aurora17-bundle-old.zip").write_bytes(b"old")
             result = subprocess.run(
                 ["/bin/zsh", "-c", harness], cwd=work,
-                env={**os.environ, "TMPDIR": directory},
+                env={**os.environ, "TMPDIR": directory, "HOME": directory},
                 capture_output=True, text=True, timeout=20,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            archives = list((work / "diagnostics").glob("*.zip"))
-            self.assertEqual(len(archives), 2)
+            archives = sorted((work / "diagnostics").glob("*.zip"))
+            # The same second twice: two names, and the old name is pruned.
+            self.assertEqual([a.name for a in archives],
+                             ["fifa-diagnostics-20260905-120000-2.zip",
+                              "fifa-diagnostics-20260905-120000.zip"])
             for archive in archives:
                 with zipfile.ZipFile(archive) as bundle:
-                    self.assertFalse(any("unrelated.txt" in name for name in bundle.namelist()))
-                    self.assertTrue(any(name.endswith("/report.txt") for name in bundle.namelist()))
-                    self.assertTrue(any(name.endswith("/crash-reports.txt")
-                                        for name in bundle.namelist()))
+                    names = bundle.namelist()
+                    self.assertTrue(names[0].endswith("/summary.txt"), names)
+                    self.assertFalse(any("unrelated.txt" in name for name in names))
+                    self.assertTrue(any(name.endswith("/report.txt") for name in names))
+                    self.assertTrue(any(name.endswith("/crash-reports.txt") for name in names))
             self.assertFalse(list(work.glob("aurora17-bundle-*")))
+            self.assertFalse(list(work.glob("fifa-diagnostics*")))
+
+
+class BundleTests(unittest.TestCase):
+    """./setup.sh --bundle, the real one, in a package copy with a HOME,
+    bottles and CrossOver-FIFA path of its own. It only reads, and its checks
+    run as child processes of the copied setup.sh."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="fifa-bundle-")
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name).resolve()
+        self.home = self.work / "home"
+        self.home.mkdir()
+        self.package = self.work / "package"
+        (self.package / "lib").mkdir(parents=True)
+        (self.package / "fifa15").mkdir()
+        shutil.copy2(ROOT / "setup.sh", self.package / "setup.sh")
+        shutil.copy2(ROOT / "VERSION", self.package / "VERSION")
+        shutil.copy2(ROOT / "fifa15/fifa15-offline.sh", self.package / "fifa15/fifa15-offline.sh")
+        for helper in ("ui.zsh", "runlog.zsh"):
+            shutil.copy2(ROOT / "lib" / helper, self.package / "lib" / helper)
+        self.bottles = self.work / "bottles"
+        self.bottles.mkdir()
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("AURORA_", "FIFA", "CX_", "SSH_"))}
+        self.env.update(HOME=str(self.home), TMPDIR=str(self.work),
+                        CX_BOTTLE_PATH=str(self.bottles),
+                        AURORA_TARGET=str(self.work / "no-copy.app"),
+                        AURORA_RECEIPT_DIR=str(self.work / "receipts"),
+                        CX_VOLUMES_DIR=str(self.work / "no-volumes"),
+                        CX_NO_DIALOGS="1", CX_BUNDLE_CHECK_TIMEOUT="60")
+
+    def run_setup(self, *args):
+        return subprocess.run(["/bin/zsh", str(self.package / "setup.sh"), *args],
+                              env=self.env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=300)
+
+    def bundle(self):
+        result = self.run_setup("--bundle")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        archives = list((self.package / "diagnostics").glob("fifa-diagnostics-*.zip"))
+        self.assertEqual(len(archives), 1)
+        self.assertIn(str(archives[0]), result.stdout)
+        with zipfile.ZipFile(archives[0]) as bundle:
+            names = bundle.namelist()
+            self.assertTrue(names[0].endswith("/summary.txt"), names)
+            files = {name.split("/", 1)[1]: bundle.read(name).decode()
+                     for name in names if not name.endswith("/")}
+        return result, files
+
+    def test_bundle_and_report_work_without_the_copy(self):
+        result, files = self.bundle()
+        copy = str(self.work / "no-copy.app")
+        self.assertIn("no CrossOver-FIFA copy at " + copy, result.stdout)
+        self.assertIn("NONE: there is no CrossOver-FIFA copy at " + copy, files["summary.txt"])
+        for name in ("report.txt", "checks/verify.txt", "checks/fifa15-verify.txt",
+                     "checks/fifa16-verify.txt", "checks/fifa21-verify.txt",
+                     "games.txt", "processes.txt", "payload.txt", "crash-reports.txt"):
+            self.assertIn(name, files)
+        self.assertRegex(files["checks/exit-codes.txt"], r"(?m)^fifa21-verify\t\d+$")
+        self.assertIn("==== exit code", files["checks/verify.txt"])
+        self.assertIn("No saved setup run", files["summary.txt"])
+        self.assertFalse((self.work / "no-copy.app").exists())
+        self.assertFalse(list(self.work.glob("fifa-diagnostics.*")))
+        report = self.run_setup("--report")
+        self.assertEqual(report.returncode, 0, report.stdout + report.stderr)
+        self.assertIn("NOT THERE", report.stdout)
+
+    def test_bundle_collects_an_aurora15_bottle_redacted(self):
+        bottle = self.bottles / "Aurora15"
+        aurora = bottle / "drive_c/users/crossover/AppData/Local/Aurora15Connector"
+        (aurora / "logs").mkdir(parents=True)
+        (bottle / "cxbottle.conf").write_text('[EnvironmentVariables]\n"CX_TEST" = "1"\n')
+        (aurora / "Aurora.exe").write_bytes(b"MZ\x00\x00")
+        (aurora / "Aurora15Connector.ini").write_text("FifaPath=C:\\FIFA 15\nSecretKey=x\n")
+        (aurora / "logs/launcher.log").write_text(
+            f"start token=abc123 from {self.home}/Games by someone@example.com\n")
+        (aurora / "account.json").write_text('{"refresh": "must-not-go"}')
+        (bottle / "user.reg").write_text(
+            "WINE REGISTRY Version 2\n\n"
+            "[Software\\\\Wine\\\\DllOverrides] 1700000000\n\"version\"=\"native,builtin\"\n\n"
+            "[Software\\\\Wine\\\\AppDefaults\\\\fifa15.exe\\\\DllOverrides] 1700000000\n"
+            "\"dinput8\"=\"native,builtin\"\n\n"
+            "[Software\\\\Valve\\\\Steam] 1700000000\n\"Login\"=\"private\"\n")
+        (self.bottles / "Unrelated").mkdir()
+        (self.bottles / "Unrelated/cxbottle.conf").write_text("[Bottle]\n")
+        logs = self.home / "Library/Logs/FIFA-CrossOver"
+        logs.mkdir(parents=True)
+        (logs / "fifa15-20260101-000000.log").write_text(
+            "==== fifa15\n  BAD   the dinput8 override is missing\n\n==== exit code 5, then\n")
+        result, files = self.bundle()
+        registry = files["bottles/Aurora15/registry.txt"]
+        self.assertIn("[Software\\\\Wine\\\\DllOverrides]", registry)
+        self.assertIn("[Software\\\\Wine\\\\AppDefaults\\\\fifa15.exe\\\\DllOverrides]", registry)
+        self.assertIn('"dinput8"="native,builtin"', registry)
+        self.assertNotIn("Steam", registry)
+        log = files["bottles/Aurora15/logs/aurora/launcher.log"]
+        self.assertIn("token=<redacted>", log)
+        self.assertIn("~/Games", log)
+        self.assertIn("<email>", log)
+        self.assertIn("FifaPath=C:\\FIFA 15", files["bottles/Aurora15/launchers.txt"])
+        self.assertIn("CX_TEST", files["bottles/Aurora15/environment.txt"])
+        summary = files["summary.txt"]
+        self.assertIn("Aurora15: Aurora.exe", summary)
+        self.assertIn("dinput8 for fifa15.exe: set in Aurora15", summary)
+        self.assertIn("others, not collected: Unrelated", summary)
+        self.assertIn("Newest setup run: fifa15-20260101-000000.log, exit code 5", summary)
+        self.assertIn("the dinput8 override is missing", summary)
+        self.assertIn("setup-logs/fifa15-20260101-000000.log", files)
+        self.assertFalse(any(name.startswith("bottles/Unrelated") for name in files))
+        for name, text in files.items():
+            with self.subTest(name=name):
+                self.assertNotIn("abc123", text)
+                self.assertNotIn(str(self.home), text)
+                self.assertNotIn("must-not-go", text)
+                self.assertNotIn("someone@example.com", text)
+
+    def test_redaction_forms(self):
+        source = (ROOT / "setup.sh").read_text()
+        function = "bundle_redact() {" + source.split("bundle_redact() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        text = "\n".join([
+            "token=abc1 auth=0 du=3", '"accessToken": "abc2", "name": "bob"',
+            '"SessionKey"=hex:ab,cd', "Authorization: Bearer abc3", "Password: abc4",
+            "?api_key=abc5&next=1", "mail Jo.Doe+x@example.co.uk", "HOME=" + str(self.home) + "/x",
+        ])
+        result = subprocess.run(["/bin/zsh", "-c", function + "bundle_redact"], input=text,
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for secret in ("abc1", "abc2", "ab,cd", "abc3", "abc4", "abc5", "Jo.Doe", str(self.home)):
+            self.assertNotIn(secret, result.stdout)
+        for kept in ("auth=0", "du=3", '"name": "bob"', "&next=1", "<email>", "HOME=~/x"):
+            self.assertIn(kept, result.stdout)
 
 
 class BothGamesTests(unittest.TestCase):
@@ -502,6 +650,8 @@ print(reply)
         self.package = self.work / "package"
         (self.package / "lib").mkdir(parents=True)
         shutil.copy2(ROOT / "lib/ui.zsh", self.package / "lib/ui.zsh")
+        shutil.copy2(ROOT / "lib/runlog.zsh", self.package / "lib/runlog.zsh")
+        (self.package / "VERSION").write_text("9.8.7\nabc1234\n")
         shutil.copy2(ROOT / "Choose game folders.command", self.package / "Choose game folders.command")
         stub = self.package / "setup.sh"
         stub.write_text('''#!/usr/bin/env python3
@@ -712,6 +862,66 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
                 self.assertEqual(json.loads(env_log.read_text()), ['1', game])
                 self.assertIn('Cancelled. No app or bottle was changed.', result.stdout)
                 self.assertNotIn('Finished.', result.stdout)
+
+    def run_logs(self):
+        return sorted((self.work / 'Library/Logs/FIFA-CrossOver').glob('*.log'))
+
+    def test_wrappers_save_their_run_and_keep_the_exit_code(self):
+        # Every double-click that runs setup.sh leaves a copy of its window in
+        # ~/Library/Logs/FIFA-CrossOver, and still exits with setup's code.
+        cases = [('FIFA 15.command', [], 'fifa15'),
+                 ('FIFA 16.command', [], 'fifa16'),
+                 ('START HERE.command', [], 'start-here'),
+                 ('START HERE offline.command', [], 'start-here-offline'),
+                 ('diagnostics/_action.zsh', ['--repair'], 'fix-my-installation'),
+                 ('diagnostics/_action.zsh', ['--verify'], 'diagnostics-verify')]
+        logdir = self.work / 'Library/Logs/FIFA-CrossOver'
+        for name, args, label in cases:
+            for rc in ('5', '0'):
+                with self.subTest(name=name, args=args, rc=rc):
+                    shutil.rmtree(logdir, ignore_errors=True)
+                    target = self.package / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(ROOT / name, target)
+                    command = '/bin/zsh ' + shlex_quote(str(target))
+                    command += ''.join(' ' + shlex_quote(arg) for arg in args)
+                    result = self.run_shell(command, SETUP_RC=rc, TERM='xterm-256color')
+                    self.assertEqual(result.returncode, int(rc), result.stdout + result.stderr)
+                    self.assertIn('Press return to close this window.', result.stdout)
+                    logs = self.run_logs()
+                    self.assertEqual(len(logs), 1, logs)
+                    self.assertRegex(logs[0].name, '^' + label + r'-\d{8}-\d{6}\.log$')
+                    text = logs[0].read_text()
+                    self.assertIn('patch     9.8.7 (abc1234)', text)
+                    self.assertIn('command   ' + Path(name).name + ''.join(' ' + a for a in args), text)
+                    self.assertRegex(text, r'macOS     \d+\.\d+')
+                    self.assertIn('Press return to close this window.', text)
+                    self.assertTrue(text.rstrip().splitlines()[-1].startswith('==== exit code ' + rc), text)
+                    self.assertNotIn('\x1b', text)
+                    self.assertEqual(list(logdir.glob('.*')), [])
+
+    def test_wrapper_logs_are_pruned_and_optional(self):
+        target = self.package / 'FIFA 16.command'
+        shutil.copy2(ROOT / 'FIFA 16.command', target)
+        logdir = self.work / 'Library/Logs/FIFA-CrossOver'
+        logdir.mkdir(parents=True)
+        for i in range(25):
+            old = logdir / f'old-{i:02d}.log'
+            old.write_text('old\n')
+            os.utime(old, (1000000 + i, 1000000 + i))
+        result = self.run_shell('/bin/zsh ' + shlex_quote(str(target)), SETUP_RC='4')
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        logs = self.run_logs()
+        self.assertEqual(len(logs), 20)
+        self.assertEqual(len([log for log in logs if log.name.startswith('fifa16-')]), 1)
+        self.assertNotIn('old-00.log', [log.name for log in logs])
+        # A log folder that cannot be made: the run is exactly as before.
+        shutil.rmtree(self.work / 'Library/Logs')
+        (self.work / 'Library/Logs').write_text('not a folder')
+        result = self.run_shell('/bin/zsh ' + shlex_quote(str(target)), SETUP_RC='5')
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn('Not finished.', result.stdout)
+        self.assertEqual(self.setup_calls()[-1], ['--fifa16'])
 
     def test_missing_files_invalid_selection_can_be_retried_before_save(self):
         folder = self.work / 'Selected FIFA 15'

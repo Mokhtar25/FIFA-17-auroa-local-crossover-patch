@@ -8,7 +8,7 @@ Open this folder in Finder and double-click the one you want.
 
 | Double-click | What it does | Changes anything? |
 |---|---|---|
-| `1 Collect diagnostics.command` | Collects the report, the newest logs, the bottle settings and the hashes into one `aurora17-bundle-<date>.zip` **in this folder**. Send that zip. | no |
+| `1 Collect diagnostics.command` | For every game, with or without a CrossOver-FIFA copy: collects a one-page summary, the checks, the saved setup runs, each FIFA bottle's settings and launcher logs, where each game was found and what is running into one `fifa-diagnostics-<date>.zip` **in this folder**, and prints its full path. Send that zip. | no |
 | `2 Report.command` | Prints one page of diagnosis and saves it as `report.txt` here. | no |
 | `3 Check the install.command` | Checks an install that is already there and says `ok` / `note` / `BAD` for each thing. | no |
 | `4 Unstick.command` | Frees a bottle stuck on "loading". It works on every bottle, not only the FIFA ones, and frees the ports Aurora17 and Aurora15 hold (47170-47173 and 3216). | processes only |
@@ -24,9 +24,9 @@ Open this folder in Finder and double-click the one you want.
 | `15 Fix my installation.command` | One run that puts an install right again without copying CrossOver: quits CrossOver cleanly, replaces any fix file in the copy that is missing or out of date and re-signs it, sets the bottle up again (including the WebView2 runtime the RebornFUT launcher needs), has the game's loader write a fresh licence file, then checks the lot. Also the update path for an older install. | the copy and the bottle |
 | `16 Check the install (FIFA 16).command` | Checks the FIFA 16 bottle and its four settings, the shared app, and whether the bottle has a drive letter that reaches the game folder. | no |
 
-FIFA 15 log collection and smoke tests are not supported yet. Use number 13,
-or `./setup-both.sh --verify` to check both installations. The same goes for
-FIFA 16: number 16 is its check.
+Number 1 collects for every game. Smoke tests are FIFA 17's only: for FIFA 15
+use number 13, or `./setup-both.sh --verify` to check both installations, and
+for FIFA 16 number 16.
 
 `Diagnostics.command`, one folder up, is the same as number 1, and **Fix my
 installation.command** beside it is the same as number 15 — they are there so
@@ -36,22 +36,55 @@ they can be found without opening this folder.
 
 Everything is written here, beside these commands:
 
-    diagnostics/aurora17-bundle-<date>.zip     <- send this one
+    diagnostics/fifa-diagnostics-<date>.zip    <- send this one
     diagnostics/report.txt                     <- what number 2 saved
 
-The three newest zips are kept and older ones are deleted, so running a command
-after every failed attempt does not fill this folder up.
+The three newest zips are kept and older ones are deleted (the older
+`aurora17-bundle-<date>.zip` ones too), so running a command after every failed
+attempt does not fill this folder up. (If this folder cannot be written, the zip
+goes to `~/Desktop/aurora17-diagnostics`; the window says where.)
 
-The zip holds the checks, every connector log (one per PLAY, with that launch's
-error code) and the newest server and client logs, any crash report macOS kept
-for the game or for Wine, any CrossOver log of a launch (number 12 makes one,
-and its summary says which module a crash was in), the bottle's
-hosts file and settings, the Mac's network set-up (interfaces and resolvers, no
-hardware addresses), and the hashes of what is installed. The logs are the
-`logs` folder inside it — double-click the zip to open it if you want to read
-them yourself. It holds no
-account, no password and no session token. Nothing leaves your Mac on its own —
-these commands write a file and tell you where it is.
+Every double-click that runs setup — START HERE, the FIFA 15 and FIFA 16
+commands, Both games, Choose game folders, Fix my installation and everything
+in this folder — also saves what its window showed in
+
+    ~/Library/Logs/FIFA-CrossOver/<what ran>-<date>.log
+
+with the macOS version, the package version and the exit code. The newest 20
+are kept. The zip carries the newest 10, so a setup that failed in a window that
+has since been closed can still be read.
+
+What the zip holds, all of it text:
+
+- `summary.txt`, the page to read first: the package and macOS versions, the
+  CrossOver and CrossOver-FIFA versions (or that there is no copy), each bottle
+  and the launchers in it, each game's folder and which bottle has its DLL
+  overrides, every `BAD` line from the checks, and the end of the newest setup run
+- `checks/`: `--verify` for FIFA 17, 15, 16 and 21, with their exit codes
+- `setup-logs/`: the saved setup runs above
+- `bottles/<name>/` for each bottle with anything FIFA in it: its settings, its
+  Wine DLL overrides (only those registry sections, never the whole registry),
+  its hosts file, its launchers, and their newest logs (the Aurora launcher,
+  Aurora17Connector, CAS, Impulsum17, the FIFA 17 folder gate). Other bottles
+  are only named in the summary
+- `games.txt`: every folder each game could be in, and the DLLs, programs and
+  settings files in the one it is played from
+- `processes.txt`: what of Wine, CrossOver and the launchers is running and the
+  ports they hold
+- `report.txt` (what number 2 prints), any crash report macOS kept for the game
+  or for Wine, any CrossOver log of a launch (number 12 makes one, and its
+  summary says which module a crash was in), the Mac's network set-up
+  (interfaces and resolvers, no hardware addresses), the hashes of what is
+  installed, the install receipt and your saved folder choices
+
+Every file is cut to its last megabyte at most (a CrossOver log of a launch to
+its last 4 MB) and passes through one filter:
+your home folder becomes `~`, e-mail addresses become `<email>`, and any value
+after a name like token, password, secret, session, auth, ticket, cookie or API
+key becomes `<redacted>`. No account file, no whole registry and no program
+file is copied. Double-click the zip to read it yourself first if you like.
+Nothing leaves your Mac on its own — these commands write a file and tell you
+where it is.
 
 ## If a window closes instantly, or macOS refuses to open one
 
