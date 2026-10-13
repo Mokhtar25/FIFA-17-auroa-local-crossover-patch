@@ -51,8 +51,11 @@ FLAG="${1:-}"
 RUNLOG_LABEL="diagnostics-${FLAG#--}"
 [ "$FLAG" = --repair ] && RUNLOG_LABEL=fix-my-installation
 case "${AURORA_GAME:-}" in fifa15|fifa16) RUNLOG_LABEL="$RUNLOG_LABEL-$AURORA_GAME" ;; esac
-[ -f "$RELEASE/lib/runlog.zsh" ] && source "$RELEASE/lib/runlog.zsh" \
-    && runlog_start "$RUNLOG_LABEL" "${0:A}" "$@"
+# Not --play-log: Aurora's server outlives the session on purpose and would
+# hold the log's pipe open, so the window would never reach its last line.
+# That run writes its own CrossOver log into crash-logs/ anyway.
+[ "$FLAG" != --play-log ] && [ -f "$RELEASE/lib/runlog.zsh" ] \
+    && source "$RELEASE/lib/runlog.zsh" && runlog_start "$RUNLOG_LABEL" "$HERE/${0:t}" "$@"
 
 if [ -t 1 ] || [ "${CX_COLOR:-}" = 1 ]; then RED=$'\e[1;31m' GRN=$'\e[32m' YEL=$'\e[33m' OFF=$'\e[0m'
 else RED='' GRN='' YEL='' OFF=''; fi

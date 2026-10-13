@@ -900,6 +900,33 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
                     self.assertNotIn('\x1b', text)
                     self.assertEqual(list(logdir.glob('.*')), [])
 
+    def test_double_clicked_commands_run_by_a_relative_path_still_run(self):
+        # The diagnostics commands do "exec ./_action.zsh", and _action.zsh cd's
+        # before it logs: re-running itself by ${0:A} then pointed at a file
+        # that is not there, and every one of them exited 127.
+        logdir = self.work / 'Library/Logs/FIFA-CrossOver'
+        for name in ('diagnostics/_action.zsh', 'diagnostics/3 Check the install.command',
+                     'diagnostics/15 Fix my installation.command', 'Fix my installation.command',
+                     'START HERE.command'):
+            target = self.package / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, target)
+        cases = [('package/diagnostics/3 Check the install.command', ['--verify'], 'diagnostics-verify'),
+                 ('package/diagnostics/15 Fix my installation.command', ['--repair'], 'fix-my-installation'),
+                 ('package/Fix my installation.command', ['--repair'], 'fix-my-installation'),
+                 ('package/START HERE.command', [], 'start-here')]
+        for relative, wanted, label in cases:
+            with self.subTest(command=relative):
+                shutil.rmtree(logdir, ignore_errors=True)
+                self.calls.unlink(missing_ok=True)
+                result = self.run_shell('/bin/zsh ' + shlex_quote(relative), SETUP_RC='0')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.setup_calls(), [wanted])
+                logs = self.run_logs()
+                self.assertEqual(len(logs), 1, logs)
+                self.assertTrue(logs[0].name.startswith(label + '-'), logs)
+                self.assertIn('==== exit code 0', logs[0].read_text())
+
     def test_wrapper_logs_are_pruned_and_optional(self):
         target = self.package / 'FIFA 16.command'
         shutil.copy2(ROOT / 'FIFA 16.command', target)

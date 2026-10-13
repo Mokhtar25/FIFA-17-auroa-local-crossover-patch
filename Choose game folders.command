@@ -8,7 +8,7 @@ source "$HERE/lib/ui.zsh"
 export CX_DIALOGS=1
 # The whole run is also saved in ~/Library/Logs/FIFA-CrossOver, for
 # "1 Collect diagnostics" to send (lib/runlog.zsh).
-[ -f "$HERE/lib/runlog.zsh" ] && source "$HERE/lib/runlog.zsh" && runlog_start choose-folders "${0:A}" "$@"
+[ -f "$HERE/lib/runlog.zsh" ] && source "$HERE/lib/runlog.zsh" && runlog_start choose-folders "$HERE/${0:t}" "$@"
 
 if ! ui_gui_ok; then
     print -r -- "Use Terminal to save or forget a game folder:"

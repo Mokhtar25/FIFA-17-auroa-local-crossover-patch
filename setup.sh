@@ -7130,7 +7130,9 @@ offer_to_quit_crossover() {
         say "        $why"
         ui_ask "CrossOver has to be closed" "$question" "Quit CrossOver and continue" "Stop" yes \
             || return 1
-    elif [ -t 0 ] && [ -t 1 ]; then
+    elif [ -t 0 ]; then
+        # Someone at the keyboard. Output may be the run log's pipe (lib/runlog.zsh),
+        # which still shows in the window.
         say "        $why"
         print -rn -- "        Quit CrossOver and free the bottles now? [Y/n] "
         read -r answer || return 1

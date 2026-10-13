@@ -8,7 +8,7 @@ chmod +x ./setup.sh ./setup-both.sh ./uninstall.sh ./fifa15/fifa15-offline.sh 2>
 
 # The whole run is also saved in ~/Library/Logs/FIFA-CrossOver, for
 # "1 Collect diagnostics" to send (lib/runlog.zsh).
-[ -f ./lib/runlog.zsh ] && source ./lib/runlog.zsh && runlog_start both-games "${0:A}" "$@"
+[ -f ./lib/runlog.zsh ] && source ./lib/runlog.zsh && runlog_start both-games "$PWD/${0:t}" "$@"
 
 if [ -t 1 ] || [ "${CX_COLOR:-}" = 1 ]; then RED=$'\e[1;31m' GRN=$'\e[32m' OFF=$'\e[0m'; else RED='' GRN='' OFF=''; fi
 

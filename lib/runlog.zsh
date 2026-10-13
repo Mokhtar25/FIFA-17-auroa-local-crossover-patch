@@ -34,6 +34,9 @@ runlog_version() {
 runlog_start() {
     local label="$1" self="$2"; shift 2
     [ -z "${CX_RUNLOG_ACTIVE:-}" ] || return 0
+    # The wrapper is run again by this path, after its own cd: one that does
+    # not lead back to it means running without a log, never not at all.
+    [ -f "$self" ] || return 0
     local dir="${CX_RUNLOG_DIR:-$HOME/Library/Logs/FIFA-CrossOver}"
     mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ] || return 0
     local stamp log raw n=1 rc
