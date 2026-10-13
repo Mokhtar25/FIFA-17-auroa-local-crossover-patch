@@ -547,7 +547,8 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
         source = (ROOT / "setup.sh").read_text().split(
             "# ------------------------------------------------- the launch that is watched", 1)[0]
         script = self.package / "preflight.sh"
-        script.write_text(source + '\nprint -r -- "CONTINUED folder=$(game_dir_of "$GAME" || true)"\n')
+        script.write_text(source + '\nprint -r -- "CONTINUED folder=$(game_dir_of "$GAME" || true)"'
+                          ' "FIFA17_SKIP=$FIFA17_SKIP"\n')
         command = prefix + '/bin/zsh ' + shlex_quote(str(script))
         command += ''.join(' ' + shlex_quote(arg) for arg in args)
         return self.run_shell(command, replies, CX_VOLUMES_DIR=str(self.work / 'no-volumes'), **env)
@@ -564,15 +565,43 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
                 folder = self.work / ('Selected ' + game)
                 folder.mkdir()
                 (folder / exe).write_bytes(b'MZ')
-                result = self.run_setup_preflight(args, [str(folder)], AURORA_GAME=game)
+                replies = (['Select folder…'] if game == 'fifa17' else []) + [str(folder)]
+                result = self.run_setup_preflight(args, replies, AURORA_GAME=game)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn('CONTINUED folder=' + str(folder.resolve()), result.stdout)
-                record = json.loads(self.log.read_text())
+                record = json.loads(self.log.read_text().splitlines()[-1])
                 self.assertIn('Select FIFA ' + game[4:] + ' game files', record['args'][1])
                 self.assertIn(exe, record['args'][1])
                 self.assertIn(f'{game}.folder={folder.resolve()}\n', choices.read_text())
                 self.assertFalse((self.work / 'no-app.app').exists())
                 self.assertFalse((self.work / 'no-bottles').exists())
+
+    def test_no_fifa17_is_skipped_and_never_stops_the_other_games(self):
+        # START HERE and Fix my installation are for every game. Skip, Cancel
+        # in the picker, or giving up after a wrong folder all carry on.
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        for args, replies in [([], ['Skip FIFA 17']), ([], ['__cancel__']),
+                              ([], ['Select folder…', '__cancel__']),
+                              ([], ['Select folder…', '/wrong', '__cancel__']),
+                              (['--repair'], ['Skip FIFA 17'])]:
+            with self.subTest(args=args, replies=replies):
+                self.log.unlink(missing_ok=True)
+                result = self.run_setup_preflight(args, replies, AURORA_GAME='fifa17')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('Skipping FIFA 17; the other games are set up.', result.stdout)
+                self.assertIn('CONTINUED folder= FIFA17_SKIP=1', result.stdout)
+                first = json.loads(self.log.read_text().splitlines()[0])
+                self.assertEqual(first['args'][1:5], ['FIFA 17 was not found',
+                    first['args'][2], 'Select folder…', 'Skip FIFA 17'])
+                self.assertFalse(choices.exists())
+        # Found, it is set up as before; other modes never skip it.
+        folder = self.work / 'Found FIFA 17'
+        folder.mkdir()
+        (folder / 'FIFA17.exe').write_bytes(b'MZ')
+        result = self.run_setup_preflight([], AURORA_GAME='fifa17', AURORA_GAME_DIR=str(folder))
+        self.assertIn('FIFA17_SKIP=0', result.stdout)
+        result = self.run_setup_preflight(['--verify'])
+        self.assertIn('FIFA17_SKIP=0', result.stdout)
 
     def test_missing_files_prompt_stops_when_the_choice_cannot_be_saved(self):
         # The prompt runs with set -e off (prompt_for_missing_game_files ||
@@ -1653,9 +1682,10 @@ class RepairTests(unittest.TestCase):
         for doc in ("README.md", "SETUP.md", "diagnostics/README.md"):
             self.assertIn("Fix my installation.command", (ROOT / doc).read_text(), doc)
 
-    def test_repair_without_fifa17_skips_its_steps_and_judges_fifa15(self):
+    def test_repair_without_fifa17_skips_its_steps_and_judges_the_other_games(self):
         # The real --repair block, with the helpers it calls stubbed. Players
-        # with only FIFA 15 used to end NOT FIXED on FIFA 17's licence check.
+        # without FIFA 17 used to stop at its folder dialog or end NOT FIXED on
+        # FIFA 17's licence check.
         source = (ROOT / "setup.sh").read_text()
         block = 'if [ "$MODE" = repair ]; then' + source.split('if [ "$MODE" = repair ]; then', 1)[1]
         block = block.split("\n# ------------------------------------------------------- --resign", 1)[0]
@@ -1670,103 +1700,117 @@ class RepairTests(unittest.TestCase):
             harness = f'''set -eu
 MODE=repair HERE={shlex_quote(str(work))} TARGET={shlex_quote(str(app))} TARGET_EXPLICIT=1
 BOTTLE=Aurora17 E_PAYLOAD=4 E_INCOMPLETE=5 SETUP_LOCK={shlex_quote(str(work / "lock"))}
+FIFA17_SKIP=0; [ -n "$F17" ] || FIFA17_SKIP=1
 say() {{ print -r -- "$*"; }}; ok() {{ say "$@"; }}; note() {{ say "$@"; }}
 red() {{ say "RED $*"; }}; green() {{ say "GREEN $*"; }}
 require_supported_mac() {{ :; }}; require_clt() {{ :; }}; is_crossover_bundle() {{ :; }}
 crossover_version() {{ print 26.3; }}; take_setup_lock() {{ :; }}; refresh_fixes() {{ :; }}
 bottle_licence_file() {{ print -r -- /nonexistent/licence; }}
 seed_bottle_licence() {{ print -r -- "SEEDED" >> "$CALLS"; }}
-game_dir_of() {{ [ "$1" = fifa17 ] && [ -n "$F17" ] && return 0; [ "$1" = fifa15 ] && [ -n "$F15" ]; }}
-add_fifa15_to_bottle() {{ [ -n "$F15" ] || return 0; FIFA15_FOUND=1; FIFA15_IN=Aurora15; FIFA15_OK="$F15_OK"; }}
-FIFA15_OK=1 FIFA15_FOUND=0 FIFA15_IN=""
-''' + block
+typeset -A GAME_RESULT
+GAMES_DONE=0 GAMES_FAILED=0 GAMES_MISSING=0
+add_other_games() {{
+    case "$F15" in
+        ok)   GAME_RESULT[fifa15]="set up in the Aurora15 bottle"; GAMES_DONE=1 ;;
+        fail) GAME_RESULT[fifa15]="NOT FINISHED in the Aurora15 bottle"; GAMES_FAILED=1 ;;
+        *)    GAME_RESULT[fifa15]="not found"; GAMES_MISSING=1 ;;
+    esac
+}}
+''' + function_source("games_summary") + block
             calls = work / "calls"
-            for f17, f15, f15_ok, verify_rc, rc, says, ran_bottle in [
-                ("yes", "yes", "1", "0", 0, "GREEN Fixed. Open CrossOver-FIFA, then the Aurora17", True),
-                ("yes", "yes", "1", "1", 5, "RED NOT FIXED — the check above", True),
-                ("", "yes", "1", "1", 0, "GREEN Fixed. Open CrossOver-FIFA, then the Aurora15 bottle, and play FIFA 15", False),
-                ("", "yes", "0", "0", 5, "RED NOT FIXED — FIFA 15's setup", False),
-                ("", "", "1", "0", 5, "RED NOT FIXED — no FIFA 17 or FIFA 15 folder", False),
+            for f17, f15, verify_rc, rc, says, listed in [
+                ("yes", "ok", "0", 0, "GREEN Fixed.", "FIFA 17   set up in the Aurora17 bottle"),
+                ("yes", "ok", "1", 5, "RED NOT FIXED — the games list", "FIFA 17   NOT FIXED"),
+                ("yes", "fail", "0", 5, "RED NOT FIXED — the games list", "FIFA 15   NOT FINISHED"),
+                ("", "ok", "1", 0, "GREEN Fixed.", "FIFA 17   skipped: no game folder found"),
+                ("", "fail", "0", 5, "RED NOT FIXED — the games list", "FIFA 15   NOT FINISHED"),
+                ("", "", "0", 5, "RED NOT FIXED — no game folder was found", "FIFA 15   not found"),
             ]:
-                with self.subTest(f17=f17, f15=f15, f15_ok=f15_ok, verify_rc=verify_rc):
+                with self.subTest(f17=f17, f15=f15, verify_rc=verify_rc):
                     calls.unlink(missing_ok=True)
                     result = subprocess.run(
                         ["/bin/zsh", "-c", harness], cwd=work, stdin=subprocess.DEVNULL,
                         env={**os.environ, "CALLS": str(calls), "F17": f17, "F15": f15,
-                             "F15_OK": f15_ok, "VERIFY_RC": verify_rc},
+                             "VERIFY_RC": verify_rc},
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
                     self.assertIn(says, result.stdout)
+                    self.assertIn(listed, result.stdout)
                     made = calls.read_text().splitlines()
-                    self.assertEqual("--bottle" in made, ran_bottle, made)
+                    self.assertEqual("--bottle" in made, bool(f17), made)
                     self.assertEqual("--verify" in made, bool(f17), made)
                     if not f17:
-                        self.assertIn("no FIFA 17 folder found", result.stdout)
                         self.assertNotIn("SEEDED", made)
+                        self.assertIn("Choose game folders.command", result.stdout)
 
-    def test_install_and_repair_add_fifa15_to_the_common_bottle_and_keep_going(self):
-        with tempfile.TemporaryDirectory(prefix="fifa15-repair-") as directory:
+    def test_each_other_game_goes_to_its_own_bottle_and_keeps_going(self):
+        with tempfile.TemporaryDirectory(prefix="fifa-games-") as directory:
             work = Path(directory)
             script = work / "setup.sh"
-            script.write_text('#!/bin/zsh\nprint -r -- "$AURORA_BOTTLE|$*" >> "$CALLS"\n'
-                              'if [ "$#" = 2 ]; then exit "$TEST_VERIFY_RC"; fi\n'
+            script.write_text('#!/bin/zsh\nprint -r -- "${AURORA_BOTTLE-unset}|$*" >> "$CALLS"\n'
+                              'case "$*" in *--verify) exit "$TEST_VERIFY_RC" ;; esac\n'
                               'exit "${TEST_RC:-0}"\n')
             script.chmod(0o755)
             calls = work / "calls"
-            harness = '''set -eu
-HERE="$PWD"
-BOTTLE="Shared Aurora"
-FIFA15_OK=1
-AURORA_BOTTLE_GIVEN="${GIVEN:-}"
-say() { print -r -- "$*"; }
-ok() { print -r -- "$*"; }
-note() { print -r -- "$*"; }
-game_dir_of() { [ -n "$FOLDER" ] && print -r -- "$FOLDER"; }
+            harness = f'''set -eu
+HERE={shlex_quote(str(work))} TARGET=/Applications/CrossOver-FIFA.app
+AURORA_BOTTLE_GIVEN="${{GIVEN:-}}"
+typeset -A GAME_RESULT
+GAMES_DONE=0 GAMES_FAILED=0 GAMES_MISSING=0
+say() {{ print -r -- "$*"; }}; ok() {{ say "$@"; }}; note() {{ say "$@"; }}
+game_dir_of() {{ [ -n "$FOLDER" ] && print -r -- "$FOLDER"; }}
 # The real choice is f15_default_bottle; here it says what it was given.
-f15_default_bottle() {
-    [ -n "$AURORA_BOTTLE" ] && { print -r -- "$AURORA_BOTTLE"; return 0; }
+f15_default_bottle() {{
+    [ -n "$AURORA_BOTTLE" ] && {{ print -r -- "$AURORA_BOTTLE"; return 0; }}
     [ -n "$PICK" ] && print -r -- "$PICK"
-}
+}}
+''' + function_source("run_game_setup") + function_source("add_game_to_its_bottle") + '''
+add_game_to_its_bottle "$GAME"
+print -r -- "RESULT=${GAME_RESULT[$GAME]} DONE=$GAMES_DONE FAILED=$GAMES_FAILED MISSING=$GAMES_MISSING"
 '''
-            harness += function_source("add_fifa15_to_bottle")
-            harness += '\nadd_fifa15_to_bottle\nprint -r -- "NEXT OK=$FIFA15_OK"\n'
-            both = ["--fifa15", "--fifa15 --verify"]
-            for pick, given, folder, rc, verify_rc, ok, bottle, wanted in [
-                ("Shared Aurora", "", "/game/FIFA 15", "0", "0", "1", "Shared Aurora", both),
-                ("Shared Aurora", "", "/game/FIFA 15", "5", "0", "0", "Shared Aurora", ["--fifa15"]),
-                ("Shared Aurora", "", "/game/FIFA 15", "0", "5", "0", "Shared Aurora", both),
-                ("Shared Aurora", "", "", "0", "0", "1", "", []),
-                # Aurora.exe in Aurora15 beside an Aurora17: FIFA 15 goes where Aurora is,
-                # not into the bottle FIFA 17 is being repaired in.
-                ("Aurora15", "", "/game/FIFA 15", "0", "0", "1", "Aurora15", both),
-                # A bottle the person named wins.
-                ("Aurora15", "Mine", "/game/FIFA 15", "0", "0", "1", "Mine", both),
-                # Aurora is in some other bottle: nothing is guessed, and it is not Fixed.
-                ("", "", "/game/FIFA 15", "0", "0", "0", "", []),
+            both = lambda b, g: [f"{b}|--{g}", f"{b}|--{g} --verify"]
+            for game, pick, given, folder, rc, verify_rc, result_text, wanted in [
+                # Aurora.exe in Aurora15 beside an Aurora17: FIFA 15 goes where Aurora is.
+                ("fifa15", "Aurora15", "", "/g/FIFA 15", "0", "0",
+                 "set up in the Aurora15 bottle DONE=1", both("Aurora15", "fifa15")),
+                ("fifa15", "Aurora15", "Mine", "/g/FIFA 15", "0", "0",
+                 "set up in the Mine bottle DONE=1", both("Mine", "fifa15")),
+                ("fifa15", "Aurora17", "", "/g/FIFA 15", "5", "0",
+                 "NOT FINISHED in the Aurora17 bottle", ["Aurora17|--fifa15"]),
+                ("fifa15", "Aurora17", "", "/g/FIFA 15", "0", "5",
+                 "FAILED=1", both("Aurora17", "fifa15")),
+                # Aurora is in some other bottle: nothing is guessed.
+                ("fifa15", "", "", "/g/FIFA 15", "0", "0", "FAILED=1", []),
+                # FIFA 21 and 16 pick their own default; FIFA 16 never takes FIFA 17's bottle.
+                ("fifa21", "", "", "/g/FIFA 21", "0", "0",
+                 "set up in the Aurora17 bottle DONE=1", both("unset", "fifa21")),
+                ("fifa21", "", "Mine", "/g/FIFA 21", "0", "0",
+                 "set up in the Mine bottle DONE=1", both("Mine", "fifa21")),
+                ("fifa16", "", "Mine", "/g/FIFA 16", "0", "0",
+                 "set up in the FIFA16 bottle DONE=1", both("unset", "fifa16")),
+                ("fifa16", "", "", "", "0", "0", "RESULT=not found DONE=0 FAILED=0 MISSING=1", []),
             ]:
-                with self.subTest(pick=pick, given=given, folder=folder, rc=rc):
+                with self.subTest(game=game, pick=pick, given=given, folder=folder, rc=rc):
                     calls.unlink(missing_ok=True)
+                    env = {k: v for k, v in os.environ.items() if not k.startswith(("FIFA1", "FIFA2"))}
                     result = subprocess.run(
-                        ["/bin/zsh", "-c", harness], cwd=work,
-                        env={**os.environ, "CALLS": str(calls), "PICK": pick, "GIVEN": given,
-                             "AURORA_BOTTLE": "Repair Export",
+                        ["/bin/zsh", "-c", harness], cwd=work, stdin=subprocess.DEVNULL,
+                        env={**env, "CALLS": str(calls), "PICK": pick, "GIVEN": given,
+                             "GAME": game, "AURORA_BOTTLE": "Repair Export",
                              "FOLDER": folder, "TEST_RC": rc, "TEST_VERIFY_RC": verify_rc},
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("NEXT OK=" + ok, result.stdout)
+                    self.assertIn(result_text, result.stdout)
                     actual = calls.read_text().splitlines() if calls.exists() else []
-                    self.assertEqual(actual, [bottle + "|" + args for args in wanted])
+                    self.assertEqual(actual, wanted)
             source = (ROOT / "setup.sh").read_text().split('if [ "$MODE" = repair ]; then', 1)[1]
-            self.assertIn('        "$HERE/setup.sh" --bottle || exit $?\n    fi\n    add_fifa15_to_bottle', source)
-            self.assertIn('"$HERE/setup.sh" --verify && [ "$FIFA15_OK" = 1 ]', source)
-            # The full FIFA 17 install (START HERE) adds FIFA 15 to its bottle too,
-            # after giving up the lock, and is not Done while FIFA 15 failed.
+            self.assertIn('        "$HERE/setup.sh" --bottle || exit $?\n', source)
+            self.assertIn('    add_other_games\n', source)
+            # The full install (START HERE) does the same after giving up the lock.
             install = (ROOT / "setup.sh").read_text().split("end_own_wine_session\n# The copy is finished", 1)[1]
             install = install.split("# ------------------------------------------------------------- the receipt", 1)[0]
             self.assertIn('if [ "$GAME" = fifa17 ]; then\n    rm -rf "$SETUP_LOCK"', install)
-            self.assertIn("    add_fifa15_to_bottle\nfi", install)
-            verdict = (ROOT / "setup.sh").read_text().rsplit("# ------------------------------------------------------------- the verdict", 1)[1]
-            self.assertIn('if [ "$FIFA15_OK" != 1 ]; then', verdict.split("exit 0\nfi", 1)[0])
+            self.assertIn("    add_other_games\nfi", install)
 
     def refresh(self, stale_dll, signature_ok):
         with tempfile.TemporaryDirectory(prefix="a17-refresh-") as directory:

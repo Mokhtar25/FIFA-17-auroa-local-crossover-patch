@@ -48,8 +48,8 @@ names the executable its folder must contain.
 
 **FIFA 15 only?** Quit CrossOver and double-click **FIFA 15.command**; it uses
 Aurora's common bottle. **FIFA 16?** Use **FIFA 16.command**. Folders already
-recorded by Aurora are found automatically. The steps below are for FIFA 17
-or both games.
+recorded by Aurora are found automatically. START HERE does all of them at
+once. The steps below are for FIFA 17.
 
 1. Put the **FIFA 17** folder and the **Aurora17** folder in your Downloads folder.
    Doing FIFA 15 too? Put the **FIFA 15** folder there as well.
@@ -74,17 +74,19 @@ Pick one:
 
 | I want | Double-click |
 |---|---|
-| Online play, Ultimate Team, career, everything (needs Aurora17) | **START HERE.command** |
+| Every game it finds, online (FIFA 17, 15, 16, 21) | **START HERE.command** |
 | Single player only, no Aurora17 | **START HERE offline.command** |
 | Both games, in the bottle your Aurora launcher is in | **Both games.command** |
 | FIFA 15 only (makes the copy first if it is not there) | **FIFA 15.command** |
 | FIFA 16 (makes the copy first if it is not there) | **FIFA 16.command** |
 
-START HERE also adds FIFA 15 to Aurora's bottle when it finds a FIFA 15
-folder (Aurora's record, a saved choice, or Downloads). If it finds none, it
-says so; **FIFA 15.command** or **Choose game folders.command** adds it later.
-If the FIFA 15 part fails, FIFA 17 is still done and the end of the output
-says what FIFA 15 is missing.
+START HERE sets up every game it finds (Aurora's record, a saved choice,
+Downloads, your drives), each in the bottle it is played from: FIFA 15 where
+your Aurora launcher is, FIFA 21 with FIFA 17, FIFA 16 in its own. No FIFA 17?
+Choose **Skip FIFA 17** when it asks, and the other games are still set up.
+One game failing never stops the others; the games list at the end says
+which game is set up, which was not found, and which is not finished.
+**Choose game folders.command** adds a game it did not find.
 
 If macOS says "Apple could not verify..." go to **System Settings → Privacy &
 Security**, scroll down, and click **Open Anyway**. You only do this once.

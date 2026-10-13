@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Double-click this. It installs the FIFA 17 fixes into a copy of your CrossOver.
+# Double-click this. It installs the FIFA fixes into a copy of your CrossOver and
+# sets up every game it finds: FIFA 17, 15, 16 and 21.
 # Everything it does can be undone with "Uninstall.command" beside it.
 
 cd "${0:A:h}" || exit 1
@@ -15,11 +16,12 @@ if [ -t 1 ]; then RED=$'\e[1;31m' GRN=$'\e[32m' OFF=$'\e[0m'; else RED='' GRN=''
 
 clear
 print -r -- ""
-print -r -- "  FIFA 17 on a Mac — installer"
-print -r -- "  ============================"
+print -r -- "  FIFA on a Mac — installer"
+print -r -- "  ========================="
 print -r -- ""
-print -r -- "  This makes a separate copy of CrossOver called CrossOver-FIFA and"
-print -r -- "  puts ten small files in it, plus two in your Aurora17 folder."
+print -r -- "  This makes a separate copy of CrossOver called CrossOver-FIFA, puts"
+print -r -- "  the fixes in it, and sets up each game it finds (FIFA 17, 15, 16, 21)"
+print -r -- "  in the bottle it is played from. No FIFA 17? Choose Skip FIFA 17."
 print -r -- ""
 print -r -- "  Your own CrossOver is not touched, and neither is any other bottle"
 print -r -- "  you run in it. The copy needs about 1 GB of disk."
@@ -39,7 +41,7 @@ case $rc in
         ;;
     0)
         print -r -- "  ${GRN}Finished.${OFF} Open CrossOver-FIFA (not your normal CrossOver),"
-        print -r -- "  open the Aurora17 bottle, and press PLAY FIFA 17."
+        print -r -- "  open the bottle the games list above names, and press PLAY."
         print -r -- ""
         print -r -- "  When you are done, quit with ${GRN}Stop.command${OFF} -- or Command-Q"
         print -r -- "  CrossOver. Closing a window is not quitting on a Mac: FIFA and"

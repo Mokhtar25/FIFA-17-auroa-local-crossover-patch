@@ -6125,9 +6125,22 @@ prompt_for_missing_game_files() {
     ui_gui_ok || return 0
     exe="$(game_exe_of "$GAME")"
     label="FIFA ${GAME#fifa}"
+    # START HERE and Fix my installation are for every game: no FIFA 17 means
+    # skipping FIFA 17's steps, never stopping before the other games.
+    if [ "$GAME" = fifa17 ]; then
+        say "FIFA 17 game files were not found."
+        if ! ui_ask "FIFA 17 was not found" "FIFA 17's game files were not found. Select the folder containing $exe, or skip FIFA 17 and set up the other games that are found (FIFA 15, 16 and 21)." "Select folder…" "Skip FIFA 17" yes; then
+            say "Skipping FIFA 17; the other games are set up."
+            return 0
+        fi
+    fi
     say "$label game files were not found. Select the folder containing $exe."
     while true; do
         if ! folder="$(ui_choose_folder "Select $label game files. Select the folder containing $exe." "$VOLUMES_DIR")"; then
+            if [ "$GAME" = fifa17 ]; then
+                say "Skipping FIFA 17; the other games are set up."
+                return 0
+            fi
             say "$label setup cancelled. No app or bottle was changed."
             return $E_CANCELLED
         fi
@@ -6136,7 +6149,12 @@ prompt_for_missing_game_files() {
             ok "saved $label game files: $folder"
             return 0
         fi
-        if ! ui_ask "Select $label game files" "Select the folder containing $exe. If you select its parent, it must contain only one copy of the game." 'Select again' 'Cancel' no; then
+        if [ "$GAME" = fifa17 ]; then
+            if ! ui_ask "Select $label game files" "Select the folder containing $exe. If you select its parent, it must contain only one copy of the game." 'Select again' 'Skip FIFA 17' no; then
+                say "Skipping FIFA 17; the other games are set up."
+                return 0
+            fi
+        elif ! ui_ask "Select $label game files" "Select the folder containing $exe. If you select its parent, it must contain only one copy of the game." 'Select again' 'Cancel' no; then
             say "$label setup cancelled. No app or bottle was changed."
             return $E_CANCELLED
         fi
@@ -6144,6 +6162,16 @@ prompt_for_missing_game_files() {
 }
 
 prompt_for_missing_game_files || exit $?
+
+# The full install and --repair skip FIFA 17's own steps when there is no
+# FIFA 17 (skipped in the dialog, or not found from Terminal); the other
+# games are still set up (add_other_games).
+FIFA17_SKIP=0
+if [ "$GAME" = fifa17 ]; then
+    case "$MODE" in
+        install|repair) game_dir_of fifa17 >/dev/null 2>&1 || FIFA17_SKIP=1 ;;
+    esac
+fi
 
 # ------------------------------------------------- the launch that is watched
 # Why this exists: --verify checks files, UUIDs, signatures and registry keys,
@@ -7331,40 +7359,72 @@ $APP_MGMT_HINT"
     return 0
 }
 
-# FIFA 15 goes in the bottle Aurora.exe starts it from: without its dinput8
-# override there the game opens but never connects. That is the bottle
-# --fifa15 picks on its own (f15_default_bottle: the common one, or Aurora15
-# when Aurora.exe or the old connector lives there), so a player with
-# Aurora17 and Aurora15 gets it where they play. The full install and
-# --repair add it whenever a FIFA 15 folder is found. A failure is reported
-# while FIFA 17's own steps still run.
-FIFA15_OK=1
-FIFA15_FOUND=0
-FIFA15_IN=""
-add_fifa15_to_bottle() {
-    local folder f15
-    if ! folder="$(game_dir_of fifa15 2>/dev/null)"; then
-        note "FIFA 15: no game folder found, so it was not added to a bottle"
-        say "        (FIFA 15.command or Choose game folders.command adds it later)"
-        return 0
-    fi
-    if ! f15="$(AURORA_BOTTLE="$AURORA_BOTTLE_GIVEN" f15_default_bottle)"; then
-        FIFA15_OK=0
-        note "FIFA 15: not set up; name the bottle you play it in (above)"
-        return 0
-    fi
-    FIFA15_FOUND=1
-    FIFA15_IN="$f15"
-    say ""
-    say "        FIFA 15 in the $f15 bottle ($folder)"
-    if AURORA_BOTTLE="$f15" "$HERE/setup.sh" --fifa15 \
-       && AURORA_BOTTLE="$f15" "$HERE/setup.sh" --fifa15 --verify; then
-        ok "FIFA 15: set up and checked in the $f15 bottle"
+# START HERE and Fix my installation are for every game, not only FIFA 17.
+# FIFA 17 has its own steps; each other game whose folder is found is set up
+# by its own --fifaNN run, in the bottle it is played from: FIFA 15 where
+# Aurora.exe starts it (f15_default_bottle: the common bottle, or Aurora15
+# when Aurora lives there; without its dinput8 override there it opens but
+# never connects), FIFA 21 in the common bottle, FIFA 16 in its own. One
+# game failing never stops the others.
+typeset -A GAME_RESULT
+GAMES_DONE=0
+GAMES_FAILED=0
+GAMES_MISSING=0
+# One game's own setup.sh run. An empty bottle lets that run pick its default.
+run_game_setup() {
+    local b="$1"; shift
+    if [ -n "$b" ]; then
+        AURORA_TARGET="$TARGET" AURORA_BOTTLE="$b" "$HERE/setup.sh" "$@"
     else
-        FIFA15_OK=0
-        note "FIFA 15: not finished; continuing with FIFA 17's steps"
+        env -u AURORA_BOTTLE AURORA_TARGET="$TARGET" "$HERE/setup.sh" "$@"
+    fi
+}
+add_game_to_its_bottle() {
+    local g="$1" label="FIFA ${1#fifa}" folder b shown
+    if ! folder="$(game_dir_of "$g" 2>/dev/null)"; then
+        GAME_RESULT[$g]="not found"
+        GAMES_MISSING=$((GAMES_MISSING + 1))
+        say "  --    $label: no game folder found"
+        return 0
+    fi
+    case "$g" in
+        fifa15)
+            if ! b="$(AURORA_BOTTLE="$AURORA_BOTTLE_GIVEN" f15_default_bottle)"; then
+                GAME_RESULT[$g]="NOT FINISHED: name the bottle you play it in (above)"
+                GAMES_FAILED=$((GAMES_FAILED + 1))
+                return 0
+            fi
+            shown="$b" ;;
+        fifa21) b="$AURORA_BOTTLE_GIVEN"; shown="${b:-${FIFA17_BOTTLE:-Aurora17}}" ;;
+        fifa16) b=""; shown="${FIFA16_BOTTLE:-FIFA16}" ;;
+    esac
+    say ""
+    say "        $label in the $shown bottle ($folder)"
+    if run_game_setup "$b" "--$g" && run_game_setup "$b" "--$g" --verify; then
+        GAME_RESULT[$g]="set up in the $shown bottle"
+        GAMES_DONE=$((GAMES_DONE + 1))
+        ok "$label: set up and checked in the $shown bottle"
+    else
+        GAME_RESULT[$g]="NOT FINISHED in the $shown bottle (the reason is above)"
+        GAMES_FAILED=$((GAMES_FAILED + 1))
+        note "$label: not finished; carrying on with the other games"
     fi
     return 0
+}
+add_other_games() {
+    local g
+    for g in fifa15 fifa21 fifa16; do add_game_to_its_bottle "$g"; done
+}
+games_summary() {
+    local g
+    say "Games:"
+    for g in fifa17 fifa15 fifa21 fifa16; do
+        [ -n "${GAME_RESULT[$g]:-}" ] && say "  FIFA ${g#fifa}   ${GAME_RESULT[$g]}"
+    done
+    if [ "$GAMES_MISSING" -gt 0 ] || [ "${GAME_RESULT[fifa17]:-}" = "skipped: no game folder found" ]; then
+        say "A game kept somewhere else (another drive)? Double-click"
+        say "Choose game folders.command, pick it, then run this again."
+    fi
 }
 
 # ------------------------------------------------------------- --repair
@@ -7440,28 +7500,27 @@ if [ "$MODE" = repair ]; then
     # FIFA 17's bottle steps, its licence and its check are for people who
     # have FIFA 17. Without a FIFA 17 folder they could only fail (no
     # _fifa17.exe to write the licence) and end a FIFA 15 player's repair
-    # NOT FIXED, so they are skipped and FIFA 15 is judged on its own.
+    # NOT FIXED, so they are skipped and the other games are judged alone.
     REPAIR_F17=1
-    game_dir_of fifa17 >/dev/null 2>&1 || REPAIR_F17=0
-    if [ "$REPAIR_F17" = 1 ]; then
-        say "3 of 5. The $BOTTLE bottle"
-    else
-        say "3 of 5. The bottles"
-        note "no FIFA 17 folder found (a drive not connected?), so FIFA 17's"
-        say "        settings, licence and checks are skipped. If you have FIFA 17,"
-        say "        double-click Choose game folders.command, then run this again."
-    fi
+    [ "$FIFA17_SKIP" = 1 ] && REPAIR_F17=0
+    say "3 of 5. The games"
     REPAIR_HAD_LICENCE=0
     [ -f "$(bottle_licence_file)" ] && REPAIR_HAD_LICENCE=1
     if [ "$REPAIR_F17" = 1 ]; then
+        say ""
+        say "        FIFA 17 in the $BOTTLE bottle"
         "$HERE/setup.sh" --bottle || exit $?
+    else
+        GAME_RESULT[fifa17]="skipped: no game folder found"
+        say "  --    FIFA 17: no game folder found, so its settings, licence and"
+        say "        checks are skipped"
     fi
-    add_fifa15_to_bottle
+    add_other_games
 
     say ""
     say "4 of 5. The licence file"
     if [ "$REPAIR_F17" = 0 ]; then
-        ok "FIFA 17's; there is no FIFA 17 here, and FIFA 15 needs none"
+        ok "FIFA 17's; there is no FIFA 17 here, and the other games need none"
     elif [ "$REPAIR_HAD_LICENCE" = 1 ]; then
         if ! seed_bottle_licence "$TARGET" 1; then
             note "the licence file could not be re-made; the check below says whether"
@@ -7485,37 +7544,30 @@ if [ "$MODE" = repair ]; then
 
     say ""
     say "5 of 5. Checking"
-    if [ "$REPAIR_F17" = 0 ]; then
-        say ""
-        if [ "$FIFA15_FOUND" = 1 ] && [ "$FIFA15_OK" = 1 ]; then
-            green "Fixed. Open ${TARGET:t:r}, then the $FIFA15_IN bottle, and play FIFA 15 from Aurora."
-            say ""
-            exit 0
-        elif [ "$FIFA15_FOUND" = 1 ] || [ "$FIFA15_OK" != 1 ]; then
-            red "NOT FIXED — FIFA 15's setup or check failed (the reason is in step 3)."
-            say "To check it:  ./setup.sh --fifa15 --verify"
+    REPAIR_F17_OK=1
+    if [ "$REPAIR_F17" = 1 ]; then
+        if "$HERE/setup.sh" --verify; then
+            GAME_RESULT[fifa17]="set up in the $BOTTLE bottle"
         else
-            red "NOT FIXED — no FIFA 17 or FIFA 15 folder was found, so there was nothing to set up."
-            say "Double-click Choose game folders.command, pick your game, then run this again."
+            REPAIR_F17_OK=0
+            GAME_RESULT[fifa17]="NOT FIXED in the $BOTTLE bottle (the check above says why)"
         fi
-        say ""
-        exit $E_INCOMPLETE
+    else
+        ok "the other games were checked in step 3"
     fi
-    if "$HERE/setup.sh" --verify && [ "$FIFA15_OK" = 1 ]; then
-        say ""
-        green "Fixed. Open ${TARGET:t:r}, then the $BOTTLE bottle, and press PLAY."
-        if [ "$FIFA15_FOUND" = 1 ] && [ "$FIFA15_IN" != "$BOTTLE" ]; then
-            say "FIFA 15 is in the $FIFA15_IN bottle, where your Aurora launcher is."
-        fi
+    say ""
+    games_summary
+    say ""
+    if [ "$REPAIR_F17_OK" = 1 ] && [ "$GAMES_FAILED" = 0 ] \
+       && { [ "$REPAIR_F17" = 1 ] || [ "$GAMES_DONE" -gt 0 ]; }; then
+        green "Fixed. Open ${TARGET:t:r}, then the bottle named above for your game, and press PLAY."
         say ""
         exit 0
     fi
-    say ""
-    if [ "$FIFA15_OK" != 1 ]; then
-        red "NOT FIXED — FIFA 15's setup or check failed (the reason is in step 3)."
-        say "To check it:  ./setup.sh --fifa15 --verify"
+    if [ "$REPAIR_F17" = 0 ] && [ "$GAMES_DONE" = 0 ] && [ "$GAMES_FAILED" = 0 ]; then
+        red "NOT FIXED — no game folder was found, so there was nothing to set up."
     else
-        red "NOT FIXED — the check above names what is still wrong."
+        red "NOT FIXED — the games list above says which game, and its section why."
     fi
     say "If it is something this cannot change (a game folder that moved, a"
     say "bottle that does not exist), put that right and run this again."
@@ -7797,7 +7849,9 @@ require_bottle_free
 # than in make_bottle afterwards. --fifa21 needs the Aurora launcher in the
 # bottle, so like a plain install it stops, and says how to make it.
 MAKE_BOTTLE=0
-if [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$F16_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
+if [ "$FIFA17_SKIP" = 1 ]; then
+    ok "no FIFA 17 folder, so the $BOTTLE bottle is left to the other games"
+elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$F16_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
     [ ! -e "$BOTTLE_DIR/$BOTTLE" ] \
         || die $E_UNSUPPORTED "There is a '$BOTTLE' folder in $BOTTLE_DIR, but it is not a
          finished bottle (no cxbottle.conf in it). Move it out of the way, or
@@ -7984,21 +8038,28 @@ say "6. Signing"
 sign_payload "$WINE"
 resign_app "$APP"
 
-if [ "$MAKE_BOTTLE" = 1 ]; then
-    make_bottle "$APP"
+if [ "$FIFA17_SKIP" = 1 ]; then
+    say ""
+    say "7-9. Skipped — FIFA 17's bottle steps (no FIFA 17 folder found)"
+    GAME_RESULT[fifa17]="skipped: no game folder found"
+    PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""
+else
+    if [ "$MAKE_BOTTLE" = 1 ]; then
+        make_bottle "$APP"
+    fi
+    configure_bottle "$APP"
 fi
-configure_bottle "$APP"
 [ "$GAME" = fifa15 ] && f15_check_game
 [ "$GAME" = fifa16 ] && f16_check_game map
 [ "$GAME" = fifa21 ] && f21_check_game
 end_own_wine_session
-# The copy is finished, so the lock goes before the FIFA 15 run takes its own.
+# The copy is finished, so the lock goes before each game's run takes its own.
 if [ "$GAME" = fifa17 ]; then
     rm -rf "$SETUP_LOCK" 2>/dev/null || true
     zshexit() { :; }
     say ""
-    say "10. FIFA 15 in the same bottle"
-    add_fifa15_to_bottle
+    say "10. The other games"
+    add_other_games
 fi
 
 # ------------------------------------------------------------- the receipt
@@ -8023,7 +8084,28 @@ mkdir -p "$RECEIPT_DIR"
 # "Done" has to mean the game will start. A missing bottle or a missing
 # stand-in means PLAY does nothing, and saying Done to that wastes an evening.
 say ""
+if [ "$FIFA17_SKIP" = 1 ]; then
+    games_summary
+    say ""
+    if [ "$GAMES_FAILED" = 0 ] && [ "$GAMES_DONE" -gt 0 ]; then
+        green "Done."
+        say ""
+        say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), then the bottle"
+        say "          named above for your game, and play it from the Aurora launcher"
+        say "          (FIFA 16: Run Command, fifa16.exe). Never press the launcher's"
+        say "          \"Repair connection\". Quit with Stop.command when you are done."
+        say ""
+        exit 0
+    elif [ "$GAMES_DONE" = 0 ] && [ "$GAMES_FAILED" = 0 ]; then
+        red "NOTHING SET UP — no game folder was found. CrossOver-FIFA itself is ready."
+    else
+        red "NOT FINISHED — the games list above says which game, and its section why."
+    fi
+    say ""
+    exit $E_INCOMPLETE
+fi
 if setup_steps_ok; then
+    GAME_RESULT[fifa17]="set up in the $BOTTLE bottle"
     green "Done."
     say ""
     if [ "$NO_AURORA" = 1 ]; then
@@ -8087,11 +8169,15 @@ if setup_steps_ok; then
     say "                                  that folder: see diagnostics/README.md."
     say "To undo everything:               ./uninstall.sh"
     say ""
-    if [ "$FIFA15_OK" != 1 ]; then
-        red "FIFA 15 is NOT FINISHED (the reason is in step 10)."
-        say "FIFA 17 is not affected. To try FIFA 15 again:  ./setup.sh --fifa15"
+    if [ "$GAME" = fifa17 ]; then
+        games_summary
         say ""
-        exit $E_INCOMPLETE
+        if [ "$GAMES_FAILED" != 0 ]; then
+            red "NOT FINISHED for another game: the games list above says which (step 10 says why)."
+            say "FIFA 17 is not affected."
+            say ""
+            exit $E_INCOMPLETE
+        fi
     fi
     exit 0
 fi
