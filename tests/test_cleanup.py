@@ -142,7 +142,7 @@ class BottleGuardTests(unittest.TestCase):
     the full install does: a live session writes the registry back out on exit
     and the settings are silently lost."""
 
-    def run_bottle_mode(self, holders, crossover):
+    def run_bottle_mode(self, holders, crossover, offer='no'):
         body = section('if [ "$MODE" = bottle ]; then', '\n# Replaces the EA licence file')
         guard = 'require_bottle_free() {' + section('require_bottle_free() {', '\n}\n') + '\n}\n'
         with tempfile.TemporaryDirectory(prefix='fifa-guard-') as directory:
@@ -155,8 +155,14 @@ class BottleGuardTests(unittest.TestCase):
             harness += 'E_PAYLOAD=4; E_UNSUPPORTED=2; E_INCOMPLETE=5; E_PERMISSION=3\n'
             harness += 'say() { :; }; ok() { :; }; green() { :; }; note() { :; }\n'
             harness += 'die() { print -r -- "STOPPED $2"; exit "$1"; }\n'
-            harness += 'prefix_holders() { print -r -- ' + shlex.quote(holders) + '; }\n'
-            harness += 'crossovers_running() { print -r -- ' + shlex.quote(crossover) + '; }\n'
+            (work / 'holders').write_text(holders)
+            (work / 'crossover').write_text(crossover)
+            harness += 'W=' + shlex.quote(directory) + '\n'
+            harness += 'prefix_holders() { cat "$W/holders"; }\n'
+            harness += 'crossovers_running() { cat "$W/crossover"; }\n'
+            # Saying yes quits CrossOver and frees the bottle, as --shutdown does.
+            harness += ('offer_to_quit_crossover() { print -r -- "ASKED $1"; [ ' + shlex.quote(offer)
+                        + ' = yes ] || return 1; : > "$W/holders"; : > "$W/crossover"; }\n')
             harness += 'hold_pid_alive() { return 1; }; wineserver_pids() { :; }\n'
             harness += 'take_setup_lock() { :; }; end_own_wine_session() { :; }\n'
             harness += 'remove_cleanup_agent() { return 1; }; f15_check_game() { :; }\n'
@@ -176,6 +182,19 @@ class BottleGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn('--unstick', result.stdout)
         self.assertFalse(configured)
+
+    def test_asks_and_carries_on_once_crossover_is_quit(self):
+        for crossover, why in [('/Applications/CrossOver.app', 'CrossOver is open'),
+                               ('', '1 leftover process(es) from an earlier CrossOver session')]:
+            with self.subTest(crossover=crossover):
+                result, configured = self.run_bottle_mode('4242', crossover, offer='yes')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('ASKED ' + why, result.stdout)
+                self.assertTrue(configured)
+                result, configured = self.run_bottle_mode('4242', crossover, offer='no')
+                self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                self.assertIn('ASKED', result.stdout)
+                self.assertFalse(configured)
 
     def test_proceeds_when_nothing_holds_the_bottle(self):
         result, configured = self.run_bottle_mode('', '')

@@ -1456,6 +1456,9 @@ make_bottle() {
     # A CrossOver that is open lists the bottles it found when it started and
     # would put the new one's registry back its own way on quit.
     running="$(crossovers_running)"
+    if [ -n "$running" ] && offer_to_quit_crossover "CrossOver is open, and the $BOTTLE bottle cannot be made while it is."; then
+        running="$(crossovers_running)"
+    fi
     if [ -n "$running" ]; then
         say "  CrossOver is still open:"
         print -r -- "$running" | sed 's/^/        /'
@@ -6506,6 +6509,37 @@ hold_pid_alive() {
     kill -0 "$hp" 2>/dev/null
 }
 
+# CrossOver open, or an old session left in a bottle, used to stop setup with
+# a command to type, which a double-click run has no way to answer. Now it
+# asks: a dialog from a double-click (CX_DIALOGS), a [Y/n] prompt in a
+# Terminal. On yes it runs --shutdown, the same clean quit as Stop.command:
+# games and launchers first, each wineserver asked to exit so the registry is
+# written out, then the CrossOver window, then every bottle freed. With no one
+# to ask (no dialogs, no terminal) nothing is quit and the caller stops as
+# before. Saves are files in the bottle and are not touched.
+offer_to_quit_crossover() {
+    local why="$1" answer=""
+    local question="$why Quit CrossOver and free the bottles now? Anything running in CrossOver is closed; your saves are kept."
+    if [ "${CX_DIALOGS:-0}" = 1 ] && [ -f "$HERE/lib/ui.zsh" ] \
+       && { source "$HERE/lib/ui.zsh"; ui_gui_ok; }; then
+        say "        $why"
+        ui_ask "CrossOver has to be closed" "$question" "Quit CrossOver and continue" "Stop" yes \
+            || return 1
+    elif [ -t 0 ] && [ -t 1 ]; then
+        say "        $why"
+        print -rn -- "        Quit CrossOver and free the bottles now? [Y/n] "
+        read -r answer || return 1
+        case "$answer" in ''|[Yy]*) ;; *) return 1 ;; esac
+    else
+        return 1
+    fi
+    say "        quitting CrossOver cleanly and freeing the bottles"
+    if ! "$HERE/setup.sh" --shutdown >/dev/null 2>&1; then
+        "$HERE/setup.sh" --shutdown || return 1
+    fi
+    ok "CrossOver is closed and the bottles are free; carrying on"
+}
+
 # Nothing may be inside the bottle while its registry is edited. Step 7 writes
 # user.reg and system.reg (the DLL override, the proxy setting, the controller
 # setting); a live Wine session keeps the registry in memory and writes it
@@ -6515,21 +6549,35 @@ hold_pid_alive() {
 # prefix_holders. The full install has always checked this; --bottle, and so
 # --fifa15 on an existing copy, did not, and edited a live bottle under an
 # open CrossOver.
+#
+# A run someone can answer asks first, and on yes quits CrossOver and frees
+# the bottles (offer_to_quit_crossover), then checks again and carries on.
 require_bottle_free() {
     local -a holding
     holding=( ${(f)"$(prefix_holders)"} )
     holding=( ${holding:#} )
     [ "${#holding}" -gt 0 ] || return 0
+    if [ "$GAME" = fifa17 ] && hold_pid_alive; then
+        die $E_PERMISSION "FIFA 17 is playing right now (started by --play-offline).
+         Quit the game first, then run this again. Nothing has been changed."
+    fi
+    local why
+    if [ -n "$(crossovers_running)" ]; then
+        why="CrossOver is open, and the $BOTTLE bottle cannot be set up while it is."
+    else
+        why="${#holding} leftover process(es) from an earlier CrossOver session are still in the $BOTTLE bottle."
+    fi
+    if offer_to_quit_crossover "$why"; then
+        holding=( ${(f)"$(prefix_holders)"} )
+        holding=( ${holding:#} )
+        [ "${#holding}" -gt 0 ] || return 0
+    fi
     if [ -n "$(crossovers_running)" ]; then
         die $E_PERMISSION "The $BOTTLE bottle is open in CrossOver.
          Quit CrossOver completely -- Command-Q, not just closing the window --
          and run this again. Setting the bottle up now would leave its settings
          to be overwritten when CrossOver does quit, and the game would say the
          servers have been shut down. Nothing has been changed."
-    fi
-    if [ "$GAME" = fifa17 ] && hold_pid_alive; then
-        die $E_PERMISSION "FIFA 17 is playing right now (started by --play-offline).
-         Quit the game first, then run this again. Nothing has been changed."
     fi
     die $E_PERMISSION "${#holding} leftover process(es) are still inside the $BOTTLE bottle
          with no CrossOver running. They will overwrite whatever is written
@@ -7813,14 +7861,18 @@ if [ "$IN_PLACE" != "1" ]; then
         is_crossover_bundle "$TARGET" \
             || die $E_UNSUPPORTED "$TARGET is not a CrossOver bundle. Refusing to remove it.
          Move it out of the way, or set AURORA_TARGET to another path."
-        if app_is_running "$TARGET"; then
+        if app_is_running "$TARGET" \
+           && ! { offer_to_quit_crossover "${TARGET:t:r} is open, and it is about to be replaced." \
+                  && ! app_is_running "$TARGET"; }; then
             die $E_PERMISSION "$TARGET is running.
          Quit it completely (Command-Q, not just closing the window), then
          run this again."
         fi
     fi
 fi
-if [ "$IN_PLACE" = "1" ] && app_is_running "$SRC"; then
+if [ "$IN_PLACE" = "1" ] && app_is_running "$SRC" \
+   && ! { offer_to_quit_crossover "${SRC:t:r} is open, and it is about to be patched." \
+          && ! app_is_running "$SRC"; }; then
     die $E_PERMISSION "$SRC is running.
          Quit it completely (Command-Q, not just closing the window), then
          run this again."
@@ -7859,6 +7911,9 @@ elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "
          $BOTTLE) and quit CrossOver. Then run this again.
          Nothing has been changed."
     RUNNING="$(crossovers_running)"
+    if [ -n "$RUNNING" ] && offer_to_quit_crossover "CrossOver is open, and the $BOTTLE bottle has to be made while it is closed."; then
+        RUNNING="$(crossovers_running)"
+    fi
     if [ -n "$RUNNING" ]; then
         say "  CrossOver is open:"
         print -r -- "$RUNNING" | sed 's/^/        /'

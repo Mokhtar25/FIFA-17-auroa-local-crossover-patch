@@ -576,6 +576,37 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
                 self.assertFalse((self.work / 'no-app.app').exists())
                 self.assertFalse((self.work / 'no-bottles').exists())
 
+    def test_crossover_open_or_leftovers_ask_and_quit_cleanly_on_yes(self):
+        # Setup used to stop with "./setup.sh --unstick" for the player to type.
+        (self.package / "setup.sh").chmod(0o755)
+        harness = ('set -eu\nHERE=' + shlex_quote(str(self.package)) + '\n'
+                   'say() { print -r -- "$*"; }; ok() { say "$@"; }\n'
+                   + function_source("offer_to_quit_crossover")
+                   + '\noffer_to_quit_crossover "7 leftover process(es) are in the Aurora17 bottle."'
+                   ' && print -r -- ANSWER=yes || print -r -- ANSWER=no\n')
+        for replies, env, answer, calls, asked in [
+            (['Quit CrossOver and continue'], {}, 'yes', [['--shutdown']], True),
+            (['Stop'], {}, 'no', [], True),
+            (['__cancel__'], {}, 'no', [], True),
+            # No one to ask (no dialogs, stdin not a terminal): nothing is quit.
+            (['Quit CrossOver and continue'], {'CX_DIALOGS': '0'}, 'no', [], False),
+            # A shutdown that fails is shown, and the caller still stops.
+            (['Quit CrossOver and continue'], {'SHUTDOWN_RC': '3'}, 'no',
+             [['--shutdown'], ['--shutdown']], True),
+        ]:
+            with self.subTest(replies=replies, env=env):
+                self.log.unlink(missing_ok=True)
+                self.calls.unlink(missing_ok=True)
+                result = self.run_shell(harness, replies, **env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('ANSWER=' + answer, result.stdout)
+                self.assertEqual(self.setup_calls(), calls)
+                self.assertEqual(self.log.exists(), asked)
+                if asked:
+                    record = json.loads(self.log.read_text().splitlines()[0])
+                    self.assertEqual(record['args'][1:5][2:], ['Quit CrossOver and continue', 'Stop'])
+                    self.assertIn('7 leftover process(es)', record['args'][2])
+
     def test_no_fifa17_is_skipped_and_never_stops_the_other_games(self):
         # START HERE and Fix my installation are for every game. Skip, Cancel
         # in the picker, or giving up after a wrong folder all carry on.
