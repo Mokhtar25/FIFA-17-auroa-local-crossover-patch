@@ -8208,7 +8208,7 @@ fi
     # on one of these ports -- a local FUT server on 3216, say -- is the
     # user's own, and a SIGKILL could land mid-write on whatever it keeps.
     # Only Wine's own processes and wineserver are ever signalled here.
-    local port_pids P C
+    local port_pids= P= C=
     PORT_KILL=(); PORT_LIVE=(); PORT_OTHER=()
     for P in ${(f)"$(/usr/sbin/lsof -nP -iTCP:$ALL_PORTS -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)"}; do
         [ -n "$P" ] || continue
