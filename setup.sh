@@ -23,6 +23,9 @@
 # without them an online match desyncs at kick-off.)
 # (For FIFA 16 it changes nothing in the game folder; if the bottle has no
 # drive letter that reaches the folder, it gives the bottle one.)
+# (For FIFA 20 it needs no game folder at all: REFUT asks for FIFA20.exe in its
+# own window. It gives REFUT a bottle of its own, and two small stand-ins in
+# it, a powershell.exe and an ipconfig.exe.)
 #
 #   ./setup.sh [/path/to/CrossOver.app]   install
 #   ./setup.sh --version                  this package's version (VERSION)
@@ -93,12 +96,22 @@
 #                                         PowerShell and DNS Client stand-ins. The
 #                                         bottle (Aurora17 by default) must exist
 #   ./setup.sh --fifa21 --verify          check the FIFA 21 setup, change nothing
+#   ./setup.sh --fifa20                   set FIFA 20 up for the REFUT launcher: the
+#                                         copy if it is missing, the REFUT bottle
+#                                         (made if it is missing), its settings, two
+#                                         registry keys, the PowerShell and ipconfig
+#                                         stand-ins. REFUT itself is installed from
+#                                         its own "REFUT Launcher.exe" in that bottle
+#   ./setup.sh --fifa20 --verify          check the FIFA 20 setup, change nothing
 #   ./setup.sh --choose-folder fifa15 [path]   remember a game's folder
 #   ./setup.sh --forget-folder fifa15          forget only that folder choice
 #   AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15   (or --fifa16, --fifa21) add the game to
 #                                         another game's bottle. Needs a copy whose
 #                                         ntdll.so gives each game its own settings;
 #                                         see SETUP.md "Several games in one bottle"
+#   FIFA20_BOTTLE='My REFUT' ./setup.sh --fifa20   FIFA 20 in a bottle of another name.
+#                                         It never shares one: REFUT's hosts routes
+#                                         would catch the other games' launchers
 #
 # Exit codes:  0 verified   2 unsupported/usage   3 permission
 #              4 corrupt payload or wrong CrossOver   5 incomplete install
@@ -233,6 +246,17 @@ case "${1:-}" in
             --shutdown) MODE=shutdown; shift ;;
             --resign) MODE=resign; shift ;;
             -*) print -r -- "Unknown option after --fifa21: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
+        esac ;;
+    --fifa20)
+        # And for FIFA 20 under REFUT: AURORA_GAME=fifa20, the same way.
+        AURORA_GAME=fifa20; MODE=fifa20; shift
+        case "${1:-}" in
+            --verify) MODE=verify; shift ;;
+            --bottle) MODE=bottle; shift ;;
+            --unstick) MODE=unstick; shift ;;
+            --shutdown) MODE=shutdown; shift ;;
+            --resign) MODE=resign; shift ;;
+            -*) print -r -- "Unknown option after --fifa20: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
         esac ;;
     --help|-h)
         sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -446,6 +470,11 @@ fi
 # four are ours; a17hosts.dylib is new; ws2_32.so is CrossOver's own, edited in
 # place by step 4 and therefore no longer covered by CodeWeavers' signature.
 MACHO=( ntdll.so winecoreaudio.so crypt32.so win32u.so a17hosts.dylib ws2_32.so )
+# Two more outside lib/wine, both under the copy's SharedSupport/CrossOver:
+# cxlowport.dylib, new, and wineserver, CrossOver's own, edited in place the
+# same way as ws2_32.so (see "loopback ports below 1024" below). bin is a link
+# to "CrossOver-Hosted Application", which is where wineserver really is.
+MACHO_CX=( lib64/cxlowport.dylib bin/wineserver )
 
 # FIFA 17 talks to EA's servers by name. Aurora17 answers those names locally, so
 # they have to resolve to this machine -- otherwise the game reaches the real EA
@@ -478,6 +507,42 @@ AURORA_HOSTS=(
   pal.gt.easfc.ea.com
   pg.fifa12.test.easportsworld.ea.com
 )
+
+# ------------------------------------------- loopback ports below 1024
+# REFUT's online bridge (FIFA 20) listens on 127.0.0.1:443, and the game
+# connects there. macOS lets anyone bind 0.0.0.0 to a port below 1024 but not
+# 127.0.0.1, so under Wine that bind fails with WSAEACCES (10013) and the
+# bridge stops with "Could not bind a required local bridge port". Its Python
+# is embedded with site off and a signed ._pth, so nothing can be changed on
+# that side.
+#
+# In this CrossOver every bind() and connect() of every bottle happens in
+# wineserver, so cxlowport.dylib goes in front of libSystem there exactly as
+# a17hosts.dylib does for ws2_32.so: wineserver's LC_LOAD_DYLIB for
+# /usr/lib/libSystem.B.dylib becomes @rpath/cxlowport.dylib, found through
+# the @loader_path/../lib64 rpath wineserver already carries, so the file goes
+# into CrossOver/lib64. A refused loopback bind below 1024 moves up by 18000,
+# and connect() and the two name calls follow it, so neither end ever sees the
+# moved port (the top of fixes/cxlowport.c). No pf rule, nothing outside the
+# copy, no password.
+#
+# And only where a bottle asks for it: the library does nothing unless
+# CX_LOWPORT=1 is in wineserver's environment, which wineserver inherits from
+# the bottle's cxbottle.conf, and setup puts that in FIFA 20's REFUT bottle
+# alone (its BOTTLE_SETTINGS). In every other bottle macOS refuses those binds
+# as it always did, so a program that falls back to another port still does.
+# That is why every install can carry it, and not only --fifa20's: wired in,
+# it changes nothing until a bottle says so. CX_LOWPORT_DEBUG=1 beside it in
+# the bottle logs each move.
+#
+# wineserver is then signed again ad hoc, like ws2_32.so, which leaves it
+# without CodeWeavers' signature and hardened runtime: under that runtime,
+# library validation would refuse an ad-hoc cxlowport.dylib.
+LOWPORT=x86_64-unix/cxlowport.dylib
+LOWPORT_PATH=@rpath/cxlowport.dylib
+# Where each goes, under the copy's SharedSupport/CrossOver (MACHO_CX).
+LOWPORT_DEST=lib64/cxlowport.dylib
+WINESERVER=bin/wineserver
 
 # The hosts file inside the bottle -- the one a17hosts.dylib reads, and the one
 # Aurora17's launcher maintains. AURORA_HOSTS_FILE overrides it, for testing
@@ -666,6 +731,91 @@ ws2_32_is_patched() {
     otool -L "$1/x86_64-unix/ws2_32.so" 2>/dev/null | grep -q "$RESOLVER_PATH"
 }
 
+# Is wineserver going through cxlowport.dylib, or still straight to libSystem?
+# Takes the copy's lib/wine, as ws2_32_is_patched does; wineserver is in
+# SharedSupport/CrossOver, two folders up.
+wineserver_is_patched() {
+    otool -L "${1:h:h}/$WINESERVER" 2>/dev/null | grep -q "$LOWPORT_PATH"
+}
+
+# Whether install_lowport would write anything into the copy: no
+# cxlowport.dylib, not the shipped build, or wineserver not wired to it. It
+# writes nothing and prints nothing, so a caller can ask before it has made
+# sure that no CrossOver and no Wine session still has wineserver open
+# (require_wineserver_idle). Signing alone does not count: that is
+# sign_payload's, and every caller signs anyway.
+lowport_needs_writing() {
+    local cx="${1:h:h}" want
+    want="$(macho_uuid "$HERE/fixes/$LOWPORT")"
+    [ -n "$want" ] && [ -f "$cx/$LOWPORT_DEST" ] \
+        && [ "$(macho_uuid "$cx/$LOWPORT_DEST")" = "$want" ] \
+        && wineserver_is_patched "$1" && return 1
+    return 0
+}
+
+# install_lowport rewrites wineserver. A CrossOver that is open, or a Wine
+# session still running without one (a launcher started from here, an
+# orphan), has the old file in use and would write its bottles' registry back
+# over whatever comes next. So ask, the way require_bottle_free does -- on yes
+# that is --shutdown, the same clean quit as Stop.command -- and stop when one
+# is still there. $1 is the copy, for the messages.
+require_wineserver_idle() {
+    local app="$1"
+    [ -z "$(crossovers_running)" ] && [ -z "$(wineserver_pids)" ] && return 0
+    offer_to_quit_crossover "CrossOver or a Wine session is running, and ${app:t}'s wineserver is about to be changed." || true
+    [ -z "$(crossovers_running)" ] && [ -z "$(wineserver_pids)" ] && return 0
+    die $E_PERMISSION "CrossOver or a Wine session is still running, and ${app:t}'s
+         wineserver cannot be changed while it is. Quit CrossOver completely
+         (Command-Q), or double-click Stop.command, then run this again.
+         Nothing has been changed."
+}
+
+# The installer, --repair, --resign and --fifa20 all put cxlowport.dylib in
+# and point wineserver at it this way (see "loopback ports below 1024"). Each
+# half that is already right says ok and is left alone. LOWPORT_CHANGED=1
+# when anything was written, or when either file is not signed as it is, so
+# the caller knows to sign; the signing itself is sign_payload's.
+#
+# The library is compared by LC_UUID, as --verify does a17hosts.dylib: signing
+# changes its bytes, not its build. A new file goes in beside the old and is
+# moved over it, rather than cp rewriting the old one in place, which a
+# wineserver that is still running may have mapped.
+install_lowport() {
+    local wine="$1" app="$2" cx="${1:h:h}" want f
+    LOWPORT_CHANGED=0
+    want="$(macho_uuid "$HERE/fixes/$LOWPORT")"
+    if [ -n "$want" ] && [ -f "$cx/$LOWPORT_DEST" ] \
+       && [ "$(macho_uuid "$cx/$LOWPORT_DEST")" = "$want" ]; then
+        ok "${LOWPORT:t}"
+    else
+        if ! { cp -X "$HERE/fixes/$LOWPORT" "$cx/$LOWPORT_DEST.new" \
+               && mv -f "$cx/$LOWPORT_DEST.new" "$cx/$LOWPORT_DEST"; }; then
+            rm -f "$cx/$LOWPORT_DEST.new" 2>/dev/null || true
+            die $E_PERMISSION "Could not install ${LOWPORT:t} into $app.
+$APP_MGMT_HINT"
+        fi
+        LOWPORT_CHANGED=1
+        ok "${LOWPORT:t} — installed"
+    fi
+    if wineserver_is_patched "$wine"; then
+        ok "wineserver — already lets Windows programs listen on 127.0.0.1 below port 1024"
+    else
+        install_name_tool -change "$LIBSYSTEM" "$LOWPORT_PATH" "$cx/$WINESERVER" 2>/dev/null \
+            || die $E_PERMISSION "Could not point wineserver at ${LOWPORT:t}.
+$APP_MGMT_HINT"
+        wineserver_is_patched "$wine" \
+            || die $E_PAYLOAD "wineserver did not take the change. REFUT's online bridge
+         cannot listen on 127.0.0.1:443, so FIFA 20 will not connect.
+         Run ./uninstall.sh, then run this again."
+        LOWPORT_CHANGED=1
+        ok "wineserver — now lets Windows programs listen on 127.0.0.1 below port 1024"
+    fi
+    for f in $MACHO_CX; do
+        codesign --verify "$cx/$f" 2>/dev/null || LOWPORT_CHANGED=1
+    done
+    return 0
+}
+
 # Written after a successful install so uninstall knows exactly what to undo,
 # rather than guessing from a list of default locations. Guessing is what made
 # an earlier uninstaller delete a file out of a folder nobody had named.
@@ -675,6 +825,25 @@ ws2_32_is_patched() {
 # to be deleted.
 RECEIPT_DIR="${AURORA_RECEIPT_DIR:-$HOME/Library/Application Support/Aurora17}"
 RECEIPT="$RECEIPT_DIR/install-receipt.conf"
+
+# The receipt's bottle= is the one the last full install set up. FIFA 20's is
+# always another, so it has a line of its own, fifa20_bottle=, for
+# uninstall.sh to find REFUT's stand-ins in a bottle of any name. --fifa20 on
+# an existing copy adds it here; the full install keeps it when it writes the
+# receipt afresh (see "the receipt" at the end). Only a receipt that is there
+# is changed: without one there is no install to add it to.
+receipt_record_fifa20_bottle() {
+    local tmp
+    [ -f "$RECEIPT" ] || return 0
+    grep -qxF -- "fifa20_bottle=$BOTTLE" "$RECEIPT" && return 0
+    tmp="$(mktemp "$RECEIPT.XXXXXX" 2>/dev/null)" || return 0
+    if { grep -v '^fifa20_bottle=' "$RECEIPT"; print -r -- "fifa20_bottle=$BOTTLE"; } > "$tmp"; then
+        mv -f "$tmp" "$RECEIPT" 2>/dev/null || rm -f "$tmp"
+    else
+        rm -f "$tmp"
+    fi
+    return 0
+}
 
 # ---------------------------------------------------------------- discovery
 # An explicit path always wins; otherwise the two standard locations. Spotlight
@@ -774,10 +943,10 @@ CAS_LINK_ID=com.fifa17-crossover.cas-link
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 case "$GAME" in
-    fifa17|fifa15|fifa16|fifa21) ;;
-    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15, fifa16 or fifa21)"; exit $E_UNSUPPORTED ;;
+    fifa17|fifa15|fifa16|fifa21|fifa20) ;;
+    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15, fifa16, fifa21 or fifa20)"; exit $E_UNSUPPORTED ;;
 esac
-# Whether the game was named (--fifa15, --fifa16, --fifa21 or AURORA_GAME) or
+# Whether the game was named (--fifa15, --fifa16, --fifa21, --fifa20 or AURORA_GAME) or
 # plain FIFA 17 was assumed. A plain --verify also prints the table of every
 # game in the bottle (verify_games_table); a named one checks that game only.
 GAME_EXPLICIT=0
@@ -838,9 +1007,12 @@ f15_default_bottle() {
 # What the person named, before --repair exports its own bottle for its steps.
 AURORA_BOTTLE_GIVEN="${AURORA_BOTTLE:-}"
 # FIFA 21 uses FIFA 17's common bottle unless AURORA_BOTTLE names another.
+# FIFA 20 has a bottle of its own, REFUT by default, as FIFA 16 has FIFA16
+# (see "FIFA 20 never shares a bottle" below for why it must).
 case "$GAME" in
     fifa15) BOTTLE="$(f15_default_bottle)" || exit $E_UNSUPPORTED ;;
     fifa16) BOTTLE="${AURORA_BOTTLE:-${FIFA16_BOTTLE:-FIFA16}}" ;;
+    fifa20) BOTTLE="${AURORA_BOTTLE:-${FIFA20_BOTTLE:-REFUT}}" ;;
     *)      BOTTLE="${AURORA_BOTTLE:-${FIFA17_BOTTLE:-Aurora17}}" ;;
 esac
 
@@ -874,10 +1046,10 @@ SHIPPED_NTDLL="$HERE/fixes/x86_64-unix/ntdll.so"
 # Which ntdll.so the bottle will run on once this run is over. An install
 # makes the copy afresh from fixes/, --repair refreshes it from there, and
 # --fifa15 and --fifa16 either install or bring the copy's ntdll.so up to
-# the shipped one (add_game_ntdll). --fifa21 installs when there is no copy
-# and otherwise leaves it as it is, like every other mode.
+# the shipped one (add_game_ntdll), and so does --fifa20. --fifa21 installs
+# when there is no copy and otherwise leaves it as it is, like every other mode.
 case "$MODE" in
-    install|repair|fifa15|fifa16) PROFILE_NTDLL="$SHIPPED_NTDLL" ;;
+    install|repair|fifa15|fifa16|fifa20) PROFILE_NTDLL="$SHIPPED_NTDLL" ;;
     fifa21)
         if [ -d "$COPY_APP" ]; then PROFILE_NTDLL="$COPY_NTDLL"; else PROFILE_NTDLL="$SHIPPED_NTDLL"; fi ;;
     *) PROFILE_NTDLL="$COPY_NTDLL" ;;
@@ -902,8 +1074,10 @@ fi
 # game set up in the bottle first may have its own value there, and with the
 # table that value no longer reaches any game the table lists. add_setting
 # notes these instead of stopping.
+# Not FIFA 20's: FIFA20.exe is not in the table, so the bottle's own
+# CX_DR_TRAP is the one it runs with, and its bottle is its alone.
 SOFT_SETTINGS=()
-[ "$PROFILES" = 1 ] && SOFT_SETTINGS=( CX_DR_TRAP )
+[ "$PROFILES" = 1 ] && [ "$GAME" != fifa20 ] && SOFT_SETTINGS=( CX_DR_TRAP )
 
 # One variable out of the bottle's cxbottle.conf, empty when it is not there.
 conf_value() {
@@ -985,6 +1159,30 @@ elif [ "$GAME" = fifa21 ]; then
         BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
     fi
     GAME_LABEL="FIFA 21"
+elif [ "$GAME" = fifa20 ]; then
+    # FIFA 20 under REFUT. FIFA20.exe is not in the per-game table, so it runs
+    # with whatever the bottle says, and the bottle is FIFA 20's alone, so
+    # CX_DR_TRAP=2 goes in bare with or without the table. Mode 2 it is: with
+    # FIFA 20 started on its own, 2 reached the point where the game registers
+    # its friends operation in 3 runs out of 3, 0 and 3 in 1 out of 3 (the
+    # other runs crashed 0xC0000005; HANDOFF-refut-launcher.md). FIFA 17's
+    # WebView2 folder is for its own launchers and stays out. CX_LOWPORT=1
+    # switches cxlowport.dylib on in this bottle's wineserver, so REFUT's
+    # bridge can listen on 127.0.0.1:443 (see "loopback ports below 1024");
+    # no other bottle gets it.
+    BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" "CX_LOWPORT=1" )
+    GAME_LABEL="FIFA 20 (REFUT)"
+    # REFUT starts threads in FIFA20.exe from outside (the match-end guard,
+    # the maths bridge, the friends adapter), and FIFA 20's protector crashes
+    # the game about 40 seconds in when such a thread exits the way Wine used
+    # to end it (patches/crossover-26.3-remote-thread-exit.patch). That fix
+    # leaves no string of its own in ntdll.so. It shipped in the same build as
+    # the Aurora launcher's elevation, which build.sh applies straight after
+    # it, so that patch's variable is the marker: an ntdll.so built with
+    # CX_AURORA_ELEVATE in it has the remote-thread fix too.
+    NTDLL_MARKER=CX_AURORA_ELEVATE
+    NTDLL_OLD="an older"
+    NTDLL_WHY="FIFA 20 crashes about 40 seconds in under REFUT with it"
 else
     # CX_DR_TRAP=2 stays bare even with the table, which gives FIFA17.exe and
     # _fifa17.exe mode 2 itself: every FIFA 17 bottle has had it, and the
@@ -1026,10 +1224,66 @@ fi
 # the same settings, so those two share a bottle with or without the table:
 # FIFA 21 was first played from Aurora17, before there was one. FIFA 21's
 # bottle has no setting of its own, so nothing here takes a bottle for it.
+#
+# FIFA 20 never shares a bottle, with or without the table. REFUT writes its
+# hosts routes on every PLAY and never takes them out again
+# (spring18.gosredirector.ea.com, fut.ea.com and utas.*.fut.ea.com, all to
+# 127.0.0.1), and a17hosts.dylib reads that file for every program in the
+# bottle: in Aurora17 they sent FIFA 21's Aurora launcher to a redirector that
+# was not there. So --fifa20 refuses a bottle another game is set up in, by its
+# name or its marker. FIFA 17's marker, a bare CX_DR_TRAP=2, is FIFA 20's own
+# setting too, so there the launchers' own folders and FIFA 17's WebView2
+# setting tell instead. Every other game refuses FIFA 20's bottle by name.
 BOTTLE_PATH="$BOTTLE_DIR/$BOTTLE"
+F20_BOTTLE="${FIFA20_BOTTLE:-REFUT}"
+F20_BOTTLE_PATH="$BOTTLE_DIR/$F20_BOTTLE"
+# Whether REFUT has installed itself in the bottle at path $1.
+refut_in_bottle() {
+    local -a l
+    l=( "$1/drive_c/users"/*/AppData/Local/REFUT/Launcher/"REFUT Launcher.exe"(N) )
+    (( ${#l} ))
+}
+# Whether the bottle at path $1 holds another game's launcher: the Aurora
+# launcher, Aurora17's record, CAS or RebornFUT in a user's AppData\Local, or
+# FIFA 17's WebView2 setting.
+other_launchers_in_bottle() {
+    local -a l
+    l=( "$1/drive_c/users"/*/AppData/Local/(Aurora15Connector|Aurora17|CAS|RebornFUT*)(N/) )
+    (( ${#l} )) && return 0
+    grep -q '^"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"' "$1/cxbottle.conf" 2>/dev/null
+}
+F20_WHY=""
+if [ "$GAME" = fifa20 ]; then
+    for OTHER_BOTTLE in "${FIFA17_BOTTLE:-Aurora17}" "${FIFA15_BOTTLE:-Aurora15}" "${FIFA16_BOTTLE:-FIFA16}"; do
+        OTHER_BOTTLE_PATH="$BOTTLE_DIR/$OTHER_BOTTLE"
+        [ "${(L)BOTTLE_PATH:A}" = "${(L)OTHER_BOTTLE_PATH:A}" ] \
+            && F20_WHY="is the bottle the other games are set up in by default"
+    done
+    if [ -z "$F20_WHY" ] && grep -Eq '^"(CX_TOPDOWN_LIMIT|CX_FIFA16_DSTFIX)"[[:space:]]*=' "$BOTTLE_PATH/cxbottle.conf" 2>/dev/null; then
+        F20_WHY="has FIFA 15's or FIFA 16's settings in it"
+    fi
+    if [ -z "$F20_WHY" ] && other_launchers_in_bottle "$BOTTLE_PATH"; then
+        F20_WHY="has another game's launcher in it"
+    fi
+    [ -z "$F20_WHY" ] || die $E_UNSUPPORTED "FIFA 20 needs a bottle of its own, and '$BOTTLE' $F20_WHY.
+         REFUT writes hosts routes (spring18.gosredirector.ea.com, fut.ea.com,
+         utas.*.fut.ea.com to 127.0.0.1) on every PLAY and never takes them
+         out, and in a shared bottle they send the other launchers nowhere.
+         Leave AURORA_BOTTLE and FIFA20_BOTTLE unset for the REFUT bottle, or
+         name a new one:
+             FIFA20_BOTTLE='My REFUT' ./setup.sh --fifa20
+         Nothing has been changed."
+elif [ "${(L)BOTTLE_PATH:A}" = "${(L)F20_BOTTLE_PATH:A}" ]; then
+    die $E_UNSUPPORTED "'$BOTTLE' is FIFA 20's bottle, and REFUT shares it with no other game.
+         REFUT writes hosts routes (spring18.gosredirector.ea.com, fut.ea.com,
+         utas.*.fut.ea.com to 127.0.0.1) on every PLAY and never takes them
+         out; $GAME_LABEL's launchers would reach nothing through them.
+         Choose another bottle for $GAME_LABEL. Nothing has been changed."
+fi
 SHARED_WITH=()
 for OTHER_GAME in fifa17 fifa15 fifa16; do
-    [ "$OTHER_GAME" != "$GAME" ] || continue
+    # FIFA 20's bottle is checked above, and shares with none of these.
+    [ "$OTHER_GAME" != "$GAME" ] && [ "$GAME" != fifa20 ] || continue
     case "$OTHER_GAME" in
         fifa17) OTHER_BOTTLE="${FIFA17_BOTTLE:-Aurora17}"; OTHER_LABEL="FIFA 17"
                 OTHER_SETTING='"CX_DR_TRAP"[[:space:]]*=[[:space:]]*"2"' ;;
@@ -1085,10 +1339,18 @@ done
 # --fifa21 is the same for FIFA 21, except that it never makes the bottle:
 # FIFA 21 plays only from the Aurora launcher, which has to be installed in
 # the bottle first, and a bottle made here would not have it.
+#
+# --fifa20 is the same for FIFA 20 under REFUT, and makes its bottle the way
+# --fifa16 does: REFUT installs itself into whatever bottle it is first run
+# in, so the bottle comes first. A copy there gets the ntdll.so with the
+# remote-thread fix and cxlowport.dylib if it lacks either. It ends with
+# REFUT looked for in the bottle, and how to install it if it is not there.
 F15_ONE=0
 F16_ONE=0
-if [ "$MODE" = fifa15 ] || [ "$MODE" = fifa16 ] || [ "$MODE" = fifa21 ]; then
-    if [ "$MODE" = fifa15 ]; then F15_ONE=1; elif [ "$MODE" = fifa16 ]; then F16_ONE=1; fi
+F20_ONE=0
+if [ "$MODE" = fifa15 ] || [ "$MODE" = fifa16 ] || [ "$MODE" = fifa21 ] || [ "$MODE" = fifa20 ]; then
+    if [ "$MODE" = fifa15 ]; then F15_ONE=1; elif [ "$MODE" = fifa16 ]; then F16_ONE=1
+    elif [ "$MODE" = fifa20 ]; then F20_ONE=1; fi
     if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
@@ -1100,9 +1362,11 @@ fi
 ALL_PORTS=47170,47171,47172,47173,3216
 if [ "$GAME" = fifa15 ]; then
     GAME_PORTS=3216; GAME_PORTS_LABEL=3216
-elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ]; then
+elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ] || [ "$GAME" = fifa20 ]; then
     # FIFA 16 runs on its own: no Aurora, no port. FIFA 21's Aurora launcher
-    # holds none this script knows of.
+    # holds none this script knows of. REFUT's bridge holds its own ports
+    # (8080, 17502, 42230-42232, 44321, and 443 moved to 18443) only while
+    # it plays, and quits with it.
     GAME_PORTS=""; GAME_PORTS_LABEL=""
 else
     GAME_PORTS=47170,47171,47172,47173; GAME_PORTS_LABEL=47170-47173
@@ -1576,6 +1840,31 @@ $APP_MGMT_HINT"
     resign_app "$app"
 }
 
+# FIFA 20's piece of the copy itself: cxlowport.dylib and the wineserver that
+# loads it (see "loopback ports below 1024"). Every install since it exists
+# has both; a copy made before has neither, and REFUT's bridge then cannot
+# listen on 127.0.0.1:443. Installing them is install_lowport, then the
+# signing, as for f16_add_win32u. A stop when it fails: FIFA 20 cannot connect
+# without it.
+f20_add_lowport() {
+    local app="$1" wine="$1/Contents/SharedSupport/CrossOver/lib/wine"
+    local cx="$1/Contents/SharedSupport/CrossOver" f signed=1
+    [ -f "$HERE/fixes/$LOWPORT" ] \
+        || die $E_PAYLOAD "fixes/${LOWPORT:t} is missing from this package. Download it again."
+    for f in $MACHO_CX; do codesign --verify "$cx/$f" 2>/dev/null || signed=0; done
+    if ! lowport_needs_writing "$wine" && [ "$signed" = 1 ]; then
+        ok "${LOWPORT:t} -- already in, and wineserver goes through it"
+        return 0
+    fi
+    say "        ${app:t} cannot let REFUT's bridge listen on 127.0.0.1:443 yet"
+    require_app_closed "$app"
+    require_clt
+    lowport_needs_writing "$wine" && require_wineserver_idle "$app"
+    install_lowport "$wine" "$app"
+    sign_payload "$wine"
+    resign_app "$app"
+}
+
 # The ntdll.so that fixes/ ships carries FIFA 17's five patches plus the
 # top-down allocation limit FIFA 15 needs (inert until CX_TOPDOWN_LIMIT is set,
 # which only the FIFA 15 bottle does). A copy made before that build has the
@@ -1917,8 +2206,9 @@ OVERRIDE_SECTION='[Software\\Wine\\DllOverrides]'
 # Origin/LSX side working perfectly (FIFA 15 checkpoint fact 81). FIFA 16:
 # none. Nothing redirects it anywhere, and the bottle the fix was proven in
 # had no override, so it gets none. FIFA 21: version, as FIFA 17. The Aurora
-# launcher's proxy version.dll sits beside FIFA21.exe.
-if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; elif [ "$GAME" = fifa16 ]; then OVERRIDE_DLL=""; else OVERRIDE_DLL=version; fi
+# launcher's proxy version.dll sits beside FIFA21.exe. FIFA 20: none. REFUT
+# redirects by hosts routes and a local bridge, not by a proxy DLL.
+if [ "$GAME" = fifa15 ]; then OVERRIDE_DLL=dinput8; elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa20 ]; then OVERRIDE_DLL=""; else OVERRIDE_DLL=version; fi
 OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 # The programs the overrides are written for. Each override used to go in the
 # bottle-wide section above, which is right for a bottle that holds one game
@@ -1940,7 +2230,10 @@ OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 # beside FIFA 13, 16 and 21 -- and every one of them was proven with the
 # bottle-wide override. A bottle-wide version=native,builtin is harmless to
 # FIFA 16, which has no version.dll of its own to prefer.
-if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa16 ]; then OVERRIDE_EXES=(); elif [ "$GAME" = fifa21 ]; then OVERRIDE_EXES=(FIFA21.exe); else OVERRIDE_EXES=(FIFA17.exe _fifa17.exe); fi
+# FIFA 20 has two, for its ucrtbase (see the C runtime override below):
+# FIFA20.exe, and REFUT Launcher.exe, in whose process REFUT's maths bridge
+# runs before it loads the same DLL into the game.
+if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa16 ]; then OVERRIDE_EXES=(); elif [ "$GAME" = fifa21 ]; then OVERRIDE_EXES=(FIFA21.exe); elif [ "$GAME" = fifa20 ]; then OVERRIDE_EXES=(FIFA20.exe "REFUT Launcher.exe"); else OVERRIDE_EXES=(FIFA17.exe _fifa17.exe); fi
 
 # ------------------------------------------------ the C runtime override
 # An online match is a lockstep simulation: every client runs the same maths on
@@ -1975,7 +2268,16 @@ if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa1
 # The PowerShell stand-in writes that override at PLAY (for the bridge too);
 # configure_bottle writes FIFA21.exe's now, for that one program only, so
 # nothing else in the bottle is moved off Wine's ucrtbase.
-if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ]; then CRT_OVERRIDE_DLLS=(); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
+#
+# FIFA 20 is the same story under REFUT, with nothing at PLAY to write it.
+# REFUT's maths bridge (in Refut.Client.dll, in REFUT's own process) loads its
+# runtime's pinned ucrtbase.dll 10.0.26100.7175 by full path, into that
+# process and into FIFA20.exe, and Wine hands back the builtin it has already
+# loaded unless the program prefers native. So configure_bottle writes
+# ucrtbase for both programs (OVERRIDE_EXES); without it REFUT's maths bridge
+# never reports READY and the start-up stops there. The bottle's system32
+# ucrtbase is a Wine placeholder, so nothing else in it changes.
+if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ] || [ "$GAME" = fifa20 ]; then CRT_OVERRIDE_DLLS=(); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
 
 bottle_user_reg()   { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
 bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
@@ -2524,7 +2826,7 @@ entitlement_keys() {
 }
 
 sign_payload() {
-    local wine="$1" so
+    local wine="$1" so f cx="${1:h:h}" n=${#MACHO}
     for so in $MACHO; do
         [ -f "$wine/x86_64-unix/$so" ] \
             || die $E_PAYLOAD "$so is missing from $wine/x86_64-unix.
@@ -2534,7 +2836,23 @@ sign_payload() {
 $APP_MGMT_HINT
          If that was already on, run ./uninstall.sh and install again."
     done
-    ok "the ${#MACHO} Mac files"
+    # cxlowport.dylib and wineserver (MACHO_CX), once install_lowport has
+    # wired them. A copy from before has neither, and its wineserver still
+    # carries CodeWeavers' own signature, which is better left on it than
+    # replaced by ours for nothing. No hardened runtime: see LOWPORT.
+    if wineserver_is_patched "$wine"; then
+        for f in $MACHO_CX; do
+            [ -f "$cx/$f" ] \
+                || die $E_PAYLOAD "${f:t} is missing from $cx/${f:h}, and wineserver needs it.
+         The copy is incomplete. Run ./setup.sh --repair to put it back."
+            codesign --force --sign - "$cx/$f" 2>/dev/null \
+                || die $E_PERMISSION "Could not sign ${f:t}.
+$APP_MGMT_HINT
+         If that was already on, run ./uninstall.sh and install again."
+        done
+        n=$(( n + ${#MACHO_CX} ))
+    fi
+    ok "the $n Mac files"
 }
 
 resign_app() {
@@ -3894,12 +4212,21 @@ verify_install() {
                 ok "$k is another game's value here; $GAME_LABEL takes its own from the table"
             else
                 bad "$k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1))
+                # The one setting whose absence says nothing about why.
+                if [ "$k" = CX_LOWPORT ]; then
+                    say "        so cxlowport.dylib stays off in this bottle's wineserver and"
+                    say "        REFUT's bridge cannot listen on 127.0.0.1:443. Quit CrossOver"
+                    say "        fully, then re-run ./setup.sh --fifa20"
+                fi
             fi
         done
         # Where the game's own settings come from, now that they need not be
         # in the bottle at all. Not a BAD either way: the line above already
-        # says whether the bottle has what this setup needs.
-        if [ "$PROFILES" = 1 ]; then
+        # says whether the bottle has what this setup needs. FIFA20.exe is
+        # not in the table, so the lines above are its settings.
+        if [ "$GAME" = fifa20 ]; then
+            ok "FIFA 20's own settings: the bottle's (FIFA20.exe is not in the per-game table)"
+        elif [ "$PROFILES" = 1 ]; then
             GAME_SRC="$(game_settings_source "$GAME")"
             case "$GAME_SRC" in
                 *missing*) note "$GAME_LABEL's own settings: $GAME_SRC (${COPY_APP:t}'s ntdll.so has the per-game table)" ;;
@@ -3943,7 +4270,7 @@ verify_install() {
                           | sed -n 's/^"\([A-Za-z_][A-Za-z0-9_]*\)" = .*/\1/p')"}; do
             [ -n "$fk" ] || continue
             case "$fk" in
-                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|CX_FIFA16_DSTFIX|CX_PF_PAE|CX_GAME_PROFILES|WINE_COREAUDIO_EXCLUDE|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|PROMPT) ;;
+                CX_GRAPHICS_BACKEND|CX_DR_TRAP|WINE_SIMULATE_WRITECOPY|CX_TOPDOWN_LIMIT|CX_FIFA16_DSTFIX|CX_PF_PAE|CX_GAME_PROFILES|WINE_COREAUDIO_EXCLUDE|WEBVIEW2_BROWSER_EXECUTABLE_FOLDER|CX_LOWPORT|CX_LOWPORT_DEBUG|PROMPT) ;;
                 *) foreign+=( "$fk" ) ;;
             esac
         done
@@ -4099,6 +4426,27 @@ verify_install() {
         fi
     fi
 
+    # REFUT's two registry settings (see "FIFA 20's REFUT launcher"). Both BAD:
+    # without the first its window is blank, without the second its maths
+    # bridge never starts, and nothing else writes either.
+    if [ "$GAME" = fifa20 ] && [ -f "$(bottle_user_reg)" ]; then
+        if f20_wpf_is_software; then
+            ok "WPF software rendering (DisableHWAcceleration = 1) in the $BOTTLE bottle"
+        else
+            bad "WPF hardware rendering is on in the $BOTTLE bottle, so REFUT's window"
+            say "        stays blank white. Quit CrossOver fully, then re-run ./setup.sh --fifa20"
+            problems=$((problems+1))
+        fi
+        if dll_override_is_set ucrtbase; then
+            ok "ucrtbase = native,builtin for ${(j: and :)OVERRIDE_EXES} in the $BOTTLE bottle"
+        else
+            bad "${(j: and :)OVERRIDE_EXES} do not prefer Microsoft's ucrtbase in the $BOTTLE"
+            say "        bottle, so REFUT's maths bridge gets Wine's and never says READY."
+            say "        Quit CrossOver fully, then re-run ./setup.sh --fifa20"
+            problems=$((problems+1))
+        fi
+    fi
+
     # See f16_pin_crt. A note: FIFA 16 still starts on Microsoft's runtime,
     # but that is not the ground its loading fix was proven on.
     if [ "$GAME" = fifa16 ] && [ -f "$(bottle_user_reg)" ] && f16_crt_pin_needed; then
@@ -4132,8 +4480,9 @@ verify_install() {
     # Without this Aurora's helper spends five seconds looking for a proxy before
     # its first request, and the shim's five-second deadline for the Origin auth
     # code runs out first. See BUGS.md §21. FIFA 16 has no helper, and its
-    # bottle is not given the setting.
-    if [ "$GAME" != fifa16 ] && [ -f "$(bottle_user_reg)" ]; then
+    # bottle is not given the setting; nor is FIFA 20's, which REFUT was
+    # proven without.
+    if [ "$GAME" != fifa16 ] && [ "$GAME" != fifa20 ] && [ -f "$(bottle_user_reg)" ]; then
         proxy_autodetect_is_off \
             && ok "proxy auto-detect off in the $BOTTLE bottle" \
             || { if [ "$GAME" = fifa15 ]; then
@@ -4166,6 +4515,9 @@ verify_install() {
                  say "        controller's buttons land in the wrong places (Cross acts as"
                  say "        Circle). Quit CrossOver fully, then re-run ./setup.sh"; }
     fi
+
+    # See note_refut_elsewhere. A note: REFUT's routes are the player's.
+    note_refut_elsewhere
 
     # A shortcut that starts the game through the unpatched CrossOver undoes
     # every other thing on this list, while all of them still report ok.
@@ -4229,6 +4581,32 @@ verify_install() {
             problems=$((problems+1))
         fi
         f21_check_game
+    elif [ "$GAME" = fifa20 ]; then
+        # REFUT runs both by their place in system32; each must be the file
+        # this package ships, and ipconfig.exe needs its override as well.
+        if cmp -s "$CAS_PS" "$(f20_psdir)/powershell.exe" 2>/dev/null; then
+            ok "PowerShell stand-in in the bottle (REFUT's match-end guard)"
+        else
+            bad "the $BOTTLE bottle's powershell.exe is not the shipped stand-in, so"
+            say "        REFUT's match-end guard never reports [STABLE] and REFUT closes"
+            say "        FIFA 20 (\"GUARD FAILSAFE\"). Quit CrossOver fully, then re-run"
+            say "        ./setup.sh --fifa20"
+            problems=$((problems+1))
+        fi
+        if cmp -s "$REFUT_IPCONFIG" "$(f20_ipconfig)" 2>/dev/null && f20_ipconfig_override_is_set; then
+            ok "ipconfig stand-in in the bottle, and Wine runs it (ipconfig.exe = native,builtin)"
+        else
+            if cmp -s "$REFUT_IPCONFIG" "$(f20_ipconfig)" 2>/dev/null; then
+                bad "the $BOTTLE bottle has the ipconfig stand-in but no ipconfig.exe override,"
+                say "        so Wine runs its own and REFUT stops with \"ipconfig.exe failed (1)\"."
+            else
+                bad "the $BOTTLE bottle's ipconfig.exe is not the shipped stand-in, so"
+                say "        REFUT stops at start-up with \"ipconfig.exe failed (1)\"."
+            fi
+            say "        Quit CrossOver fully, then re-run ./setup.sh --fifa20"
+            problems=$((problems+1))
+        fi
+        f20_check_game
     elif [ "$offline" = 1 ]; then
         ok "offline install: no Aurora17 stand-in to check"
     else
@@ -4296,6 +4674,44 @@ verify_install() {
         problems=$((problems+1))
     fi
 
+    # Loopback ports below 1024 (see "loopback ports below 1024"). Every
+    # install puts it in, but only FIFA 20 needs it, so a copy without it is
+    # BAD for FIFA 20 and a note for the others -- except a wineserver that
+    # names a cxlowport.dylib that is not there, or a signature that does not
+    # hold, which stops every bottle from starting at all.
+    local cx="${wine:h:h}" lp_bad=""
+    if wineserver_is_patched "$wine" && [ ! -f "$cx/$LOWPORT_DEST" ]; then
+        bad "wineserver loads ${LOWPORT:t}, which is not in ${app:t}, so no bottle"
+        say "        will start. Run ./setup.sh --repair"
+        problems=$((problems+1))
+    else
+        if [ ! -f "$cx/$LOWPORT_DEST" ]; then
+            lp_bad="${LOWPORT:t} is not in ${app:t}"
+        elif [ "$(macho_uuid "$cx/$LOWPORT_DEST")" != "$(macho_uuid "$HERE/fixes/$LOWPORT")" ]; then
+            lp_bad="${LOWPORT:t} is not the shipped version"
+        elif ! wineserver_is_patched "$wine"; then
+            lp_bad="wineserver does not go through ${LOWPORT:t}"
+        fi
+        if [ -z "$lp_bad" ]; then
+            ok "${LOWPORT:t}, and wineserver goes through it (127.0.0.1 below port 1024)"
+        elif [ "$GAME" = fifa20 ]; then
+            bad "$lp_bad, so REFUT's online bridge cannot listen on"
+            say "        127.0.0.1:443 and stops with \"Could not bind a required local"
+            say "        bridge port\". Quit CrossOver fully, then re-run ./setup.sh --fifa20"
+            problems=$((problems+1))
+        else
+            note "$lp_bad. Only FIFA 20 (REFUT) needs it, to listen on"
+            say "        127.0.0.1:443; ./setup.sh --repair puts it in."
+        fi
+    fi
+    if wineserver_is_patched "$wine"; then
+        for f in $MACHO_CX; do
+            [ -f "$cx/$f" ] || continue
+            codesign --verify "$cx/$f" 2>/dev/null \
+                || { bad "${f:t} is not signed — run ./setup.sh --resign"; problems=$((problems+1)); }
+        done
+    fi
+
     # EA names, hosts receipt, redirect shim, licence and certificate are all
     # Aurora17's. Aurora15's hook redirects by address (EA-MITM.ini) and the
     # game serves its own licence, so for FIFA 15 none of this applies.
@@ -4306,6 +4722,9 @@ verify_install() {
     elif [ "$GAME" = fifa21 ]; then
         # FIFA 21's stand-in writes its own names at PLAY.
         ok "FIFA 21: Aurora17's EA names, licence and certificate checks do not apply"
+    elif [ "$GAME" = fifa20 ]; then
+        # REFUT writes its own routes into this bottle's hosts file at PLAY.
+        ok "FIFA 20: Aurora17's EA names, licence and certificate checks do not apply"
     elif [ "$offline" = 1 ]; then
         ok "offline install: Aurora17's EA names, redirect and certificate do not apply"
         # The licence file is the game's own and is checked either way.
@@ -4487,6 +4906,11 @@ verify_install() {
             say "bottle and press PLAY on FIFA 21: the game reaching its menus is the real test."
             return 0
         fi
+        if [ "$GAME" = fifa20 ]; then
+            say "These checks do not test a launch. Open REFUT in the $BOTTLE bottle and"
+            say "press PLAY: FIFA 20 reaching FUT, online, is the real test."
+            return 0
+        fi
         say "That is not the same as \"the game will play\": these checks cannot"
         say "see a launch. To find out, run this and press PLAY when it asks:"
         say ""
@@ -4637,6 +5061,39 @@ report_mode() {
 
         print -r -- "---- every game in the bottle --------------------------"
         verify_games_table "$app" 2>&1 || true
+        print -r -- ""
+
+        # FIFA 20 lives in a bottle of its own, so the table above never shows
+        # it. Its pieces, and which of REFUT's logs there are; what is in them
+        # goes only into the bundle, through its filter (logs/refut).
+        print -r -- "---- FIFA 20 (REFUT), in the $F20_BOTTLE bottle ----------"
+        (
+            BOTTLE="$F20_BOTTLE"
+            if [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
+                print -r -- "(no such bottle; ./setup.sh --fifa20 makes it)"
+                exit 0
+            fi
+            if exe="$(refut_launcher_exe 2>/dev/null)"; then
+                print -r -- "REFUT            installed (${exe#$BOTTLE_DIR/$BOTTLE/})"
+            else
+                print -r -- "REFUT            NOT installed in this bottle"
+            fi
+            if cmp -s "$CAS_PS" "$(f20_psdir)/powershell.exe" 2>/dev/null; then
+                print -r -- "powershell.exe   the shipped stand-in  OK"
+            else
+                print -r -- "powershell.exe   NOT the shipped stand-in -- REFUT closes FIFA 20 (GUARD FAILSAFE)"
+            fi
+            if cmp -s "$REFUT_IPCONFIG" "$(f20_ipconfig)" 2>/dev/null && f20_ipconfig_override_is_set; then
+                print -r -- "ipconfig.exe     the shipped stand-in, override set  OK"
+            else
+                print -r -- "ipconfig.exe     NOT the shipped stand-in, or no override -- REFUT stops at start-up"
+            fi
+            if [ -n "${exe:-}" ]; then
+                for f in "${exe:h:h}/Logs"/*.log(N); do
+                    print -r -- "  $(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null)  $(stat -f%z "$f") bytes  ${f:t}"
+                done
+            fi
+        ) 2>&1 || true
         print -r -- ""
 
         print -r -- "---- bottle settings -----------------------------------"
@@ -5304,6 +5761,7 @@ bundle_bottle_launchers() {
         [ -d "$u/AppData/Local/Impulsum" ] && got+=( "Impulsum17 logs" )
         local -a rb; rb=( "$u/AppData/Local"/RebornFUT*(N/) )
         (( ${#rb} )) && got+=( "RebornFUT" )
+        [ -f "$u/AppData/Local/REFUT/Launcher/REFUT Launcher.exe" ] && got+=( "REFUT (FIFA 20)" )
     done
     local -a rp; rp=( "$BOTTLE_DIR/$b/drive_c/Program Files"/RebornFUT*(N/) )
     (( ${#rp} )) && got+=( "RebornFUT" )
@@ -5313,7 +5771,7 @@ bundle_bottle_launchers() {
 
 # A FIFA program has its own Wine settings in this registry file.
 bundle_reg_names_fifa() {
-    LC_ALL=C grep -qiE '^\[Software\\\\Wine\\\\AppDefaults\\\\(fifa1[3-7]|_fifa17|fifa21)\.exe' "$1" 2>/dev/null
+    LC_ALL=C grep -qiE '^\[Software\\\\Wine\\\\AppDefaults\\\\(fifa1[3-7]|_fifa17|fifa2[01]|REFUT Launcher)\.exe' "$1" 2>/dev/null
 }
 
 # Whether bottle $1 is worth collecting: it is a bottle, and something FIFA is
@@ -5323,7 +5781,7 @@ bundle_bottle_is_fifa() {
     [ -f "$BOTTLE_DIR/$b/cxbottle.conf" ] || return 1
     [ -f "$RECEIPT" ] && rb="$(sed -n 's/^bottle=//p' "$RECEIPT" 2>/dev/null | head -1)"
     case "$b" in
-        "$BOTTLE"|Aurora17|Aurora15|FIFA16|"${FIFA17_BOTTLE:-Aurora17}"|"${FIFA15_BOTTLE:-Aurora15}"|"${FIFA16_BOTTLE:-FIFA16}") return 0 ;;
+        "$BOTTLE"|Aurora17|Aurora15|FIFA16|REFUT|"${FIFA17_BOTTLE:-Aurora17}"|"${FIFA15_BOTTLE:-Aurora15}"|"${FIFA16_BOTTLE:-FIFA16}"|"${FIFA20_BOTTLE:-REFUT}") return 0 ;;
     esac
     [ -n "$rb" ] && [ "$b" = "$rb" ] && return 0
     [ -f "$BOTTLE_DIR/$b/cxfifa-gate.log" ] && return 0
@@ -5359,8 +5817,10 @@ bundle_collect_bottle() {
 
     sed -n '/^\[EnvironmentVariables\]/,$p' "$bd/cxbottle.conf" > "$out/environment.txt" 2>/dev/null || true
     {
-        print -r -- "From $bd/user.reg: the DLL overrides, bottle-wide and per program."
-        bundle_reg_sections "$bd/user.reg" '[Software\\Wine\\DllOverrides]' '[Software\\Wine\\AppDefaults\\'
+        print -r -- "From $bd/user.reg: the DLL overrides, bottle-wide and per program, and"
+        print -r -- "WPF's rendering setting (REFUT's window is blank without it)."
+        bundle_reg_sections "$bd/user.reg" '[Software\\Wine\\DllOverrides]' '[Software\\Wine\\AppDefaults\\' \
+            '[Software\\Microsoft\\Avalon.Graphics]'
         print -r -- ""
         print -r -- "From $bd/system.reg: the DNS Client service (FIFA 21 needs it)."
         if LC_ALL=C grep -qiF '[System\\CurrentControlSet\\Services\\Dnscache' "$bd/system.reg" 2>/dev/null; then
@@ -5379,7 +5839,8 @@ bundle_collect_bottle() {
         print -r -- ""
         for u in ${(f)"$(bundle_bottle_users "$b")"}; do
             for f in "$u/AppData/Local/Aurora15Connector"/*.exe "$u/AppData/Local/CAS/cas.exe" \
-                     "$u/AppData/Local"/RebornFUT*/*.exe "$bd/drive_c/Program Files"/RebornFUT*/*.exe; do
+                     "$u/AppData/Local"/RebornFUT*/*.exe "$bd/drive_c/Program Files"/RebornFUT*/*.exe \
+                     "$u/AppData/Local/REFUT/Launcher"/*.exe; do
                 [ -f "$f" ] && print -r -- "  $(bundle_sha16 "$f")  $(stat -f %z "$f" 2>/dev/null) bytes  ${f#$bd/}"
             done
             ini="$u/AppData/Local/Aurora15Connector/Aurora15Connector.ini"
@@ -5396,7 +5857,16 @@ bundle_collect_bottle() {
         for f in $found; do
             kind="not one of this package's stand-ins"
             cmp -s "$f" "$HERE/aurora17/powershell.exe" 2>/dev/null && kind="the shipped Aurora17 stand-in"
-            cmp -s "$f" "$CAS_PS" 2>/dev/null && kind="the shipped CAS stand-in"
+            cmp -s "$f" "$CAS_PS" 2>/dev/null && kind="the shipped CAS stand-in (REFUT's guard too)"
+            print -r -- "  $(bundle_sha16 "$f")  ${f:t}  $kind"
+        done
+        print -r -- ""
+        print -r -- "ipconfig in the bottle (system32; REFUT runs ipconfig /flushdns):"
+        found=( "$bd/drive_c/windows/system32"/ipconfig.exe* )
+        (( ${#found} )) || print -r -- "  (none)"
+        for f in $found; do
+            kind="not this package's stand-in"
+            cmp -s "$f" "$REFUT_IPCONFIG" 2>/dev/null && kind="the shipped ipconfig stand-in"
             print -r -- "  $(bundle_sha16 "$f")  ${f:t}  $kind"
         done
     } > "$out/launchers.txt" 2>&1
@@ -5439,6 +5909,16 @@ bundle_collect_bottle() {
         for f in ${(f)"$(bundle_newest 10 "$u/AppData/Local/Impulsum"/*.log)"}; do
             [ -n "$f" ] && bundle_copy "$f" "$out/logs/impulsum/${f:t}"
         done
+        # REFUT (FIFA 20): launcher.log, client-bridge.log, math-bridge.log,
+        # match-end-guard.log, sdk-friends.log, trust-patch.log and
+        # windows-fix.log, one each, which between them say which step of
+        # PLAY stopped; and its settings.json, for the folder it plays FIFA 20
+        # from. Never its discord-session.dat.
+        a="$u/AppData/Local/REFUT"
+        for f in ${(f)"$(bundle_newest 20 "$a/Logs"/*.log)"}; do
+            [ -n "$f" ] && bundle_copy "$f" "$out/logs/refut/${f:t}"
+        done
+        bundle_copy "$a/State/settings.json" "$out/logs/refut/settings.json"
     done
     bundle_copy "$bd/cxfifa-gate.log" "$out/logs/cxfifa-gate.log"
     return 0
@@ -5587,7 +6067,7 @@ bundle_checks() {
     local dir="$1" name rc
     local -a args
     mkdir -p "$dir" 2>/dev/null || return 0
-    for name in verify fifa15-verify fifa16-verify fifa21-verify; do
+    for name in verify fifa15-verify fifa16-verify fifa21-verify fifa20-verify; do
         case "$name" in
             verify) args=( --verify ) ;;
             *) args=( "--${name%-verify}" --verify ) ;;
@@ -5676,6 +6156,17 @@ bundle_summary() {
             print -r -- "           its bottle by default, $gb, does not exist"
         fi
     done
+    # FIFA 20 has no folder of ours to find: REFUT is what is looked for, in
+    # every bottle, and its own bottle is checked in checks/fifa20-verify.txt.
+    with=()
+    for b in $fifa; do refut_in_bottle "$BOTTLE_DIR/$b" && with+=( "$b" ); done
+    l="$(refut_download 2>/dev/null || true)"
+    print -r -- "  FIFA 20  REFUT installed in: ${${(j:, :)with}:-no bottle}; downloaded: ${l:-no}"
+    if [ -d "$F20_BOTTLE_PATH" ]; then
+        print -r -- "           its bottle by default, $F20_BOTTLE, exists"
+    else
+        print -r -- "           its bottle by default, $F20_BOTTLE, does not exist"
+    fi
     print -r -- ""
 
     print -r -- "Checks (the BAD and STOPPED lines; all of it is in checks/)"
@@ -5797,6 +6288,20 @@ bundle_mode() {
                     print -r -- "  MISSING                    $f"
                 fi
             done
+            # The two outside lib/wine (MACHO_CX), and whether wineserver
+            # goes through cxlowport.dylib.
+            for f in $MACHO_CX; do
+                if [ -f "${w:h:h}/$f" ]; then
+                    print -r -- "  $(shasum -a 256 "${w:h:h}/$f" | cut -c1-16)  $f"
+                else
+                    print -r -- "  MISSING                    $f"
+                fi
+            done
+            if wineserver_is_patched "$w"; then
+                print -r -- "  wineserver loads cxlowport.dylib"
+            else
+                print -r -- "  wineserver loads libSystem directly (no cxlowport.dylib)"
+            fi
             print -r -- ""
             print -r -- "minimum macOS each Mach-O file declares (LC_BUILD_VERSION minos; the"
             print -r -- "shipped ones were built with the macOS 26 SDK for a 15.0 target):"
@@ -6179,12 +6684,224 @@ install_dnscache_standin() {
     return 0
 }
 
+# ----------------------------- FIFA 20's REFUT launcher, in its own bottle
+# REFUT (a .NET 8 WPF program) installs itself from the "REFUT Launcher.exe"
+# it is downloaded as into %LOCALAPPDATA%\REFUT, and PLAY then runs a chain of
+# its own steps before FIFA 20 starts: its online bridge, hosts routes and
+# "ipconfig /flushdns", a match-end guard in PowerShell, the game, a trust
+# patch, a maths bridge and a friends adapter. Five of those stopped under
+# Wine, and each has its piece here (HANDOFF-refut-launcher.md, fixes 1-5):
+#
+#   1. its window was blank white: WPF draws nothing under Wine with hardware
+#      rendering, so the bottle turns it off for the user (AVALON_*);
+#   2. the maths bridge got Wine's ucrtbase back (the ucrtbase override for
+#      FIFA20.exe and REFUT Launcher.exe, see the C runtime override);
+#   3. the match-end guard compiles C# with Add-Type and needs real
+#      PowerShell: fixes/cas-powershell.c does what its script does, so that
+#      file is the bottle's powershell.exe (install_refut_powershell);
+#   4. its bridge could not listen on 127.0.0.1:443: cxlowport.dylib, in the
+#      copy, switched on for this bottle alone by CX_LOWPORT=1 (see
+#      "loopback ports below 1024");
+#   5. Wine's ipconfig does not know /flushdns and REFUT stopped on its exit
+#      code: fixes/cx-ipconfig.c answers it the way Windows does, as the
+#      bottle's ipconfig.exe (install_refut_ipconfig).
+#
+# Every one of these is written straight into the bottle's files, like the
+# rest of step 7, so CrossOver has to be quit, which setup.sh makes sure of.
+AVALON_SECTION='[Software\\Microsoft\\Avalon.Graphics]'
+AVALON_LINE='"DisableHWAcceleration"=dword:00000001'
+f20_wpf_is_software() { reg_line_is_set "$(bottle_user_reg)" "$AVALON_SECTION" "$AVALON_LINE"; }
+f20_set_wpf_software() { set_reg_line "$(bottle_user_reg)" "$AVALON_SECTION" "$AVALON_LINE" '"DisableHWAcceleration"'; }
+
+# Wine runs a real ipconfig.exe in system32 only when told to prefer native
+# for it; without this the file is there and Wine's builtin answers anyway.
+# powershell.exe needs no such line, and why the two differ was not found.
+# Bottle-wide, because REFUT runs it by name from more than one program.
+IPCONFIG_LINE='"ipconfig.exe"="native,builtin"'
+f20_ipconfig_override_is_set() { reg_line_is_set "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$IPCONFIG_LINE"; }
+f20_set_ipconfig_override() { set_reg_line "$(bottle_user_reg)" "$OVERRIDE_SECTION" "$IPCONFIG_LINE" '"ipconfig.exe"'; }
+
+REFUT_IPCONFIG="$HERE/fixes/x86_64-windows/cx-ipconfig.exe"
+f20_psdir() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/WindowsPowerShell/v1.0"; }
+f20_ipconfig() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/ipconfig.exe"; }
+
+# REFUT installed in this bottle, as the path of its launcher.
+refut_launcher_exe() {
+    local -a l
+    l=( "$BOTTLE_DIR/$BOTTLE/drive_c/users"/*/AppData/Local/REFUT/Launcher/"REFUT Launcher.exe"(N) )
+    (( ${#l} )) || return 1
+    print -r -- "$l[1]"
+}
+# The REFUT download, where a browser leaves it.
+refut_download() {
+    local -a l
+    l=( "$HOME/Downloads"/REFUT\ Launcher*.exe(N.om) )
+    (( ${#l} )) || return 1
+    print -r -- "$l[1]"
+}
+# Whether this Mac has REFUT at all: downloaded, or installed in any bottle.
+# START HERE and Fix my installation set FIFA 20 up only then.
+refut_present() {
+    local -a l
+    refut_download >/dev/null && return 0
+    l=( "$BOTTLE_DIR"/*/drive_c/users/*/AppData/Local/REFUT/Launcher/"REFUT Launcher.exe"(N) )
+    (( ${#l} ))
+}
+
+# REFUT installed in a bottle that is not FIFA 20's -- it was first made to
+# work in Aurora17, and a player may have run it anywhere. On every PLAY it
+# writes its hosts routes (spring18.gosredirector.ea.com, fut.ea.com,
+# utas.*.fut.ea.com to 127.0.0.1) into that bottle and never takes them out,
+# and a17hosts.dylib then sends FIFA 21's Aurora launcher there to nothing.
+# A note, never BAD and never a stop: the bottle and REFUT are the player's,
+# and the routes come back on REFUT's next PLAY whatever is done here.
+note_refut_elsewhere() {
+    [ "$GAME" != fifa20 ] && refut_in_bottle "$BOTTLE_DIR/$BOTTLE" || return 0
+    note "REFUT (FIFA 20) is installed in the $BOTTLE bottle. On every PLAY it writes"
+    say "        hosts routes (spring18.gosredirector.ea.com, fut.ea.com and"
+    say "        utas.*.fut.ea.com to 127.0.0.1) into this bottle and never takes them"
+    say "        out, and they stop FIFA 21's Aurora launcher here. FIFA 20 now has a"
+    say "        bottle of its own:  ./setup.sh --fifa20  then install REFUT there."
+    return 0
+}
+
+# The bottles other than FIFA 20's own that REFUT is installed in, one per
+# line, for START HERE to say where it found REFUT.
+refut_other_bottles() {
+    local d
+    for d in "$BOTTLE_DIR"/*(N/); do
+        [ "${(L)d:A}" = "${(L)F20_BOTTLE_PATH:A}" ] && continue
+        refut_in_bottle "$d" && print -r -- "${d:t}"
+    done
+    return 0
+}
+
+# The match-end guard's PowerShell (fix 3). The same file as CAS's stand-in,
+# and kept the same way install_cas_powershell keeps what it replaces: the
+# bottle's own powershell.exe as powershell.exe.wine-stub, once, and never a
+# file of ours over it, so uninstall.sh puts it back the same way too. There
+# is no Aurora17 stand-in in this bottle to hand other command lines to, so
+# those get what Wine's stub gives (see the top of fixes/cas-powershell.c).
+# Returns 1 when it is not in place, which FIFA 20's setup counts (PS_OK).
+install_refut_powershell() {
+    local psdir ps; psdir="$(f20_psdir)"; ps="$psdir/powershell.exe"
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE" ]; then
+        note "no bottle called '$BOTTLE' yet, so there is nowhere to put it"
+        return 1
+    fi
+    if cmp -s "$CAS_PS" "$ps"; then
+        ok "REFUT's match-end guard — already answered in the $BOTTLE bottle"
+        return 0
+    fi
+    mkdir -p "$psdir" || { note "could not make $psdir"; return 1; }
+    if [ -f "$ps" ] && [ ! -f "$ps.wine-stub" ] && [ ! -f "$ps.wine-stub-orig" ]; then
+        cp -X "$ps" "$ps.wine-stub" || {
+            note "could not keep the bottle's own powershell.exe, so it was left as it is"
+            say "        and REFUT will close FIFA 20 (\"GUARD FAILSAFE\"). Quit CrossOver"
+            say "        completely and run ./setup.sh --fifa20 again."
+            return 1
+        }
+    fi
+    cp -X "$CAS_PS" "$ps" || {
+        note "could not write the PowerShell stand-in into the $BOTTLE bottle"
+        say "        REFUT will close FIFA 20 (\"GUARD FAILSAFE\"). Quit CrossOver"
+        say "        completely and run ./setup.sh --fifa20 again."
+        return 1
+    }
+    ok "REFUT's match-end guard now runs in the $BOTTLE bottle"
+    [ -f "$ps.wine-stub" ] \
+        && say "        (Wine's own powershell.exe is kept beside it as powershell.exe.wine-stub)"
+    return 0
+}
+
+# The ipconfig.exe that answers /flushdns (fix 5), and the override without
+# which Wine never runs it. Wine's own placeholder is kept the same way as
+# powershell.exe's, as ipconfig.exe.wine-stub, once. Returns 1 when either
+# half is not in place, which FIFA 20's setup counts (IPCONFIG_OK).
+install_refut_ipconfig() {
+    local f; f="$(f20_ipconfig)"
+    if [ ! -d "${f:h}" ]; then
+        note "no bottle called '$BOTTLE' yet, so there is nowhere to put it"
+        return 1
+    fi
+    if cmp -s "$REFUT_IPCONFIG" "$f"; then
+        ok "ipconfig /flushdns — already answered in the $BOTTLE bottle"
+    else
+        if [ -f "$f" ] && [ ! -f "$f.wine-stub" ]; then
+            cp -X "$f" "$f.wine-stub" || {
+                note "could not keep the bottle's own ipconfig.exe, so it was left as it is"
+                say "        and REFUT stops with \"ipconfig.exe failed (1)\". Quit CrossOver"
+                say "        completely and run ./setup.sh --fifa20 again."
+                return 1
+            }
+        fi
+        cp -X "$REFUT_IPCONFIG" "$f" || {
+            note "could not write the ipconfig stand-in into the $BOTTLE bottle"
+            say "        REFUT stops with \"ipconfig.exe failed (1)\". Quit CrossOver"
+            say "        completely and run ./setup.sh --fifa20 again."
+            return 1
+        }
+        ok "ipconfig /flushdns now answers as on Windows in the $BOTTLE bottle"
+        [ -f "$f.wine-stub" ] \
+            && say "        (Wine's own ipconfig.exe is kept beside it as ipconfig.exe.wine-stub)"
+    fi
+    if f20_ipconfig_override_is_set; then
+        ok "ipconfig.exe = native,builtin — already set"
+    elif f20_set_ipconfig_override; then
+        ok "ipconfig.exe = native,builtin (kept the old user.reg as user.reg.bak-aurora17)"
+        say "        without it Wine runs its own ipconfig and ignores the file above"
+    else
+        note "could not set the ipconfig.exe override in $(bottle_user_reg)"
+        say "        Wine will run its own ipconfig and REFUT stops at start-up."
+        say "        Quit CrossOver completely and run ./setup.sh --fifa20 again."
+        return 1
+    fi
+    return 0
+}
+
+# What FIFA 20 needs that is not the bottle's to give: REFUT installed in it,
+# and FIFA 20's folder, which REFUT asks for in its own window and keeps in
+# its settings.json. Both are the player's to do, so these are notes, never a
+# stop. REFUT is installed by running its own download in the bottle; it is
+# never started from here, because its first run signs in and downloads.
+f20_check_game() {
+    local exe dl st w d
+    if exe="$(refut_launcher_exe)"; then
+        ok "REFUT is installed in the $BOTTLE bottle"
+        st="${exe:h:h}/State/settings.json"
+        w="$(sed -n 's/.*"gamePath": *"\([^"]*\)".*/\1/p' "$st" 2>/dev/null | head -1)"
+        if [ -z "$w" ]; then
+            note "REFUT has not been told where FIFA 20 is yet; it asks for FIFA20.exe"
+            say "        in its own window, and nothing here needs it"
+        elif d="$(win_path_to_unix "$w" 2>/dev/null)" && [ -f "$d" ]; then
+            # Through the bottle's drive links, to the folder they reach.
+            ok "REFUT plays FIFA 20 from ${d:h:A}"
+        else
+            note "REFUT plays FIFA 20 from $w, which is not there now"
+            say "        (drive not connected?). Point REFUT at FIFA20.exe again."
+        fi
+        return 0
+    fi
+    note "REFUT is not installed in the $BOTTLE bottle yet, and FIFA 20 plays only from it."
+    if dl="$(refut_download)"; then
+        say "        Open ${TARGET:t:r}, select the $BOTTLE bottle, choose Run Command and"
+        say "        run  $dl"
+    else
+        say "        Download \"REFUT Launcher.exe\" from REFUT, then open ${TARGET:t:r},"
+        say "        select the $BOTTLE bottle, choose Run Command and run it."
+    fi
+    say "        It installs itself into the bottle and opens; play FIFA 20 from it."
+    return 0
+}
+
 # "Done" has to mean the game will start: the bottle's settings, a stand-in
-# where PLAY will find it, the EA names, and for FIFA 21 the DNS Client its
-# launcher asks about before it starts anything.
+# where PLAY will find it, the EA names, for FIFA 21 the DNS Client its
+# launcher asks about before it starts anything, and for FIFA 20 the
+# ipconfig stand-in REFUT stops without.
 setup_steps_ok() {
     [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ] \
-        && { [ "$GAME" != fifa21 ] || [ "${DNSCACHE_OK:-0}" = 1 ]; }
+        && { [ "$GAME" != fifa21 ] || [ "${DNSCACHE_OK:-0}" = 1 ]; } \
+        && { [ "$GAME" != fifa20 ] || [ "${IPCONFIG_OK:-0}" = 1 ]; }
 }
 
 # What FIFA 21 needs that is not the bottle's to give: the Aurora launcher
@@ -6345,8 +7062,12 @@ configure_bottle() {
     else
         # See "one bottle, every game" near the top. With the table this
         # bottle gets only what its games share, and a game that shares it
-        # with another is simply added.
-        if [ "$PROFILES" = 1 ]; then
+        # with another is simply added. Not FIFA 20's: FIFA20.exe is not in
+        # the table, and its bottle is its own (see the guard near the top).
+        if [ "$GAME" = fifa20 ]; then
+            ok "the $BOTTLE bottle is FIFA 20's alone; FIFA20.exe is not in the per-game"
+            say "        table, so it runs with this bottle's own settings"
+        elif [ "$PROFILES" = 1 ]; then
             if [ ${#SHARED_WITH} -gt 0 ]; then
                 ok "adding $GAME_LABEL to the $BOTTLE bottle, which already has ${(j: and :)SHARED_WITH}"
             fi
@@ -6443,6 +7164,34 @@ configure_bottle() {
                     say "        Quit CrossOver completely and run this again."
                 fi
             fi
+        elif [ "$GAME" = fifa20 ] && [ -f "$(bottle_user_reg)" ]; then
+            # REFUT's two (see "FIFA 20's REFUT launcher" above): its window
+            # and its maths bridge. Both are a stop: without either one REFUT
+            # never gets FIFA 20 started. No version override (OVERRIDE_DLL)
+            # and no proxy setting: neither was in the bottle REFUT was proven
+            # in. The ipconfig override goes in with its file, in step 9.
+            if f20_wpf_is_software; then
+                ok "WPF software rendering (DisableHWAcceleration = 1) — already set"
+            elif f20_set_wpf_software; then
+                ok "WPF software rendering (DisableHWAcceleration = 1; kept the old user.reg as user.reg.bak-aurora17)"
+                say "        without it REFUT's window stays blank white"
+            else
+                die $E_PERMISSION "Could not turn WPF's hardware rendering off in
+                 $(bottle_user_reg)
+             Without it REFUT's window stays blank white.
+             Quit CrossOver completely and run this again."
+            fi
+            if dll_override_is_set ucrtbase; then
+                ok "ucrtbase = native,builtin for ${(j: and :)OVERRIDE_EXES} — already set"
+            elif set_dll_override ucrtbase; then
+                ok "ucrtbase = native,builtin for ${(j: and :)OVERRIDE_EXES}"
+                say "        this is what lets REFUT's maths bridge load Microsoft's maths"
+            else
+                die $E_PERMISSION "Could not set the ucrtbase override for ${(j: and :)OVERRIDE_EXES} in
+                 $(bottle_user_reg)
+             Without it REFUT's maths bridge never starts and neither does FIFA 20.
+             Quit CrossOver completely and run this again."
+            fi
         elif [ -f "$(bottle_user_reg)" ]; then
             if [ "$OVERRIDE_DLL" = version ]; then
                 OVERRIDE_WHERE="for the whole bottle"
@@ -6528,6 +7277,9 @@ configure_bottle() {
             fi
         fi
 
+        # See note_refut_elsewhere: REFUT in this bottle, which is not its own.
+        note_refut_elsewhere
+
         # See repoint_menu_shims. Done last in this step so it also catches a
         # shortcut Aurora created earlier under the normal CrossOver.
         REPOINTED="$(repoint_menu_shims "$APP" 2>/dev/null || print -r -- fail)"
@@ -6576,6 +7328,24 @@ configure_bottle() {
         say ""
         say "8-9a. Skipped — these three steps are FIFA 17's (Aurora17 stand-in, EA names, licence)"
         PS_OK=1; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""; HOSTS_OK=1; LICENCE_OK=1
+        return 0
+    fi
+    if [ "$GAME" = fifa20 ]; then
+        # REFUT's PLAY needs two stand-ins of the bottle beyond step 7: the
+        # PowerShell its match-end guard runs in, and the ipconfig.exe whose
+        # /flushdns it stops on. Step 9's names are Aurora17's (REFUT writes
+        # its own routes at PLAY), and 9a to 9e are FIFA 17's and FIFA 21's.
+        say ""
+        say "8. Installing the PowerShell stand-in REFUT's match-end guard needs"
+        PS_OK=0; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""
+        install_refut_powershell && PS_OK=1
+        say ""
+        say "9. Installing the ipconfig stand-in REFUT's start-up needs"
+        IPCONFIG_OK=0
+        install_refut_ipconfig && IPCONFIG_OK=1
+        say ""
+        say "9a-9e. Skipped — FIFA 17's and FIFA 21's (EA names, licence, WebView2, CAS, Dnscache)"
+        HOSTS_OK=1; LICENCE_OK=1
         return 0
     fi
     if [ "$GAME" = fifa21 ]; then
@@ -6767,6 +7537,8 @@ prompt_for_missing_game_files() {
     local folder exe label
     [ "${CX_DIALOGS:-0}" = 1 ] && [ "$GAME_EXPLICIT" = 1 ] || return 0
     case "$MODE" in install|bottle|repair) ;; *) return 0 ;; esac
+    # FIFA 20's folder is REFUT's to ask for, in its own window.
+    [ "$GAME" != fifa20 ] || return 0
     game_dir_of "$GAME" >/dev/null 2>&1 && return 0
     source "$HERE/lib/ui.zsh"
     ui_gui_ok || return 0
@@ -6776,7 +7548,7 @@ prompt_for_missing_game_files() {
     # skipping FIFA 17's steps, never stopping before the other games.
     if [ "$GAME" = fifa17 ]; then
         say "FIFA 17 game files were not found."
-        if ! ui_ask "FIFA 17 was not found" "FIFA 17's game files were not found. Select the folder containing $exe, or skip FIFA 17 and set up the other games that are found (FIFA 15, 16 and 21)." "Select folder…" "Skip FIFA 17" yes; then
+        if ! ui_ask "FIFA 17 was not found" "FIFA 17's game files were not found. Select the folder containing $exe, or skip FIFA 17 and set up the other games that are found (FIFA 15, 16, 20 and 21)." "Select folder…" "Skip FIFA 17" yes; then
             say "Skipping FIFA 17; the other games are set up."
             return 0
         fi
@@ -7584,6 +8356,12 @@ if [ "$MODE" = bottle ]; then
         add_game_ntdll "$TARGET"
         f16_add_win32u "$TARGET"
         [ -d "$BOTTLE_DIR/$BOTTLE" ] || make_bottle "$TARGET"
+    elif [ "$F20_ONE" = 1 ]; then
+        # The remote-thread fix in ntdll.so, and cxlowport.dylib for REFUT's
+        # bridge. No gdiplus.dll and no win32u.so: neither is FIFA 20's.
+        add_game_ntdll "$TARGET"
+        f20_add_lowport "$TARGET"
+        [ -d "$BOTTLE_DIR/$BOTTLE" ] || make_bottle "$TARGET"
     fi
     if [ ! -d "$BOTTLE_DIR/$BOTTLE" ] && [ "$GAME" = fifa21 ]; then
         die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
@@ -7603,9 +8381,11 @@ if [ "$MODE" = bottle ]; then
     [ "$GAME" = fifa15 ] && f15_check_game
     [ "$GAME" = fifa16 ] && f16_check_game map
     [ "$GAME" = fifa21 ] && f21_check_game
+    [ "$GAME" = fifa20 ] && f20_check_game
     end_own_wine_session
     say ""
     if setup_steps_ok; then
+        [ "$GAME" = fifa20 ] && receipt_record_fifa20_bottle
         remove_cleanup_agent && note "removed the old background cleanup agent; use Stop.command instead"
         if [ "$GAME" = fifa15 ]; then
             if [ "$(aurora_bottle_kind "$BOTTLE" 2>/dev/null || true)" = modern ]; then
@@ -7627,6 +8407,9 @@ if [ "$MODE" = bottle ]; then
         elif [ "$GAME" = fifa21 ]; then
             green "Done. Open ${TARGET:t:r}, then the Aurora launcher in the $BOTTLE bottle,"
             say "      and play FIFA 21 from it."
+        elif [ "$GAME" = fifa20 ]; then
+            green "Done. Open ${TARGET:t:r}, then REFUT in the $BOTTLE bottle, and play"
+            say "      FIFA 20 from it (not installed yet? the lines above say how)."
         else
             green "Done. Open ${TARGET:t:r}, then Aurora17Connector in the $BOTTLE bottle."
         fi
@@ -7639,6 +8422,8 @@ if [ "$MODE" = bottle ]; then
             say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa16 --verify"
         elif [ "$GAME" = fifa21 ]; then
             say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa21 --verify"
+        elif [ "$GAME" = fifa20 ]; then
+            say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }${FIFA20_BOTTLE:+FIFA20_BOTTLE='$BOTTLE' }./setup.sh --fifa20 --verify"
         else
             say "To check:  AURORA_BOTTLE='$BOTTLE' ./setup.sh --verify"
         fi
@@ -7947,7 +8732,7 @@ if [ "$MODE" = verify ]; then
     if [ "$GAME_EXPLICIT" = 0 ]; then
         verify_games_table "$TARGET"
         say ""
-        say "FIFA 17 in detail (--fifa15 --verify, --fifa16 --verify and --fifa21 --verify do the others)"
+        say "FIFA 17 in detail (--fifa15, --fifa16, --fifa21 and --fifa20 with --verify do the others)"
     fi
     verify_install "$TARGET" || exit $E_INCOMPLETE
     exit 0
@@ -8032,6 +8817,9 @@ $APP_MGMT_HINT"
         stale+=( x86_64-unix/ws2_32.so )
         ok "ws2_32.so — now reads the bottle's hosts file"
     fi
+    # cxlowport.dylib and wineserver's edit, the same way (install_lowport).
+    install_lowport "$wine" "$app"
+    [ "$LOWPORT_CHANGED" = 1 ] && stale+=( "$LOWPORT" )
     # The search path: a freshly copied .so has lost it (step 5 of the install).
     for so in ntdll.so crypt32.so win32u.so; do
         if has_lib64_rpath "$wine/x86_64-unix/$so"; then
@@ -8064,8 +8852,11 @@ $APP_MGMT_HINT"
 # by its own --fifaNN run, in the bottle it is played from: FIFA 15 where
 # Aurora.exe starts it (f15_default_bottle: the common bottle, or Aurora15
 # when Aurora lives there; without its dinput8 override there it opens but
-# never connects), FIFA 21 in the common bottle, FIFA 16 in its own. One
-# game failing never stops the others.
+# never connects), FIFA 21 in the common bottle, FIFA 16 in its own. FIFA 20
+# goes in its own too, and is known by REFUT rather than by a folder: its
+# download in ~/Downloads, or REFUT installed in any bottle (refut_present).
+# Without REFUT it is skipped without a word, since nobody without it is
+# missing anything. One game failing never stops the others.
 typeset -A GAME_RESULT
 GAMES_DONE=0
 GAMES_FAILED=0
@@ -8081,7 +8872,19 @@ run_game_setup() {
 }
 add_game_to_its_bottle() {
     local g="$1" label="FIFA ${1#fifa}" folder b shown
-    if ! folder="$(game_dir_of "$g" 2>/dev/null)"; then
+    local -a elsewhere
+    if [ "$g" = fifa20 ]; then
+        refut_present || return 0
+        label="FIFA 20 (REFUT)"
+        elsewhere=( ${(f)"$(refut_other_bottles)"} )
+        if folder="$(refut_download 2>/dev/null)"; then
+            :
+        elif ! refut_in_bottle "$F20_BOTTLE_PATH" && (( ${#elsewhere} )); then
+            folder="REFUT found in the ${(j:, :)elsewhere} bottle, not in its own"
+        else
+            folder="REFUT is installed in it"
+        fi
+    elif ! folder="$(game_dir_of "$g" 2>/dev/null)"; then
         GAME_RESULT[$g]="not found"
         GAMES_MISSING=$((GAMES_MISSING + 1))
         say "  --    $label: no game folder found"
@@ -8097,6 +8900,7 @@ add_game_to_its_bottle() {
             shown="$b" ;;
         fifa21) b="$AURORA_BOTTLE_GIVEN"; shown="${b:-${FIFA17_BOTTLE:-Aurora17}}" ;;
         fifa16) b=""; shown="${FIFA16_BOTTLE:-FIFA16}" ;;
+        fifa20) b=""; shown="${FIFA20_BOTTLE:-REFUT}" ;;
     esac
     say ""
     say "        $label in the $shown bottle ($folder)"
@@ -8104,6 +8908,16 @@ add_game_to_its_bottle() {
         GAME_RESULT[$g]="set up in the $shown bottle"
         GAMES_DONE=$((GAMES_DONE + 1))
         ok "$label: set up and checked in the $shown bottle"
+        # REFUT itself is the player's to install: a bottle set up here is
+        # ready for it, not yet playing, when REFUT is only somewhere else.
+        if [ "$g" = fifa20 ] && ! refut_in_bottle "$F20_BOTTLE_PATH"; then
+            GAME_RESULT[$g]="set up in the $shown bottle; install REFUT into it (the lines above say how)"
+            if (( ${#elsewhere} )); then
+                note "REFUT was found in the ${(j:, :)elsewhere} bottle, not in $shown. The"
+                say "        $shown bottle needs REFUT installed into it: Run Command there, and"
+                say "        run REFUT Launcher.exe. Play FIFA 20 from that one."
+            fi
+        fi
     else
         GAME_RESULT[$g]="NOT FINISHED in the $shown bottle (the reason is above)"
         GAMES_FAILED=$((GAMES_FAILED + 1))
@@ -8113,12 +8927,12 @@ add_game_to_its_bottle() {
 }
 add_other_games() {
     local g
-    for g in fifa15 fifa21 fifa16; do add_game_to_its_bottle "$g"; done
+    for g in fifa15 fifa21 fifa16 fifa20; do add_game_to_its_bottle "$g"; done
 }
 games_summary() {
     local g
     say "Games:"
-    for g in fifa17 fifa15 fifa21 fifa16; do
+    for g in fifa17 fifa15 fifa21 fifa16 fifa20; do
         [ -n "${GAME_RESULT[$g]:-}" ] && say "  FIFA ${g#fifa}   ${GAME_RESULT[$g]}"
     done
     if [ "$GAMES_MISSING" -gt 0 ] || [ "${GAME_RESULT[fifa17]:-}" = "skipped: no game folder found" ]; then
@@ -8365,6 +9179,17 @@ $APP_MGMT_HINT"
     fi
     ok "the installed files are the fixed versions"
 
+    # cxlowport.dylib and wineserver's edit, the same way as the resolver
+    # above: a copy made before them gets both, and the signing below covers
+    # them. Last of all, after every refusal, so a --resign that says no has
+    # not rewritten wineserver first and left it unsigned; and only with no
+    # CrossOver or Wine session holding wineserver (require_wineserver_idle).
+    if lowport_needs_writing "$RESIGN_WINE"; then
+        require_app_closed "$TARGET"
+        require_wineserver_idle "$TARGET"
+    fi
+    install_lowport "$RESIGN_WINE" "$TARGET"
+
     sign_payload "$RESIGN_WINE"
     resign_app "$TARGET"
     say ""
@@ -8446,10 +9271,10 @@ ok "the files to install match their checksums"
 # are the build this game needs. An older package's ntdll.so matches its own
 # sums and has no FIFA 16 fix in it, and FIFA 16 would install "done" and then
 # never get past its start screen. The same test add_game_ntdll makes.
-if [ "$GAME" = fifa16 ] \
+if { [ "$GAME" = fifa16 ] || [ "$GAME" = fifa20 ]; } \
    && ! strings -a "$HERE/fixes/x86_64-unix/ntdll.so" 2>/dev/null | grep -q "$NTDLL_MARKER"; then
-    die $E_PAYLOAD "fixes/ntdll.so is a build without the FIFA 16 patch.
-         Download the complete main-branch package again. FIFA 16 cannot run with this file."
+    die $E_PAYLOAD "fixes/ntdll.so is a build without the $GAME_LABEL patch.
+         Download the complete main-branch package again. $GAME_LABEL cannot run with this file."
 fi
 
 if [ "$IN_PLACE" != "1" ]; then
@@ -8545,8 +9370,9 @@ require_bottle_free
 # Without one the installer used to copy a gigabyte, note the missing bottle in
 # passing at step 7, and finish "done" with nothing that plays.
 #
-# An offline install, --fifa15 and --fifa16 need no launcher in the bottle, so
-# they make it themselves with cxbottle -- after the copy exists, since it is
+# An offline install, --fifa15, --fifa16 and --fifa20 need no launcher in the
+# bottle first (REFUT installs itself afterwards), so they make it themselves
+# with cxbottle -- after the copy exists, since it is
 # the copy's cxbottle that makes it. That needs CrossOver closed: an open one
 # lists the bottles it found when it started and puts the new one's registry
 # back its own way on quit. So it is checked here, before a gigabyte is copied, rather
@@ -8555,7 +9381,7 @@ require_bottle_free
 MAKE_BOTTLE=0
 if [ "$FIFA17_SKIP" = 1 ]; then
     ok "no FIFA 17 folder, so the $BOTTLE bottle is left to the other games"
-elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$F16_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
+elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && { [ "$F15_ONE" = 1 ] || [ "$F16_ONE" = 1 ] || [ "$F20_ONE" = 1 ] || [ "$NO_AURORA" = 1 ]; }; then
     [ ! -e "$BOTTLE_DIR/$BOTTLE" ] \
         || die $E_UNSUPPORTED "There is a '$BOTTLE' folder in $BOTTLE_DIR, but it is not a
          finished bottle (no cxbottle.conf in it). Move it out of the way, or
@@ -8709,6 +9535,11 @@ $APP_MGMT_HINT"
          Run ./uninstall.sh, then run this again."
     ok "ws2_32.so — now reads the bottle's hosts file"
 fi
+# The same trick for wineserver, so REFUT's bridge (FIFA 20) can listen on
+# 127.0.0.1:443: cxlowport.dylib into lib64, and wineserver's libSystem load
+# command pointed at it. Every install gets it, and it acts only in a bottle
+# with CX_LOWPORT=1 (REFUT's); see "loopback ports below 1024".
+install_lowport "$WINE" "$APP"
 
 # ------------------------------------------------- 5. the search path fix
 # All three rebuilt .so files lose it, and all three need it: ntdll.so to find
@@ -8759,6 +9590,7 @@ fi
 [ "$GAME" = fifa15 ] && f15_check_game
 [ "$GAME" = fifa16 ] && f16_check_game map
 [ "$GAME" = fifa21 ] && f21_check_game
+[ "$GAME" = fifa20 ] && f20_check_game
 end_own_wine_session
 # The copy is finished, so the lock goes before each game's run takes its own.
 if [ "$GAME" = fifa17 ]; then
@@ -8770,7 +9602,13 @@ if [ "$GAME" = fifa17 ]; then
 fi
 
 # ------------------------------------------------------------- the receipt
-# Uninstall reads this instead of guessing at default locations.
+# Uninstall reads this instead of guessing at default locations. FIFA 20's
+# bottle (receipt_record_fifa20_bottle) is carried over from the receipt this
+# replaces, or is this run's, or the one step 10 just set FIFA 20 up in.
+F20_RECORD=""
+[ -f "$RECEIPT" ] && F20_RECORD="$(sed -n 's/^fifa20_bottle=//p' "$RECEIPT" 2>/dev/null | tail -1)"
+[ "$GAME" = fifa20 ] && F20_RECORD="$BOTTLE"
+[[ "${GAME_RESULT[fifa20]:-}" == "set up"* ]] && F20_RECORD="$F20_BOTTLE"
 mkdir -p "$RECEIPT_DIR"
 {
     print -r -- "# Written by setup.sh. Delete this only if you have already uninstalled."
@@ -8782,6 +9620,7 @@ mkdir -p "$RECEIPT_DIR"
     print -r -- "aurora_dir=$PS_AURORA_DIR"
     print -r -- "offline=$NO_AURORA"
     print -r -- "bottle_powershell=$PS_BOTTLE_ACTION"
+    [ -z "$F20_RECORD" ] || print -r -- "fifa20_bottle=$F20_RECORD"
     print -r -- "version=$VER"
     print -r -- "patch_version=$PATCH_VERSION"
     print -r -- "installed=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -8799,8 +9638,8 @@ if [ "$FIFA17_SKIP" = 1 ]; then
         say ""
         say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), then the bottle"
         say "          named above for your game, and play it from the Aurora launcher"
-        say "          (FIFA 16: Run Command, fifa16.exe). Never press the launcher's"
-        say "          \"Repair connection\". Quit with Stop.command when you are done."
+        say "          (FIFA 16: Run Command, fifa16.exe; FIFA 20: REFUT). Never press the"
+        say "          launcher's \"Repair connection\". Quit with Stop.command when you are done."
         say ""
         exit 0
     elif [ "$GAMES_DONE" = 0 ] && [ "$GAMES_FAILED" = 0 ]; then
@@ -8849,6 +9688,10 @@ if setup_steps_ok; then
         say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
         say "          $BOTTLE bottle, run the Aurora launcher and play FIFA 21 from it"
         say "          (SETUP.md, 9d)."
+    elif [ "$GAME" = fifa20 ]; then
+        say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
+        say "          $BOTTLE bottle, open REFUT and play FIFA 20 from it (SETUP.md,"
+        say "          \"FIFA 20 (REFUT)\"). Not installed yet? The lines above say how."
     elif [ "$IN_PLACE" = "1" ]; then
         say "To play:  open CrossOver, then open Aurora17 in the $BOTTLE bottle"
         say "          and press PLAY FIFA 17."
@@ -8894,7 +9737,10 @@ say ""
 if [ "$BOTTLE_OK" != 1 ]; then
     say "  * the '$BOTTLE' bottle has none of the settings FIFA needs"
 fi
-if [ "$PS_OK" != 1 ]; then
+if [ "$PS_OK" != 1 ] && [ "$GAME" = fifa20 ]; then
+    say "  * the PowerShell stand-in is not in the bottle, so REFUT's match-end"
+    say "    guard never starts and REFUT closes FIFA 20 (\"GUARD FAILSAFE\")"
+elif [ "$PS_OK" != 1 ]; then
     say "  * the PowerShell stand-in is nowhere Aurora17 will find it, so PLAY"
     say "    will appear to work and do nothing at all"
 fi
@@ -8906,6 +9752,10 @@ fi
 if [ "$GAME" = fifa21 ] && [ "${DNSCACHE_OK:-0}" != 1 ]; then
     say "  * the DNS Client stand-in is not in the bottle, so the Aurora launcher"
     say "    will stop before FIFA 21 starts"
+fi
+if [ "$GAME" = fifa20 ] && [ "${IPCONFIG_OK:-0}" != 1 ]; then
+    say "  * the ipconfig stand-in or its override is not in the bottle, so REFUT"
+    say "    stops at start-up with \"ipconfig.exe failed (1)\""
 fi
 say ""
 say "Fix whichever is listed above, then run this again. ./setup.sh --verify"

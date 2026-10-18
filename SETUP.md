@@ -74,6 +74,11 @@ AURORA_BOTTLE=Aurora17 ./setup.sh --fifa15
 AURORA_BOTTLE=Aurora17 ./setup.sh --fifa16
 ```
 
+FIFA 20 is the exception: it plays from REFUT, in a bottle of its own, and
+never shares one. REFUT writes hosts routes for EA's servers into its bottle on
+every PLAY and never takes them out, and in a shared bottle they would send the
+other launchers nowhere. See [FIFA 20 (REFUT)](#fifa-20-refut).
+
 With the table, a bottle gets only the settings every game shares:
 `CX_GRAPHICS_BACKEND`, `WINE_SIMULATE_WRITECOPY`, the WebView2 folder for FIFA
 17's launchers, and `CX_PF_PAE=1` once FIFA 16 is in it (FIFA 16's protection
@@ -1653,6 +1658,118 @@ Where it stands: on 2026-09-29, on one Mac, one run got past the language
 screen to the menus and then froze loading a kickoff match; another looped at
 the language screen. Matches, controller, sound and saves were not play-tested.
 
+### FIFA 20 (REFUT)
+
+FIFA 20 plays online through the REFUT launcher (`REFUT Launcher.exe`). It
+gets a bottle of its own, `REFUT` by default. To set it up, quit CrossOver
+completely and run:
+
+```sh
+./setup.sh --fifa20
+./setup.sh --fifa20 --verify
+```
+
+For another bottle name, put `FIFA20_BOTTLE='name'` before both commands.
+FIFA 20 never shares a bottle: REFUT writes hosts routes
+(`spring18.gosredirector.ea.com`, `fut.ea.com` and `utas.*.fut.ea.com`, all to
+`127.0.0.1`) on every PLAY and never takes them out, and in a bottle shared
+with FIFA 21 they sent the Aurora launcher nowhere. Setup refuses a bottle
+another game is set up in, and the other games refuse REFUT's.
+
+Setup makes the CrossOver-FIFA copy if it is missing. On a copy that is
+already there, it replaces `ntdll.so` if it is a build from before the
+remote-thread fix (FIFA 20 crashes about 40 seconds in with it), and adds
+`cxlowport.dylib` if the copy is from before it. It makes the `REFUT` bottle
+(CrossOver must be closed), then gives it:
+
+| What | Why |
+|---|---|
+| `CX_GRAPHICS_BACKEND=d3dmetal`, `WINE_SIMULATE_WRITECOPY=1` | as for the other games |
+| `CX_LOWPORT=1` | switches `cxlowport.dylib` on for this bottle (below): REFUT's bridge can then listen on `127.0.0.1:443`. No other bottle has it, so everywhere else macOS refuses those binds as it always did |
+| `CX_DR_TRAP=2` | FIFA 20's protection needs mode 2. In three runs each, 2 got through 3 times, 0 and 3 once (the others crashed `0xC0000005`). `FIFA20.exe` is not in the per-game table, so this is set for the whole bottle, which is FIFA 20's alone |
+| `HKCU\Software\Microsoft\Avalon.Graphics` `DisableHWAcceleration` = 1 | REFUT is a WPF program, and WPF draws nothing under Wine with hardware rendering: the window stays blank white |
+| `ucrtbase` = `native,builtin` for `FIFA20.exe` and `REFUT Launcher.exe` | REFUT's maths bridge loads its own Microsoft `ucrtbase.dll` into both, and Wine hands back its own unless they prefer native. Without it the maths bridge never says READY |
+| `powershell.exe` in `system32\WindowsPowerShell\v1.0` | REFUT's match-end guard compiles C# with `Add-Type`, which needs real PowerShell; without it REFUT closes FIFA 20 (`GUARD FAILSAFE`). This is the same stand-in as CAS's (`fixes/cas-powershell.c`), which does what the guard script does |
+| `ipconfig.exe` in `system32`, and `ipconfig.exe` = `native,builtin` | REFUT runs `ipconfig /flushdns` after writing its routes and stops when it fails; Wine's ipconfig does not know `/flushdns`. The stand-in (`fixes/cx-ipconfig.c`) answers as Windows does and hands everything else to Wine's own. Without the override Wine ignores the file |
+
+The bottle's own `powershell.exe` and `ipconfig.exe` are kept beside the
+stand-ins as `.wine-stub`. The PlayStation controller fix (`DisableHidraw`) is
+set, as for the other games. No version override and no proxy setting: REFUT
+redirects with its hosts routes and a local bridge, not a proxy DLL.
+
+One more piece is in the CrossOver-FIFA copy itself: `cxlowport.dylib`.
+REFUT's bridge listens on `127.0.0.1:443`, and macOS lets a
+user bind a port below 1024 on every address at once but not on `127.0.0.1`
+alone, so the bridge stopped with "Could not bind a required local bridge
+port". In CrossOver every socket of every bottle is opened by `wineserver`, so
+setup points `wineserver` at `cxlowport.dylib` the way it points `ws2_32.so`
+at `a17hosts.dylib`: a refused bind on `127.0.0.1` below 1024 moves to the
+same port plus 18000, and connections and address lookups follow it, so
+neither end ever sees the move. It does that only in a bottle that asks for
+it with `CX_LOWPORT=1`, which setup puts in the `REFUT` bottle and nowhere
+else; in every other bottle macOS refuses those binds as before, and a bind
+macOS allows is never touched in any bottle. No pf rule, nothing outside the
+copy, no password. Every install puts the library in, since it does nothing
+until a bottle asks. `wineserver` is then signed again with the copy's own
+signature, like the other files setup changes.
+
+Setup never needs FIFA 20's own folder: REFUT asks for `FIFA20.exe` in its
+window and remembers it. Nor does setup install REFUT. When REFUT is not in
+the bottle yet, setup says how: open CrossOver-FIFA, select the `REFUT`
+bottle, choose **Run Command** and run the `REFUT Launcher.exe` you downloaded
+(setup names it when it is in `~/Downloads`). It installs itself into the
+bottle (`%LOCALAPPDATA%\REFUT`) and opens.
+
+To play: open CrossOver-FIFA, open the `REFUT` bottle, open REFUT, sign in,
+point it at `FIFA20.exe` once, and press PLAY.
+
+**START HERE.command** and **Fix my installation.command** set FIFA 20 up too,
+when REFUT is on this Mac: `REFUT Launcher.exe` in `~/Downloads`, or REFUT
+installed in any bottle. Without it they skip FIFA 20 without a word.
+
+> [!CAUTION]
+> 🔴 **REFUT's window is blank white.**
+
+> [!TIP]
+> 🟢 WPF's hardware rendering is on in the bottle. Quit CrossOver completely and run `./setup.sh --fifa20`; `--verify` says `WPF software rendering` when it is set.
+
+> [!CAUTION]
+> 🔴 **REFUT stops with "Could not bind a required local bridge port".**
+
+> [!TIP]
+> 🟢 The copy has no `cxlowport.dylib`, `wineserver` does not load it, or the bottle lacks `CX_LOWPORT=1`: `./setup.sh --fifa20 --verify` says which. Quit CrossOver completely and run `./setup.sh --fifa20` (or **Fix my installation.command**). To watch it work, add `"CX_LOWPORT_DEBUG" = "1"` to the `REFUT` bottle's `[EnvironmentVariables]` in its `cxbottle.conf` (CrossOver closed) and start REFUT with CrossOver's debug log turned on: `wineserver` writes a `cxlowport: bind 127.0.0.1:443 refused by macOS; 127.0.0.1:18443 ...` line for each move and a `cxlowport: connect ...` line for each connection it redirects. Take the line out again afterwards.
+
+> [!CAUTION]
+> 🔴 **REFUT stops at start-up with "ipconfig.exe failed (1)".**
+
+> [!TIP]
+> 🟢 The ipconfig stand-in, or the `ipconfig.exe` override that makes Wine run it, is missing from the bottle. Quit CrossOver completely and run `./setup.sh --fifa20`.
+
+> [!CAUTION]
+> 🔴 **FIFA 20 starts and REFUT closes it again ("GUARD FAILSAFE").**
+
+> [!TIP]
+> 🟢 The match-end guard never reported `[STABLE]`, because the bottle's `powershell.exe` is not the stand-in. Quit CrossOver completely and run `./setup.sh --fifa20`.
+
+> [!CAUTION]
+> 🔴 **FIFA 20 crashes about 40 seconds in, a moment after it starts.**
+
+> [!TIP]
+> 🟢 The copy's `ntdll.so` is from before the remote-thread fix: REFUT starts threads inside the game from outside, and FIFA 20's protection crashed the game when one of them ended the way Wine used to end it. `./setup.sh --fifa20` (or **Fix my installation.command**) puts the current `ntdll.so` in.
+
+REFUT keeps its logs in the bottle, in `%LOCALAPPDATA%\REFUT\Logs`
+(`launcher.log`, `client-bridge.log`, `math-bridge.log`,
+`match-end-guard.log`, `sdk-friends.log`, `trust-patch.log`,
+`windows-fix.log`); between them they say which step of PLAY stopped.
+**Diagnostics.command** (`./setup.sh --bundle`) puts them in its zip, with the
+`--fifa20 --verify` result, and the plain `./setup.sh --report` lists them.
+`--fifa20` itself does not go with `--smoke`, `--report` or `--bundle`.
+
+To undo it, `./uninstall.sh` puts the bottle's own `powershell.exe` and
+`ipconfig.exe` back and, with the copy, removes `cxlowport.dylib`. The registry
+values stay, like every bottle's settings; deleting the `REFUT` bottle in
+CrossOver takes them, REFUT and its routes with it.
+
 ## Reference
 
 ### Why the version matters
@@ -1712,7 +1829,7 @@ CodeWeavers' own signature. Reinstall CrossOver to have it exactly as shipped.
 | `Diagnostics.command` | collect the logs for a bug report into `diagnostics/` |
 | `diagnostics/` | one `.command` per check and repair, and where their zips, reports and logs are written |
 | `setup.sh`, `uninstall.sh` | what the .command files run |
-| `fixes/` | the ten files for the CrossOver copy, CAS's PowerShell stand-in and link handler, source and checksums |
+| `fixes/` | the ten files for the CrossOver copy and `cxlowport.dylib`, CAS's PowerShell stand-in (REFUT's guard runs in it too), REFUT's ipconfig stand-in, CAS's link handler, source and checksums |
 | `aurora17/` | the PowerShell stand-in, its source, the certificate, checksums |
 | `patches/` | the Wine source changes the fixes were built from |
 | `build.sh` | rebuilds `fixes/` from source |

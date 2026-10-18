@@ -108,6 +108,30 @@ hosts file does not mention resolve normally, so the rest of the internet — an
 any other EA software on the Mac — is unaffected. `install_name_tool -change`
 the other way round undoes it exactly.
 
+## 3b. Let Windows programs listen on 127.0.0.1 below port 1024
+
+Only FIFA 20's REFUT launcher needs this. REFUT's bridge listens on
+`127.0.0.1:443`, and macOS refuses a user that one address below port 1024.
+Every socket of every bottle is opened by `wineserver`, so `cxlowport.dylib`
+goes in front of libSystem there, the way `a17hosts.dylib` does for
+`ws2_32.so`; it moves a refused loopback bind up by 18000 and points
+connections at the moved port. It does nothing unless the bottle's
+`cxbottle.conf` sets `"CX_LOWPORT" = "1"` in `[EnvironmentVariables]`, which
+only the REFUT bottle gets (`./setup.sh --fifa20`), so every install can carry
+it. `bin` is a link, and `wineserver` already looks in `lib64`:
+
+```sh
+CX="$APP/Contents/SharedSupport/CrossOver"
+cp -X fixes/x86_64-unix/cxlowport.dylib "$CX/lib64/cxlowport.dylib"
+install_name_tool -change /usr/lib/libSystem.B.dylib @rpath/cxlowport.dylib \
+    "$CX/bin/wineserver"
+otool -L "$CX/bin/wineserver" | grep cxlowport    # must print a line
+```
+
+Step 5 signs both. `install_name_tool -change` the other way round, then
+deleting `cxlowport.dylib`, undoes it; never the other order, or `wineserver`
+names a library that is gone and no bottle starts.
+
 ## 4. Repair the library search path
 
 `ntdll.so` needs it to find its sibling libraries, `crypt32.so` to find the
@@ -148,16 +172,24 @@ rpath, your `otool` is broken — `xcode-select --install`, or
 
 ## 5. Sign
 
-Six Mac binaries now need it. Changing a signed file breaks its signature, and
-an unsigned library will not load. `a17hosts.dylib` is new, and `ws2_32.so` is
-CrossOver's own file that step 3a edited — so it is no longer covered by
-CodeWeavers' signature either.
+Eight Mac binaries now need it. Changing a signed file breaks its signature, and
+an unsigned library will not load. `a17hosts.dylib` and `cxlowport.dylib` are
+new, and `ws2_32.so` and `wineserver` are CrossOver's own files that steps 3a
+and 3b edited — so they are no longer covered by CodeWeavers' signature
+either.
 
 ```sh
 for so in ntdll.so winecoreaudio.so crypt32.so win32u.so a17hosts.dylib ws2_32.so; do
     codesign --force --sign - "$WINE/x86_64-unix/$so" && echo "ok  $so"
 done
+for f in lib64/cxlowport.dylib bin/wineserver; do
+    codesign --force --sign - "$APP/Contents/SharedSupport/CrossOver/$f" && echo "ok  $f"
+done
 ```
+
+The second loop is step 3b's two files. `wineserver` loses CodeWeavers'
+hardened runtime that way, on purpose: under it, library validation would
+refuse an ad-hoc `cxlowport.dylib`.
 
 ## 6. Sign the app — keeping its permissions
 
@@ -349,9 +381,11 @@ Even done by hand, this still works and checks every step above at once:
 ```
 
 It changes nothing. It compares the shipped files against `fixes/`, checks all
-three rpaths, checks all six signatures, checks that `ws2_32.so` is reading the
-bottle's hosts file, checks the app kept its permissions, and checks the EA host
-redirections in the bottle.
+three rpaths, checks all eight signatures, checks that `ws2_32.so` is reading
+the bottle's hosts file and that `wineserver` goes through `cxlowport.dylib`,
+checks the app kept its permissions, and checks the EA host redirections in the
+bottle. FIFA 20's REFUT bottle is set up and checked with `./setup.sh --fifa20`
+and `./setup.sh --fifa20 --verify` (SETUP.md, "FIFA 20 (REFUT)").
 
 If it reports that the bottle's hosts file names none of the six, that is not a
 fault on a bottle that has never played — Aurora17's launcher writes them

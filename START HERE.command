@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Double-click this. It installs the FIFA fixes into a copy of your CrossOver and
-# sets up every game it finds: FIFA 17, 15, 16 and 21.
+# sets up every game it finds: FIFA 17, 15, 16 and 21, and FIFA 20 when the
+# REFUT launcher is here (downloaded, or installed in a bottle).
 # Everything it does can be undone with "Uninstall.command" beside it.
 
 cd "${0:A:h}" || exit 1
@@ -24,8 +25,9 @@ print -r -- "  FIFA on a Mac — installer"
 print -r -- "  ========================="
 print -r -- ""
 print -r -- "  This makes a separate copy of CrossOver called CrossOver-FIFA, puts"
-print -r -- "  the fixes in it, and sets up each game it finds (FIFA 17, 15, 16, 21)"
-print -r -- "  in the bottle it is played from. No FIFA 17? Choose Skip FIFA 17."
+print -r -- "  the fixes in it, and sets up each game it finds (FIFA 17, 15, 16, 21,"
+print -r -- "  and FIFA 20 if REFUT is here) in the bottle it is played from."
+print -r -- "  No FIFA 17? Choose Skip FIFA 17."
 print -r -- ""
 print -r -- "  Your own CrossOver is not touched, and neither is any other bottle"
 print -r -- "  you run in it. The copy needs about 1 GB of disk."

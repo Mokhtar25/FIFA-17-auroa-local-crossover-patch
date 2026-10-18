@@ -52,6 +52,10 @@ class ScriptTests(unittest.TestCase):
             ("setup.sh", ["--fifa21", "one.app", "two.app"], 2),
             ("setup.sh", ["--fifa21", "--repair"], 2),
             ("setup.sh", ["--fifa21", "--offline"], 2),
+            ("setup.sh", ["--fifa20", "--unknown"], 2),
+            ("setup.sh", ["--fifa20", "one.app", "two.app"], 2),
+            ("setup.sh", ["--fifa20", "--repair"], 2),
+            ("setup.sh", ["--fifa20", "--offline"], 2),
             ("setup-both.sh", ["--repair", "extra"], 2),
             ("setup-both.sh", ["--help"], 0),
             ("setup-both.sh", ["--unknown"], 2),
@@ -193,9 +197,12 @@ class BundleTests(unittest.TestCase):
         self.assertIn("NONE: there is no CrossOver-FIFA copy at " + copy, files["summary.txt"])
         for name in ("report.txt", "checks/verify.txt", "checks/fifa15-verify.txt",
                      "checks/fifa16-verify.txt", "checks/fifa21-verify.txt",
+                     "checks/fifa20-verify.txt",
                      "games.txt", "processes.txt", "payload.txt", "crash-reports.txt"):
             self.assertIn(name, files)
         self.assertRegex(files["checks/exit-codes.txt"], r"(?m)^fifa21-verify\t\d+$")
+        self.assertRegex(files["checks/exit-codes.txt"], r"(?m)^fifa20-verify\t\d+$")
+        self.assertIn("FIFA 20  REFUT installed in: no bottle", files["summary.txt"])
         self.assertIn("==== exit code", files["checks/verify.txt"])
         self.assertIn("No saved setup run", files["summary.txt"])
         self.assertFalse((self.work / "no-copy.app").exists())
@@ -252,6 +259,34 @@ class BundleTests(unittest.TestCase):
                 self.assertNotIn(str(self.home), text)
                 self.assertNotIn("must-not-go", text)
                 self.assertNotIn("someone@example.com", text)
+
+    def test_bundle_collects_the_refut_bottle(self):
+        bottle = self.bottles / "REFUT"
+        refut = bottle / "drive_c/users/crossover/AppData/Local/REFUT"
+        for sub in ("Launcher", "Logs", "State"):
+            (refut / sub).mkdir(parents=True)
+        (bottle / "cxbottle.conf").write_text('[EnvironmentVariables]\n"CX_DR_TRAP" = "2"\n')
+        (refut / "Launcher/REFUT Launcher.exe").write_bytes(b"MZ\x00\x00")
+        for log in ("launcher.log", "client-bridge.log", "match-end-guard.log"):
+            (refut / "Logs" / log).write_text(f"{log} session=abc123 READY\n")
+        (refut / "State/settings.json").write_text('{"gamePath": "Z:\\\\FIFA 20\\\\FIFA20.exe"}')
+        (refut / "State/discord-session.dat").write_text("must-not-go")
+        (bottle / "user.reg").write_text(
+            "WINE REGISTRY Version 2\n\n"
+            "[Software\\\\Microsoft\\\\Avalon.Graphics] 1700000000\n"
+            "\"DisableHWAcceleration\"=dword:00000001\n")
+        result, files = self.bundle()
+        for log in ("launcher.log", "client-bridge.log", "match-end-guard.log"):
+            self.assertIn(f"bottles/REFUT/logs/refut/{log}", files)
+        self.assertIn("session=<redacted>", files["bottles/REFUT/logs/refut/launcher.log"])
+        self.assertIn("gamePath", files["bottles/REFUT/logs/refut/settings.json"])
+        self.assertIn("DisableHWAcceleration", files["bottles/REFUT/registry.txt"])
+        self.assertIn("REFUT: REFUT (FIFA 20)", files["summary.txt"])
+        self.assertIn("FIFA 20  REFUT installed in: REFUT", files["summary.txt"])
+        for name, text in files.items():
+            with self.subTest(name=name):
+                self.assertNotIn("must-not-go", text)
+                self.assertNotIn("abc123", text)
 
     def test_redaction_forms(self):
         source = (ROOT / "setup.sh").read_text()
@@ -2051,6 +2086,13 @@ typeset -A GAME_RESULT
 GAMES_DONE=0 GAMES_FAILED=0 GAMES_MISSING=0
 say() {{ print -r -- "$*"; }}; ok() {{ say "$@"; }}; note() {{ say "$@"; }}
 game_dir_of() {{ [ -n "$FOLDER" ] && print -r -- "$FOLDER"; }}
+# FIFA 20 is known by REFUT, not a folder; FOLDER stands for its download,
+# ELSEWHERE for the other bottles it is installed in, IN_OWN for its own.
+F20_BOTTLE_PATH=/b/REFUT
+refut_present() {{ [ -n "$FOLDER$ELSEWHERE" ]; }}
+refut_download() {{ [ -n "$FOLDER" ] && print -r -- "$FOLDER"; }}
+refut_other_bottles() {{ [ -n "$ELSEWHERE" ] && print -r -- "$ELSEWHERE"; return 0; }}
+refut_in_bottle() {{ [ -n "$IN_OWN" ]; }}
 # The real choice is f15_default_bottle; here it says what it was given.
 f15_default_bottle() {{
     [ -n "$AURORA_BOTTLE" ] && {{ print -r -- "$AURORA_BOTTLE"; return 0; }}
@@ -2058,7 +2100,7 @@ f15_default_bottle() {{
 }}
 ''' + function_source("run_game_setup") + function_source("add_game_to_its_bottle") + '''
 add_game_to_its_bottle "$GAME"
-print -r -- "RESULT=${GAME_RESULT[$GAME]} DONE=$GAMES_DONE FAILED=$GAMES_FAILED MISSING=$GAMES_MISSING"
+print -r -- "RESULT=${GAME_RESULT[$GAME]:-} DONE=$GAMES_DONE FAILED=$GAMES_FAILED MISSING=$GAMES_MISSING"
 '''
             both = lambda b, g: [f"{b}|--{g}", f"{b}|--{g} --verify"]
             for game, pick, given, folder, rc, verify_rc, result_text, wanted in [
@@ -2081,6 +2123,11 @@ print -r -- "RESULT=${GAME_RESULT[$GAME]} DONE=$GAMES_DONE FAILED=$GAMES_FAILED 
                 ("fifa16", "", "Mine", "/g/FIFA 16", "0", "0",
                  "set up in the FIFA16 bottle DONE=1", both("unset", "fifa16")),
                 ("fifa16", "", "", "", "0", "0", "RESULT=not found DONE=0 FAILED=0 MISSING=1", []),
+                # FIFA 20 goes to its own bottle when REFUT is here, and is
+                # skipped without a word, and without counting, when it is not.
+                ("fifa20", "", "Mine", "/d/REFUT Launcher.exe", "0", "0",
+                 "set up in the REFUT bottle; install REFUT into it", both("unset", "fifa20")),
+                ("fifa20", "", "", "", "0", "0", "RESULT= DONE=0 FAILED=0 MISSING=0", []),
             ]:
                 with self.subTest(game=game, pick=pick, given=given, folder=folder, rc=rc):
                     calls.unlink(missing_ok=True)
@@ -2089,7 +2136,8 @@ print -r -- "RESULT=${GAME_RESULT[$GAME]} DONE=$GAMES_DONE FAILED=$GAMES_FAILED 
                         ["/bin/zsh", "-c", harness], cwd=work, stdin=subprocess.DEVNULL,
                         env={**env, "CALLS": str(calls), "PICK": pick, "GIVEN": given,
                              "GAME": game, "AURORA_BOTTLE": "Repair Export",
-                             "FOLDER": folder, "TEST_RC": rc, "TEST_VERIFY_RC": verify_rc},
+                             "FOLDER": folder, "TEST_RC": rc, "TEST_VERIFY_RC": verify_rc,
+                             "ELSEWHERE": "", "IN_OWN": ""},
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn(result_text, result.stdout)
@@ -2103,6 +2151,39 @@ print -r -- "RESULT=${GAME_RESULT[$GAME]} DONE=$GAMES_DONE FAILED=$GAMES_FAILED 
             install = install.split("# ------------------------------------------------------------- the receipt", 1)[0]
             self.assertIn('if [ "$GAME" = fifa17 ]; then\n    rm -rf "$SETUP_LOCK"', install)
             self.assertIn("    add_other_games\nfi", install)
+
+    def test_refut_only_in_another_bottle_is_said_not_taken_as_set_up(self):
+        with tempfile.TemporaryDirectory(prefix="fifa-refut-") as directory:
+            work = Path(directory)
+            script = work / "setup.sh"
+            script.write_text('#!/bin/zsh\nexit 0\n')
+            script.chmod(0o755)
+            harness = f'''set -eu
+HERE={shlex_quote(str(work))} TARGET=/Applications/CrossOver-FIFA.app
+AURORA_BOTTLE_GIVEN=""
+typeset -A GAME_RESULT
+GAMES_DONE=0 GAMES_FAILED=0 GAMES_MISSING=0
+say() {{ print -r -- "$*"; }}; ok() {{ say "$@"; }}; note() {{ say "NOTE $@"; }}
+F20_BOTTLE_PATH=/b/REFUT
+refut_present() {{ return 0; }}
+refut_download() {{ return 1; }}
+refut_other_bottles() {{ print -r -- Aurora17; }}
+refut_in_bottle() {{ [ -n "$IN_OWN" ]; }}
+''' + function_source("run_game_setup") + function_source("add_game_to_its_bottle") + '''
+add_game_to_its_bottle fifa20
+print -r -- "RESULT=${GAME_RESULT[fifa20]}"
+'''
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("FIFA1", "FIFA2"))}
+            result = subprocess.run(["/bin/zsh", "-c", harness], cwd=work, stdin=subprocess.DEVNULL,
+                                    env={**env, "IN_OWN": ""}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("REFUT found in the Aurora17 bottle, not in its own", result.stdout)
+            self.assertIn("NOTE REFUT was found in the Aurora17 bottle, not in REFUT", result.stdout)
+            self.assertIn("install REFUT into it", result.stdout)
+            result = subprocess.run(["/bin/zsh", "-c", harness], cwd=work, stdin=subprocess.DEVNULL,
+                                    env={**env, "IN_OWN": "1"}, capture_output=True, text=True, timeout=10)
+            self.assertIn("RESULT=set up in the REFUT bottle\n", result.stdout)
+            self.assertNotIn("NOTE", result.stdout)
 
     def refresh(self, stale_dll, signature_ok):
         with tempfile.TemporaryDirectory(prefix="a17-refresh-") as directory:
@@ -2147,6 +2228,8 @@ die() { print -r -- "die $*"; exit "$1"; }
 macho_uuid() { shasum "$1" | cut -c1-16; }
 ws2_32_is_patched() { return 0; }
 has_lib64_rpath() { return 0; }
+LOWPORT=x86_64-unix/cxlowport.dylib
+install_lowport() { LOWPORT_CHANGED=0; }
 sign_payload() { print -r -- "SIGNED payload $1"; }
 resign_app() { print -r -- "SIGNED app $1"; }
 """
@@ -2245,6 +2328,135 @@ resign_app() { print -r -- "SIGNED app"; }
         self.assertIsNone(orig)
         self.assertIn("already the shipped build", out)
         self.assertNotIn("SIGNED", out)
+
+
+class Fifa20Tests(unittest.TestCase):
+    """./setup.sh --fifa20: REFUT's own bottle, the ntdll.so with the
+    remote-thread fix, and cxlowport.dylib wired into wineserver once."""
+
+    def test_shipped_ntdll_carries_the_fifa20_marker(self):
+        source = (ROOT / "setup.sh").read_text().split(
+            "# --------------------------------------------------------- safety guards", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="a17-marker-") as directory:
+            probe = Path(directory) / "marker.sh"
+            probe.write_text(source + '\nprint -r -- "$NTDLL_MARKER|$BOTTLE|$GAME_LABEL|${BOTTLE_SETTINGS[*]}"\n')
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("AURORA_", "FIFA"))}
+            result = subprocess.run(["/bin/zsh", str(probe), "--verify"],
+                                    env={**env, "AURORA_GAME": "fifa20", "NO_COLOR": "1",
+                                         "CX_BOTTLE_PATH": directory},
+                                    capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        marker, bottle, label, settings = result.stdout.splitlines()[-1].split("|")
+        self.assertEqual((bottle, label), ("REFUT", "FIFA 20 (REFUT)"))
+        # cxlowport.dylib acts only where the bottle asks, and only FIFA 20's does.
+        self.assertIn("CX_LOWPORT=1", settings.split())
+        self.assertIn("CX_DR_TRAP=2", settings.split())
+        self.assertIn(marker.encode(), (ROOT / "fixes/x86_64-unix/ntdll.so").read_bytes())
+        setup = (ROOT / "setup.sh").read_text()
+        self.assertIn('add_game_ntdll "$TARGET"\n        f20_add_lowport "$TARGET"', setup)
+
+    def test_fifa20_and_the_other_games_never_share_a_bottle(self):
+        with tempfile.TemporaryDirectory(prefix="a17-f20-") as directory:
+            bottles = Path(directory)
+            for name in ("REFUT", "Aurora17", "Mine"):
+                (bottles / name).mkdir()
+                (bottles / name / "cxbottle.conf").write_text(
+                    '[EnvironmentVariables]\n"CX_DR_TRAP" = "2"\n')
+            (bottles / "Mine/drive_c/users/crossover/AppData/Local/CAS").mkdir(parents=True)
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("AURORA_", "FIFA"))}
+            env.update(CX_BOTTLE_PATH=directory, NO_COLOR="1", CX_NO_DIALOGS="1",
+                       AURORA_TARGET=str(bottles / "no-copy.app"),
+                       AURORA_RECEIPT_DIR=str(bottles / "receipts"))
+            for game, extra, says in [
+                ("--fifa20", {"AURORA_BOTTLE": "Aurora17"}, "FIFA 20 needs a bottle of its own"),
+                ("--fifa20", {"FIFA20_BOTTLE": "Mine"}, "has another game's launcher in it"),
+                ("--fifa16", {"AURORA_BOTTLE": "REFUT"}, "'REFUT' is FIFA 20's bottle"),
+                ("--fifa21", {"AURORA_BOTTLE": "REFUT"}, "'REFUT' is FIFA 20's bottle"),
+            ]:
+                with self.subTest(game=game, extra=extra):
+                    result = subprocess.run(
+                        ["/bin/zsh", str(ROOT / "setup.sh"), game, "--verify"],
+                        env={**env, **extra}, stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn(says, result.stdout)
+                    self.assertIn("Nothing has been changed.", result.stdout)
+
+    def test_resign_touches_wineserver_only_after_every_refusal(self):
+        source = (ROOT / "setup.sh").read_text()
+        block = source.split('if [ "$MODE" = resign ]; then', 1)[1].split("\nfi\n", 1)[0]
+        refusals = block.index('ok "the installed files are the fixed versions"')
+        self.assertGreater(block.index('install_lowport "$RESIGN_WINE"'), refusals)
+        self.assertGreater(block.index('require_wineserver_idle "$TARGET"'), refusals)
+        self.assertLess(block.index('install_lowport "$RESIGN_WINE"'), block.index('sign_payload "$RESIGN_WINE"'))
+        self.assertEqual(block.count("install_lowport"), 1)
+
+    def test_the_receipt_keeps_fifa20s_bottle(self):
+        with tempfile.TemporaryDirectory(prefix="a17-receipt-") as directory:
+            receipt = Path(directory) / "install-receipt.conf"
+            receipt.write_text("mode=copy\nbottle=Aurora17\nfifa20_bottle=Old\n")
+            harness = ('set -eu\nRECEIPT=%s\nBOTTLE="My REFUT"\n' % shlex_quote(str(receipt))
+                       + function_source("receipt_record_fifa20_bottle")
+                       + "receipt_record_fifa20_bottle\nreceipt_record_fifa20_bottle\n")
+            result = subprocess.run(["/bin/zsh", "-c", harness], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(receipt.read_text(), "mode=copy\nbottle=Aurora17\nfifa20_bottle=My REFUT\n")
+        uninstall = (ROOT / "uninstall.sh").read_text()
+        self.assertIn('fifa20_bottle=*)     R_F20_BOTTLE="${line#*=}" ;;', uninstall)
+        self.assertIn('F20_BOTTLE="${FIFA20_BOTTLE:-${R_F20_BOTTLE:-REFUT}}"', uninstall)
+        # The wineserver revert comes before anything else an in-place uninstall puts back.
+        self.assertLess(uninstall.index("install_name_tool -change @rpath/cxlowport.dylib"),
+                        uninstall.index("    for f in $FILES; do"))
+
+    def lowport(self, runs):
+        with tempfile.TemporaryDirectory(prefix="a17-lowport-") as directory:
+            work = Path(directory)
+            (work / "fixes/x86_64-unix").mkdir(parents=True)
+            (work / "fixes/x86_64-unix/cxlowport.dylib").write_bytes(b"lowport")
+            cx = work / "App.app/Contents/SharedSupport/CrossOver"
+            (cx / "lib/wine").mkdir(parents=True)
+            (cx / "lib64").mkdir()
+            (cx / "CrossOver-Hosted Application").mkdir()
+            (cx / "bin").symlink_to("CrossOver-Hosted Application")
+            (cx / "bin/wineserver").write_text("/usr/lib/libSystem.B.dylib\n")
+            harness = r"""
+set -eu
+HERE="$PWD"
+E_PAYLOAD=4; E_PERMISSION=3
+APP_MGMT_HINT=hint
+LIBSYSTEM=/usr/lib/libSystem.B.dylib
+LOWPORT=x86_64-unix/cxlowport.dylib
+LOWPORT_PATH=@rpath/cxlowport.dylib
+LOWPORT_DEST=lib64/cxlowport.dylib
+WINESERVER=bin/wineserver
+MACHO_CX=( lib64/cxlowport.dylib bin/wineserver )
+ok() { print -r -- "ok $*"; }
+die() { print -r -- "die $*"; exit "$1"; }
+macho_uuid() { [ -f "$1" ] && shasum "$1" | cut -c1-16; }
+otool() { cat "$2"; }
+install_name_tool() { sed -i '' "s|$2|$3|" "$4"; }
+codesign() { return 0; }
+"""
+            harness += function_source("wineserver_is_patched") + function_source("install_lowport")
+            harness += 'for i in {1..%d}; do\n' % runs
+            harness += '  install_lowport "$PWD/App.app/Contents/SharedSupport/CrossOver/lib/wine" App.app\n'
+            harness += '  print -r -- "CHANGED=$LOWPORT_CHANGED"\ndone\n'
+            result = subprocess.run(["/bin/zsh", "-c", harness], cwd=work,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return (result.stdout, (cx / "lib64/cxlowport.dylib").read_bytes(),
+                    (cx / "CrossOver-Hosted Application/wineserver").read_text())
+
+    def test_lowport_is_installed_and_wired_once(self):
+        out, dylib, wineserver = self.lowport(2)
+        self.assertEqual(dylib, b"lowport")
+        self.assertEqual(wineserver, "@rpath/cxlowport.dylib\n")
+        first, second = out.split("CHANGED=1\n", 1)
+        self.assertIn("cxlowport.dylib — installed", first)
+        self.assertIn("wineserver — now lets", first)
+        self.assertIn("ok cxlowport.dylib\n", second)
+        self.assertIn("wineserver — already lets", second)
+        self.assertTrue(second.rstrip().endswith("CHANGED=0"), second)
 
 
 class ProcessScopeTests(unittest.TestCase):

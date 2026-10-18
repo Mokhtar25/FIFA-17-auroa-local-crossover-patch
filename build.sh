@@ -245,7 +245,7 @@ check_deps() {
     fi
 
     if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-        ok "mingw-w64 (builds the .dll half and cas-powershell.exe)"
+        ok "mingw-w64 (builds the .dll half, cas-powershell.exe and cx-ipconfig.exe)"
     else
         bad "no x86_64-w64-mingw32-gcc. Without it --with-mingw fails and"
         say "        you get no Windows-side DLLs at all:  brew install mingw-w64"
@@ -290,8 +290,9 @@ say ""
 say "1. Checking the tools"
 check_deps
 # clang reads both from the environment, so configure, make and the
-# a17hosts.dylib step below all get the same SDK and minimum macOS. The
-# mingw compiler that builds the .dll half and cas-powershell.exe ignores them.
+# a17hosts.dylib and cxlowport.dylib steps below all get the same SDK and
+# minimum macOS. The mingw compiler that builds the .dll half,
+# cas-powershell.exe and cx-ipconfig.exe ignores them.
 export SDKROOT="$SDK" MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 
 if [ "${1:-}" = "--deps" ]; then
@@ -514,6 +515,31 @@ otool -L "$OUT/x86_64-unix/a17hosts.dylib" | grep -q 'reexport' \
 check_macho x86_64-unix/a17hosts.dylib
 ok "a17hosts.dylib"
 
+# cxlowport.dylib is the same trick for wineserver, where every socket bind()
+# and connect() of every bottle happens: it lets REFUT's online bridge (FIFA
+# 20) listen on 127.0.0.1:443, which macOS refuses a user, by moving a refused
+# loopback bind below 1024 up by 18000 and rewriting connect() and the two
+# name calls to match (see the top of fixes/cxlowport.c). setup.sh points
+# wineserver's libSystem load command at it, as it does ws2_32.so's at
+# a17hosts.dylib, so the flags and the checks are a17hosts' exactly. It acts
+# only in a bottle whose cxbottle.conf sets CX_LOWPORT=1, which setup gives
+# FIFA 20's REFUT bottle alone.
+say ""
+say "8. Building cxlowport.dylib"
+[ -f "$HERE/fixes/cxlowport.c" ] || fail "fixes/cxlowport.c is missing from this package."
+clang -arch x86_64 -O2 -Wall -Wextra -Wno-unused-parameter \
+      -dynamiclib -nodefaultlibs -Wl,-reexport-lSystem \
+      -install_name @rpath/cxlowport.dylib -compatibility_version 1.0.0 \
+      -o "$OUT/x86_64-unix/cxlowport.dylib" "$HERE/fixes/cxlowport.c" \
+    || fail "cxlowport.dylib did not build."
+codesign --remove-signature "$OUT/x86_64-unix/cxlowport.dylib" 2>/dev/null || true
+otool -L "$OUT/x86_64-unix/cxlowport.dylib" | grep -q 'reexport' \
+    || fail "cxlowport.dylib built without the libSystem re-export. It would take
+         malloc, read and every other libSystem call away from wineserver, and
+         no bottle would start at all."
+check_macho x86_64-unix/cxlowport.dylib
+ok "cxlowport.dylib"
+
 # cas-powershell.exe is ours outright too: the powershell.exe that answers the
 # CAS launcher's device check, and hands every other command line to
 # Aurora17's stand-in (see the top of fixes/cas-powershell.c). One C file and
@@ -521,16 +547,28 @@ ok "a17hosts.dylib"
 # and the link time, which are all that differed between two builds, so with
 # the same mingw this one comes out byte-identical to the shipped file.
 say ""
-say "8. Building cas-powershell.exe"
+say "9. Building cas-powershell.exe"
 [ -f "$HERE/fixes/cas-powershell.c" ] || fail "fixes/cas-powershell.c is missing from this package."
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
       -o "$OUT/x86_64-windows/cas-powershell.exe" "$HERE/fixes/cas-powershell.c" -lbcrypt \
     || fail "cas-powershell.exe did not build."
 ok "cas-powershell.exe"
 
-# --------------------------------------------------------- 9. the comparison
+# cx-ipconfig.exe, the same way: the ipconfig.exe that answers REFUT's
+# "ipconfig /flushdns" the way Windows does and hands every other command line
+# to Wine's own (see the top of fixes/cx-ipconfig.c). It needs nothing beyond
+# what mingw links by default.
 say ""
-say "9. Comparing with the files this package ships"
+say "10. Building cx-ipconfig.exe"
+[ -f "$HERE/fixes/cx-ipconfig.c" ] || fail "fixes/cx-ipconfig.c is missing from this package."
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
+      -o "$OUT/x86_64-windows/cx-ipconfig.exe" "$HERE/fixes/cx-ipconfig.c" \
+    || fail "cx-ipconfig.exe did not build."
+ok "cx-ipconfig.exe"
+
+# -------------------------------------------------------- 11. the comparison
+say ""
+say "11. Comparing with the files this package ships"
 say ""
 ( cd "$OUT" && shasum -a 256 x86_64-unix/*.so x86_64-unix/*.dylib x86_64-windows/*.dll \
                              x86_64-windows/*.exe ) \
@@ -607,3 +645,8 @@ say ""
 #   the patches fails at the rosetta patch: once the emulation patch has
 #   edited its lines, the "already applied" test cannot recognise it. Start
 #   from a fresh tree.
+#
+# * cxlowport.dylib and cx-ipconfig.exe (REFUT, FIFA 20) were built on
+#   2026-10-18 with exactly steps 8 and 10 (the macOS 26 SDK, a 15.0 target)
+#   and came out byte-identical to the copies proven by hand before them, so
+#   with the same clang and mingw both compare identical here.

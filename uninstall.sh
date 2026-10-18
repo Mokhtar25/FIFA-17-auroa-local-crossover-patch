@@ -10,6 +10,8 @@
 # removing them by script risks damaging the file. The one exception is
 # WEBVIEW2_BROWSER_EXECUTABLE_FOLDER, which names a folder this script deletes:
 # left behind it would point every WebView2 app in the bottle at nothing.
+# The same goes for FIFA 20's registry values in its REFUT bottle; the two
+# stand-ins setup.sh put there are taken out and Wine's own files put back.
 
 # Run under zsh whatever it was started with. Every line below is zsh, and the
 # very next one -- HERE="${0:A:h}" -- is the trap: bash and sh read ${0:A:h} as
@@ -74,7 +76,7 @@ fail() {
 
 # ------------------------------------------------------------- the receipt
 R_MODE=""; R_TARGET=""; R_BOTTLE_DIR=""; R_BOTTLE=""
-R_AURORA_DIR=""; R_BOTTLE_PS=""
+R_AURORA_DIR=""; R_BOTTLE_PS=""; R_F20_BOTTLE=""
 if [ -f "$RECEIPT" ]; then
     while IFS= read -r line; do
         case "$line" in
@@ -85,6 +87,7 @@ if [ -f "$RECEIPT" ]; then
             bottle=*)            R_BOTTLE="${line#*=}" ;;
             aurora_dir=*)        R_AURORA_DIR="${line#*=}" ;;
             bottle_powershell=*) R_BOTTLE_PS="${line#*=}" ;;
+            fifa20_bottle=*)     R_F20_BOTTLE="${line#*=}" ;;
         esac
     done < "$RECEIPT"
 fi
@@ -185,6 +188,35 @@ if [ "$MODE" = "in-place" ]; then
 
     WINE="$APP/Contents/SharedSupport/CrossOver/lib/wine"
     put_back=0
+
+    # wineserver first (FIFA 20's loopback ports), before anything else is
+    # put back: one load command changed back to libSystem, the same way as
+    # ws2_32.so below, and only then cxlowport.dylib removed -- never the
+    # other way round, because a wineserver that names a library that is gone
+    # starts no bottle at all. A failure here stops with nothing else touched.
+    # bin is a link to the folder wineserver is really in.
+    CXDIR="$APP/Contents/SharedSupport/CrossOver"
+    restored_ws=0
+    if otool -L "$CXDIR/bin/wineserver" 2>/dev/null | grep -q '@rpath/cxlowport.dylib'; then
+        install_name_tool -change @rpath/cxlowport.dylib /usr/lib/libSystem.B.dylib \
+            "$CXDIR/bin/wineserver" 2>/dev/null \
+            || fail "Could not put wineserver back on libSystem in
+             $APP
+         Nothing has been removed or put back. cxlowport.dylib is still in
+         place, so the app still works; try again once it is not running."
+        # Signed again straight away, not with the rest at the end: a stop
+        # further down must not leave wineserver edited and unsigned.
+        codesign --force --sign - "$CXDIR/bin/wineserver" 2>/dev/null \
+            || note "could not re-sign wineserver; the signing at the end tries again"
+        ok "put wineserver back on libSystem"
+        restored_ws=1
+        put_back=$((put_back+1))
+    fi
+    if [ -f "$CXDIR/lib64/cxlowport.dylib" ]; then
+        rm -f "$CXDIR/lib64/cxlowport.dylib"
+        ok "removed cxlowport.dylib"
+    fi
+
     for f in $FILES; do
         if [ -f "$WINE/$f.orig" ]; then
             cp -X "$WINE/$f.orig" "$WINE/$f" || fail "Could not restore $f in $APP.
@@ -232,6 +264,9 @@ if [ "$MODE" = "in-place" ]; then
         for so in ntdll.so winecoreaudio.so crypt32.so win32u.so ws2_32.so; do
             codesign --force --sign - "$WINE/x86_64-unix/$so" 2>/dev/null || signed=0
         done
+        if [ "$restored_ws" = 1 ]; then
+            codesign --force --sign - "$CXDIR/bin/wineserver" 2>/dev/null || signed=0
+        fi
         # Sign the app back with the entitlements it currently carries. Signing
         # without them would take away microphone, camera and Apple Events
         # access and leave no sign that it happened.
@@ -330,6 +365,37 @@ elif [ "$R_BOTTLE_PS" = "created" ] && [ -f "$PSDIR/powershell.exe" ]; then
         note "the powershell.exe in the $BOTTLE bottle is not the one we"
         say "        installed. Leaving it alone."
     fi
+fi
+
+# --------------------------------------------- FIFA 20's REFUT bottle
+# setup.sh --fifa20 puts two stand-ins into its own bottle, the one the
+# receipt records as fifa20_bottle (FIFA20_BOTTLE names another; REFUT when
+# neither says): CAS's powershell.exe, which runs REFUT's
+# match-end guard, and cx-ipconfig.exe as ipconfig.exe. Each comes out only
+# while it is still the file setup.sh put there, and Wine's own, kept beside
+# it as .wine-stub, goes back; with no such copy the bottle had none, and
+# ours is simply removed. powershell.exe may be done already, by the block
+# above, when the receipt names this bottle. Its registry values stay, like
+# every bottle's settings: see the end.
+F20_BOTTLE="${FIFA20_BOTTLE:-${R_F20_BOTTLE:-REFUT}}"
+F20_SYS="$BOTTLE_DIR/$F20_BOTTLE/drive_c/windows/system32"
+f20_put_back() {  # <file> <shipped stand-in> <what it is, for the message>
+    [ -f "$1" ] && cmp -s "$2" "$1" || return 0
+    if [ -f "$1.wine-stub" ]; then
+        mv -f "$1.wine-stub" "$1"
+        ok "put Wine's own ${1:t} back in the $F20_BOTTLE bottle ($3 removed)"
+    else
+        rm -f "$1"
+        ok "removed $3 from the $F20_BOTTLE bottle"
+    fi
+    undone=$((undone+1))
+}
+if [ -d "$F20_SYS" ]; then
+    say ""
+    f20_put_back "$F20_SYS/WindowsPowerShell/v1.0/powershell.exe" \
+        "$HERE/fixes/x86_64-windows/cas-powershell.exe" "the match-end guard's PowerShell stand-in"
+    f20_put_back "$F20_SYS/ipconfig.exe" \
+        "$HERE/fixes/x86_64-windows/cx-ipconfig.exe" "the ipconfig stand-in"
 fi
 
 # An explicit AURORA_DIR, or the folder recorded at install time, means that
@@ -486,6 +552,15 @@ say "    fixes. To remove them, open that bottle's cxbottle.conf and delete"
 say "    them from the [EnvironmentVariables] section. The one already taken"
 say "    out is WEBVIEW2_BROWSER_EXECUTABLE_FOLDER, because the folder it"
 say "    named has been deleted with it."
+if [ -d "$BOTTLE_DIR/$F20_BOTTLE" ]; then
+    say "  * FIFA 20's settings in the '$F20_BOTTLE' bottle: its cxbottle.conf ones"
+    say "    (CX_LOWPORT among them), WPF software rendering, the ucrtbase override"
+    say "    for FIFA20.exe and REFUT Launcher.exe, and the ipconfig.exe override."
+    say "    They are harmless left there, and REFUT's window is blank without"
+    say "    WPF software rendering even in a stock CrossOver. To be rid of all"
+    say "    of it, delete that bottle in CrossOver (REFUT and its hosts routes"
+    say "    go with it)."
+fi
 say "  * Aurora17's own hosts receipt, if its launcher has run since. That is"
 say "    Aurora17's record, not ours. To clear it, run in the Aurora17 folder:"
 say "        .\\Aurora17Connector.exe uninstall-hosts"

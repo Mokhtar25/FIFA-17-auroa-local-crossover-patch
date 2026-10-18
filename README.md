@@ -27,6 +27,11 @@ screen, or freezes loading a match. Quitting and launching again sometimes
 gets a run through, but nothing guarantees it. SETUP.md, "FIFA 16", has the
 details.
 
+**FIFA 20** plays online through the **REFUT** launcher, on that same copy, in
+a `REFUT` bottle of its own. Setup gives that bottle what REFUT needs under
+Wine, and the copy lets REFUT's local bridge listen on `127.0.0.1:443` with no
+password and no network change. SETUP.md, "FIFA 20 (REFUT)", has the details.
+
 ## What you need
 
 - A Mac with Apple silicon (M1 or newer), macOS 14 or newer
@@ -74,7 +79,7 @@ Pick one:
 
 | I want | Double-click |
 |---|---|
-| Every game it finds, online (FIFA 17, 15, 16, 21) | **START HERE.command** |
+| Every game it finds, online (FIFA 17, 15, 16, 21, and 20 with REFUT) | **START HERE.command** |
 | Single player only, no Aurora17 | **START HERE offline.command** |
 | Both games, in the bottle your Aurora launcher is in | **Both games.command** |
 | FIFA 15 only (makes the copy first if it is not there) | **FIFA 15.command** |
@@ -82,7 +87,9 @@ Pick one:
 
 START HERE sets up every game it finds (Aurora's record, a saved choice,
 Downloads, your drives), each in the bottle it is played from: FIFA 15 where
-your Aurora launcher is, FIFA 21 with FIFA 17, FIFA 16 in its own. No FIFA 17?
+your Aurora launcher is, FIFA 21 with FIFA 17, FIFA 16 in its own, and FIFA 20
+in its own when REFUT is here (`REFUT Launcher.exe` in Downloads, or REFUT
+installed in a bottle). No FIFA 17?
 Choose **Skip FIFA 17** when it asks, and the other games are still set up.
 One game failing never stops the others; the games list at the end says
 which game is set up, which was not found, and which is not finished.
@@ -175,6 +182,9 @@ fix right under it.
   its exact path, for example `Y:\Downloads\FIFA 16\fifa16.exe`). Tick the box
   to save it as a launcher and next time it is one click. There is no launcher
   program: the game runs on its own, offline.
+- **FIFA 20:** open **CrossOver-FIFA**, open the **REFUT** bottle, open REFUT and
+  press PLAY. Not installed yet? Choose **Run Command** in that bottle and run
+  the `REFUT Launcher.exe` you downloaded; it installs itself.
 
 Always use **CrossOver-FIFA**, not your normal CrossOver. They look the same,
 but only the copy has the fixes.
@@ -226,6 +236,8 @@ Aurora starts it from. Quit CrossOver, double-click **FIFA 15.command** (or
 must not say "missing dinput8".
 If it freezes at the language screen, see [the launch-mode check](fifa15/README.md#frozen-at-the-language-screen).
 For FIFA 16, use **diagnostics/16 Check the install (FIFA 16).command**.
+For FIFA 20, run `./setup.sh --fifa20 --verify`; REFUT's own logs go into the
+diagnostics zip.
 
 Every other check and repair is a double-click in there too — check the
 install, unstick a bottle, repair the signature, run a smoke test — one
@@ -245,6 +257,8 @@ The same actions from Terminal, if you prefer:
 ./setup.sh --fifa15 --verify   # check the FIFA 15 setup, change nothing
 ./setup.sh --fifa16            # set FIFA 16 up
 ./setup.sh --fifa16 --verify   # check the FIFA 16 setup, change nothing
+./setup.sh --fifa20            # set FIFA 20 up for REFUT, in its own bottle
+./setup.sh --fifa20 --verify   # check the FIFA 20 setup, change nothing
 ./setup-both.sh --verify       # check both games
 ```
 
