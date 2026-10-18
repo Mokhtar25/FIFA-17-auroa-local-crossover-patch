@@ -184,7 +184,8 @@ fix right under it.
   program: the game runs on its own, offline.
 - **FIFA 20:** open **CrossOver-FIFA**, open the **REFUT** bottle, open REFUT and
   press PLAY. Not installed yet? Choose **Run Command** in that bottle and run
-  the `REFUT Launcher.exe` you downloaded; it installs itself.
+  the `REFUT Launcher.exe` you downloaded; it installs itself. Sign in, then
+  quit CrossOver (**Stop.command**) and open REFUT again before the first PLAY.
 
 Always use **CrossOver-FIFA**, not your normal CrossOver. They look the same,
 but only the copy has the fixes.

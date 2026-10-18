@@ -1718,7 +1718,12 @@ window and remembers it. Nor does setup install REFUT. When REFUT is not in
 the bottle yet, setup says how: open CrossOver-FIFA, select the `REFUT`
 bottle, choose **Run Command** and run the `REFUT Launcher.exe` you downloaded
 (setup names it when it is in `~/Downloads`). It installs itself into the
-bottle (`%LOCALAPPDATA%\REFUT`) and opens.
+bottle (`%LOCALAPPDATA%\REFUT`) and opens. Sign in, then quit CrossOver
+(**Stop.command**, or `./setup.sh --shutdown`) and open REFUT again before the
+first PLAY. In the session that installed REFUT into a new bottle, FIFA 20
+closed about 30 seconds in on both PLAYs, before REFUT's friends adapter came
+up; after a restart, a start from the command line and one from the
+bottle's REFUT icon both played (2026-10-19). The cause is not known.
 
 To play: open CrossOver-FIFA, open the `REFUT` bottle, open REFUT, sign in,
 point it at `FIFA20.exe` once, and press PLAY.

@@ -6890,7 +6890,9 @@ f20_check_game() {
         say "        Download \"REFUT Launcher.exe\" from REFUT, then open ${TARGET:t:r},"
         say "        select the $BOTTLE bottle, choose Run Command and run it."
     fi
-    say "        It installs itself into the bottle and opens; play FIFA 20 from it."
+    say "        It installs itself into the bottle and opens. Sign in, then quit"
+    say "        CrossOver (Stop.command) and open REFUT again before PLAY: in the"
+    say "        session that installed it, FIFA 20 closed about 30 seconds in."
     return 0
 }
 
