@@ -87,8 +87,22 @@ path, its parent's image name and the names (never the values) of its
 environment, and waits for it; exit 10 ends the process with 0xC0F17A7E,
 anything else lets it run. Every other exe pays one name compare.
 CX_FIFA_GATE=0 switches it off. It hooks in right after the game profiles'
-call, so it applies last. README-folder-gate.md has the interface and the
+call, so it applies after it. README-folder-gate.md has the interface and the
 tests (../tests/gate).
+
+The fifteenth, crossover-26.3-remote-thread-exit.patch, is for FIFA 20 under
+the REFUT online launcher. A thread another process creates (CreateRemoteThread)
+now ends like a killed thread: it does not reap and free the TEB and stack the
+previous exiting thread parked. That reap made FIFA 20's protector crash the
+game ~40 s in whenever a remote thread returned. The patch header has the
+bisect table.
+
+The sixteenth, crossover-26.3-aurora-elevate.patch, is for the Aurora launcher
+and FIFA 21. Wine starts every process with the limited half of the admin
+token, and Aurora then refuses to set FIFA 21 up ("Aurora is not running as
+administrator"). An exe whose name starts with "aurora" now gets the full
+token at start, as after a UAC approval on Windows. CX_AURORA_ELEVATE=0 turns
+it off.
 
 APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
 
@@ -106,7 +120,10 @@ APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
    12. crossover-26.3-drtrap-syscall-stub.patch  (ntdll/unix/signal_x86_64.c,
                                                   win32u/message.c)
    13. crossover-26.3-game-profiles.patch        (ntdll/unix)
-   14. crossover-26.3-fifa17-folder-gate.patch   (ntdll/unix/loader.c; last)
+   14. crossover-26.3-fifa17-folder-gate.patch   (ntdll/unix/loader.c)
+   15. crossover-26.3-remote-thread-exit.patch   (ntdll/unix thread.c, server.c,
+                                                  unix_private.h)
+   16. crossover-26.3-aurora-elevate.patch       (ntdll/unix/loader.c; last)
 
 cng must go last of the four: it builds on online, and both touch dlls/crypt32/pfx.c.
 Applying them in directory order -- the obvious thing to do with a folder of
@@ -162,6 +179,17 @@ WHAT EACH ONE COVERS
                           Impulsum17Launcher.exe start; exit 10 refuses
                           (0xC0F17A7E), CX_FIFA_GATE=0, CX_FIFA_GATE_TIMEOUT;
                           ntdll/unix/loader.c; README-folder-gate.md
+    remote-thread-exit
+              FIFA 20     a CreateRemoteThread thread exits without reaping
+                          the previous exiting thread's TEB and stack; REFUT's
+                          guard / maths bridge / friends adapter threads no
+                          longer crash the game ~40 s in; ntdll/unix
+                          (thread.c, server.c, unix_private.h)
+    aurora-elevate
+              FIFA 21     exes named aurora* start with the full admin token,
+                          so the Aurora launcher no longer stops at "not
+                          running as administrator"; CX_AURORA_ELEVATE=0;
+                          ntdll/unix/loader.c
 
 Each patch carries its own header explaining what it changes and why, including
 the reasoning and the measurements behind it. Read the top of the file before

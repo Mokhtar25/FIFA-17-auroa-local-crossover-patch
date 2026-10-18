@@ -1,0 +1,101 @@
+ntdll: a thread another process created ends without reaping the previous one
+
+FIFA 20 started by the REFUT online launcher crashed about 40 s in, a couple
+of seconds after it loads Engine.BuildInfo.dll and walks its module list:
+an access violation inside the game's protected code (write from rip
+0x14D5091B2, then an unhandled read at 0x148FB4853). A plain start, or the
+FUT20 Local launcher, gets past that point.
+
+Bisected with diagnostics/refut/bisect.py, a direct FIFA20.exe start plus one
+action from outside at +10 s, three runs each (crashed/ran):
+
+    nothing                                       0/6
+    WriteProcessMemory (REFUT's trust patch)      0/3
+    VirtualAllocEx + write, no thread             0/3
+    CreateRemoteThread(Sleep, 0)                  7/7
+    CreateRemoteThread(LoadLibraryW, ucrtbase)    3/3   (REFUT's maths bridge)
+    match-end guard (registers a VEH remotely)    2/3
+    the thread created suspended, terminated      0/3
+    a thread that never exits (Sleep(INFINITE))   0/3
+    same, killed from outside after 1 s           0/3
+    a thread that sleeps 1 s, then returns        2/3
+    start = ntdll!NtTerminateThread(-2)           3/3
+
+So a remote thread crashes the game when, and only when, it exits by
+itself; NtTerminateThread alone is enough, so it is the unix exit path
+and not LdrShutdownThread. exit_thread() differs from abort_thread() (a
+killed thread) in one step: the exiting thread reaps the TEB and stack the
+previous exiting thread parked (pthread_join + virtual_free_teb) and parks
+its own. With that step skipped (test build, CX_TEST_NOSWAP) the remote
+thread case ran 3/3. Skipping only the free still crashed 2/3, so it is not
+simply the freed memory; the exact thing the protector notices was not
+pinned down (we do not trace the protector).
+
+On Windows a thread's exit never touches another thread of the process.
+Here a thread created through APC_CREATE_THREAD is marked, and on exit it
+leaves the way a killed thread does: no reap, nothing parked, its own TEB
+and stack stay mapped (as on Windows after TerminateThread). Threads the
+process creates itself are unchanged.
+
+With this patch: Sleep(0) remote thread 0/3, ucrtbase load 0/3, guard 1/3
+(at 51 s, later than this crash), plain start 0/3; and REFUT end to end
+started FIFA 20, connected, and played two matches.
+
+Cost: each remote thread that exits keeps its TEB and stack (one stack
+reserve, 1 MB by default, mostly uncommitted). Launchers start a handful.
+
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -679,10 +679,12 @@
+             attr->Attributes[1].Size         = sizeof(teb);
+             attr->Attributes[1].ValuePtr     = &teb;
+             attr->Attributes[1].ReturnLength = NULL;
++            ntdll_get_thread_data()->creating_remote = TRUE;
+             result->create_thread.status = NtCreateThreadEx( &handle, THREAD_ALL_ACCESS, NULL,
+                                                              NtCurrentProcess(), func, arg,
+                                                              call->create_thread.flags, zero_bits,
+                                                              commit, reserve, attr );
++            ntdll_get_thread_data()->creating_remote = FALSE;
+             result->create_thread.handle = wine_server_obj_handle( handle );
+             result->create_thread.pid = HandleToULong(id.UniqueProcess);
+             result->create_thread.tid = HandleToULong(id.UniqueThread);
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1461,6 +1461,8 @@
+     thread_data->request_fd  = request_pipe[1];
+     thread_data->start = start;
+     thread_data->param = param;
++    thread_data->creating_remote = FALSE;
++    thread_data->remote = ntdll_get_thread_data()->creating_remote;
+ 
+     pthread_attr_init( &pthread_attr );
+     pthread_attr_setstack( &pthread_attr, thread_data->kernel_stack, kernel_stack_size );
+@@ -1535,6 +1537,17 @@
+ 
+     if (InterlockedDecrement( &nb_threads ) <= 0) exit_process( status );
+ 
++    /* A thread another process created here (CreateRemoteThread) ends the
++     * way a killed one does (abort_thread): it does not reap and free the
++     * TEB and stack the previous exiting thread parked, and does not park
++     * its own, which stay mapped.  On Windows such a thread's exit touches
++     * nothing of the process's own threads; here it freed a game thread's
++     * stack at an arbitrary moment.  FIFA 20's protector does not survive
++     * that: a remote thread that returns, as the ones REFUT's launcher
++     * starts do, crashed the game ~40 s in about 85% of the time, and one
++     * that was killed instead, or never exited, never did. */
++    if (ntdll_get_thread_data()->remote) pthread_exit_wrapper( status );
++
+     if ((teb = InterlockedExchangePointer( &prev_teb, NtCurrentTeb() )))
+     {
+         struct ntdll_thread_data *thread_data = (struct ntdll_thread_data *)&teb->GdiTebBatch;
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -116,6 +116,8 @@
+     PRTL_THREAD_START_ROUTINE start;         /* thread entry point */
+     void                     *param;         /* thread entry point parameter */
+     void                     *jmp_buf;       /* setjmp buffer for exception handling */
++    BOOL                      creating_remote; /* running another process's APC_CREATE_THREAD */
++    BOOL                      remote;        /* created on behalf of another process */
+ };
+ 
+ C_ASSERT( sizeof(struct ntdll_thread_data) <= sizeof(((TEB *)0)->GdiTebBatch) );

@@ -142,6 +142,18 @@ PATCHES=(
 # patches/README-folder-gate.md.
 [ -f "$HERE/patches/crossover-26.3-fifa17-folder-gate.patch" ] \
     && PATCHES+=( crossover-26.3-fifa17-folder-gate.patch )
+# For FIFA 20 under REFUT: a thread another process created ends like a
+# killed one, without reaping the previous exiting thread's TEB and stack,
+# which made FIFA 20's protector crash the game. Made against the tree with
+# all of the above; see the patch header.
+[ -f "$HERE/patches/crossover-26.3-remote-thread-exit.patch" ] \
+    && PATCHES+=( crossover-26.3-remote-thread-exit.patch )
+# Then for the Aurora launcher (FIFA 21): an exe whose name starts with
+# "aurora" gets the full admin token, as after a UAC approval on Windows.
+# Without it Aurora says it is not running as administrator and will not set
+# FIFA 21 up. See the patch header.
+[ -f "$HERE/patches/crossover-26.3-aurora-elevate.patch" ] \
+    && PATCHES+=( crossover-26.3-aurora-elevate.patch )
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(
@@ -586,9 +598,11 @@ say ""
 #   script on 2026-09-30 from a pristine crossover-sources-26.3.0 tarball, all
 #   twelve patches applied in order. ntdll.so has been rebuilt since, in that
 #   same tree with this script's compiler and SDK settings: on 2026-10-11 with
-#   the game profiles, and on 2026-10-12 with the folder gate on top (the
+#   the game profiles, on 2026-10-12 with the folder gate on top (the
 #   fourteen patches applied in order to a pristine tree give the same
-#   loader.c). The other files in fixes/ are older
+#   loader.c), and on 2026-10-18 with the remote-thread-exit patch on top
+#   (dry-run applied to the unpatched thread.c, server.c and unix_private.h
+#   of that tree) and then the aurora-elevate patch (loader.c). The other files in fixes/ are older
 #   builds and were not replaced. Rerunning on a tree that already carries
 #   the patches fails at the rosetta patch: once the emulation patch has
 #   edited its lines, the "already applied" test cannot recognise it. Start

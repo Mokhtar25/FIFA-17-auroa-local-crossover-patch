@@ -1,0 +1,101 @@
+ntdll: Aurora's launcher starts with the full admin token
+
+Players set up for FIFA 21 reported that the Aurora launcher (Aurora.exe,
+installed as Aurora15Connector.exe) stops at
+
+    Aurora is not running as administrator, so it cannot connect FIFA 21
+    to the server. Close it and run it as administrator
+
+Wine starts every process with the limited half of the bottle's admin
+token: in a bottle, TokenElevationType is Limited and TokenIsElevated is 0,
+while CheckTokenMembership(Administrators) and IsUserAnAdmin still say yes.
+Aurora checks the elevation, so it decides it is not an administrator. On
+Windows the player approves a UAC prompt once ("Aurora 15 asks for
+administrator approval once so it can install its files into the game
+folder"); Wine has no prompt, and Aurora15Connector.exe, started from
+CrossOver, never asks for elevation itself: measured in Aurora17, it ran
+with type=3 elev=0. Started through ShellExecuteEx "runas" (type=2 elev=1)
+it came up normally.
+
+So a process whose exe name starts with "aurora" (any case) gets the full
+token in start_main_thread, right after the folder gate and before any
+guest code, the same way the PE loader does for a manifest that asks for
+requireAdministrator or highestAvailable (needs_elevation/elevate_token in
+dlls/ntdll/loader.c). The prefix covers Aurora.exe, Aurora15Connector.exe,
+the launcher's staged updates (Aurora15Connector.<version>.<size>.<sha>.exe)
+and its helpers; children inherit the token, as they would on Windows from an
+elevated parent. Nothing else in the bottle changes. Elevation in Wine moves
+no permissions: it only changes what the token reports.
+
+CX_AURORA_ELEVATE=0 switches it off.
+
+Verified in Aurora17: Aurora15Connector.exe started directly now runs with
+type=2 elev=1; a probe named aurora-tok.exe reports elevated=1, the same probe
+under another name, or with CX_AURORA_ELEVATE=0, reports elevated=0.
+Applies after every other patch (dlls/ntdll/unix/loader.c).
+
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2860,6 +2860,54 @@
+ }
+ 
+ /***********************************************************************
++ *           cx_aurora_elevate
++ *
++ * The Aurora launcher (Aurora.exe, Aurora15Connector.exe) refuses to set up
++ * FIFA 21 ("Aurora is not running as administrator, so it cannot connect
++ * FIFA 21 to the server") unless its token is elevated.  On Windows the user
++ * approves a UAC prompt once; Wine has no prompt and starts every process
++ * with the limited half of the admin token, so the launcher can never get
++ * past that step.  A process whose exe name starts with "aurora" gets the
++ * full token here, as the loader does for a manifest that asks for it
++ * (needs_elevation/elevate_token in dlls/ntdll/loader.c).  Its children
++ * inherit it.  CX_AURORA_ELEVATE=0 switches it off.
++ */
++static void cx_aurora_elevate(void)
++{
++    const char *val = getenv( "CX_AURORA_ELEVATE" );
++    const WCHAR *exe = main_wargv[0], *p;
++    static const char prefix[] = "aurora";
++    struct { HANDLE Token; HANDLE Thread; } primary;  /* PROCESS_ACCESS_TOKEN, ddk/ntddk.h */
++    TOKEN_ELEVATION_TYPE type;
++    TOKEN_LINKED_TOKEN linked;
++    HANDLE token;
++    unsigned int i;
++
++    if (val && val[0] == '0') return;
++    if ((p = wcsrchr( exe, '\\' ))) exe = p + 1;
++    if ((p = wcsrchr( exe, '/' ))) exe = p + 1;
++    for (i = 0; prefix[i]; i++)
++        if (!exe[i] || (exe[i] | 0x20) != prefix[i]) return;
++
++    if (NtOpenProcessToken( NtCurrentProcess(), TOKEN_QUERY, &token )) return;
++    if (NtQueryInformationToken( token, TokenElevationType, &type, sizeof(type), NULL )
++            || type == TokenElevationTypeFull
++            || NtQueryInformationToken( token, TokenLinkedToken, &linked, sizeof(linked), NULL ))
++    {
++        NtClose( token );
++        return;
++    }
++    NtClose( token );
++    if (!NtDuplicateToken( linked.LinkedToken, 0, NULL, FALSE, TokenPrimary, &primary.Token ))
++    {
++        primary.Thread = NULL;
++        NtSetInformationProcess( NtCurrentProcess(), ProcessAccessToken, &primary, sizeof(primary) );
++        NtClose( primary.Token );
++    }
++    NtClose( linked.LinkedToken );
++}
++
++/***********************************************************************
+  *           start_main_thread
+  */
+ static void start_main_thread(void)
+@@ -2879,6 +2927,7 @@
+     init_startup_info();
+     cx_profile_init();
+     cx_folder_gate();
++    cx_aurora_elevate();
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
+     init_thread_stack( teb, 0, 0, 0 );
