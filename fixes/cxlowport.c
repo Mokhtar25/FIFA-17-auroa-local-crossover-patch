@@ -60,9 +60,14 @@ static int (*real_getsockname)( int, struct sockaddr *, socklen_t * );
 static int (*real_getpeername)( int, struct sockaddr *, socklen_t * );
 static pthread_once_t real_once = PTHREAD_ONCE_INIT;
 
-/* Ports below 1024 this wineserver has moved. wineserver is single-threaded;
- * the atomics only keep this honest if that ever changes. */
-static unsigned char moved_ports[1024];
+/* For each port P below 1024 this wineserver has moved, the socket now bound
+ * to 18000 + P, plus one (0: not moved). A port counts as moved only while
+ * that socket is still bound there (see is_moved): once the program closes
+ * it, connects to P stop going to 18000 + P, so nothing else on the Mac that
+ * later listens on 18000 + P is handed this bottle's connections. wineserver
+ * is single-threaded; the atomics only keep this honest if that ever
+ * changes. */
+static int moved_fds[1024];
 
 static void load_real( void )
 {
@@ -108,7 +113,22 @@ static unsigned loopback_low_port( const struct sockaddr *addr, socklen_t len )
 
 static int is_moved( unsigned port )
 {
-    return port && __atomic_load_n( &moved_ports[port], __ATOMIC_ACQUIRE );
+    struct sockaddr_in in;
+    socklen_t len = sizeof(in);
+    int fd;
+
+    if (!port || !(fd = __atomic_load_n( &moved_fds[port], __ATOMIC_ACQUIRE ))) return 0;
+    fd--;
+    /* The descriptor may have been closed, or reused for another socket. */
+    if (real_getsockname( fd, (struct sockaddr *)&in, &len ) == 0
+            && len >= (socklen_t)sizeof(in) && in.sin_family == AF_INET
+            && in.sin_addr.s_addr == htonl( INADDR_LOOPBACK )
+            && ntohs( in.sin_port ) == CX_LOWPORT_OFFSET + port)
+        return 1;
+    __atomic_store_n( &moved_fds[port], 0, __ATOMIC_RELEASE );
+    if (debug_on())
+        fprintf( stderr, "cxlowport: 127.0.0.1:%u is no longer moved (its socket is gone)\n", port );
+    return 0;
 }
 
 int bind( int fd, const struct sockaddr *addr, socklen_t len )
@@ -138,7 +158,7 @@ int bind( int fd, const struct sockaddr *addr, socklen_t len )
         errno = EACCES;   /* report the original refusal */
         return rc2;
     }
-    __atomic_store_n( &moved_ports[port], 1, __ATOMIC_RELEASE );
+    __atomic_store_n( &moved_fds[port], fd + 1, __ATOMIC_RELEASE );
     return 0;
 }
 
