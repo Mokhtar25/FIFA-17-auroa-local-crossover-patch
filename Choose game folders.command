@@ -24,6 +24,7 @@ if [ "$selected" = 'Forget a choice…' ]; then
     selected="$(ui_pick_game 'Forget a folder choice' 0)" || exit 0
 fi
 case "$selected" in
+    'FIFA 12') game=fifa12; exe=Game/fifa.exe ;;
     'FIFA 15') game=fifa15; exe=fifa15.exe ;;
     'FIFA 16') game=fifa16; exe=fifa16.exe ;;
     'FIFA 17') game=fifa17; exe=FIFA17.exe ;;

@@ -3233,6 +3233,8 @@ done:
 
 /* -------------------------------------------------------------------- main */
 
+#include "fut12-link.c"
+
 int wmain(int argc, wchar_t **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -3247,6 +3249,17 @@ int wmain(int argc, wchar_t **argv)
             rest = i + 2;
             break;
         }
+    }
+    /* Aurora 12 sends its secure-link steps as -EncodedCommand. */
+    if (!script)
+    {
+        for (int i = 1; i + 1 < argc; i++)
+            if (!_wcsicmp(argv[i], L"-EncodedCommand") || !_wcsicmp(argv[i], L"-enc"))
+            {
+                int code = fut12_encoded(argv[i + 1]);
+                if (code >= 0) return code;
+                break;
+            }
     }
     if (!script)
     {
@@ -3277,6 +3290,8 @@ int wmain(int argc, wchar_t **argv)
     }
     else if (!_wcsicmp(name, L"New-DevCertificate.ps1"))
         rc = run_new_dev_certificate(script, argc - rest, argv + rest);
+    else if (!_wcsicmp(name, L"launch_fifa.ps1"))
+        rc = fut12_launch(script, argc - rest, argv + rest);
     else if (!_wcsicmp(name, L"Start-Aurora21.ps1"))
         rc = run_start_aurora21(script, argc - rest, argv + rest);
     else

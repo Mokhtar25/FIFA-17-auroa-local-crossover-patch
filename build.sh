@@ -245,10 +245,18 @@ check_deps() {
     fi
 
     if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-        ok "mingw-w64 (builds the .dll half, cas-powershell.exe and cx-ipconfig.exe)"
+        ok "mingw-w64 (builds the .dll half, cas-powershell.exe, cx-ipconfig.exe and cx-certutil.exe)"
     else
         bad "no x86_64-w64-mingw32-gcc. Without it --with-mingw fails and"
         say "        you get no Windows-side DLLs at all:  brew install mingw-w64"
+        missing=1
+    fi
+
+    # cx-certutil.exe is built for both Windows architectures.
+    if command -v i686-w64-mingw32-gcc >/dev/null 2>&1; then
+        ok "mingw-w64 for 32-bit Windows (builds the 32-bit cx-certutil.exe)"
+    else
+        bad "no i686-w64-mingw32-gcc:  brew install mingw-w64"
         missing=1
     fi
 
@@ -292,7 +300,7 @@ check_deps
 # clang reads both from the environment, so configure, make and the
 # a17hosts.dylib and cxlowport.dylib steps below all get the same SDK and
 # minimum macOS. The mingw compiler that builds the .dll half,
-# cas-powershell.exe and cx-ipconfig.exe ignores them.
+# cas-powershell.exe, cx-ipconfig.exe and cx-certutil.exe ignores them.
 export SDKROOT="$SDK" MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 
 if [ "${1:-}" = "--deps" ]; then
@@ -566,12 +574,28 @@ x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp 
     || fail "cx-ipconfig.exe did not build."
 ok "cx-ipconfig.exe"
 
-# -------------------------------------------------------- 11. the comparison
+# cx-certutil.exe, the same way, once for each Windows architecture: the
+# certutil.exe Aurora 12's setup puts its certificate in the Root store with
+# (see the top of fixes/cx-certutil.c). FIFA 12 is a 32-bit game and its setup
+# reaches syswow64's as well as system32's.
 say ""
-say "11. Comparing with the files this package ships"
+say "11. Building cx-certutil.exe, 64-bit and 32-bit"
+[ -f "$HERE/fixes/cx-certutil.c" ] || fail "fixes/cx-certutil.c is missing from this package."
+mkdir -p "$OUT/i386-windows"
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
+      -o "$OUT/x86_64-windows/cx-certutil.exe" "$HERE/fixes/cx-certutil.c" -lcrypt32 \
+    || fail "the 64-bit cx-certutil.exe did not build."
+i686-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
+      -o "$OUT/i386-windows/cx-certutil.exe" "$HERE/fixes/cx-certutil.c" -lcrypt32 \
+    || fail "the 32-bit cx-certutil.exe did not build."
+ok "cx-certutil.exe"
+
+# -------------------------------------------------------- 12. the comparison
+say ""
+say "12. Comparing with the files this package ships"
 say ""
 ( cd "$OUT" && shasum -a 256 x86_64-unix/*.so x86_64-unix/*.dylib x86_64-windows/*.dll \
-                             x86_64-windows/*.exe ) \
+                             x86_64-windows/*.exe i386-windows/*.exe ) \
     > "$OUT/SHA256SUMS.built"
 
 same=0; differ=0

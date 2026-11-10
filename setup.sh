@@ -96,6 +96,14 @@
 #                                         PowerShell and DNS Client stand-ins. The
 #                                         bottle (Aurora17 by default) must exist
 #   ./setup.sh --fifa21 --verify          check the FIFA 21 setup, change nothing
+#   ./setup.sh --fifa12                   set the bottle up for FIFA 12 from Aurora 12
+#                                         (the Aurora launcher): the copy if it is
+#                                         missing, the settings, the PowerShell and
+#                                         certutil stand-ins, Microsoft's 32-bit
+#                                         debugger (a 1.2 GB download, once), the
+#                                         game's registry value and its fifasetup.ini.
+#                                         The bottle (Aurora17 by default) must exist
+#   ./setup.sh --fifa12 --verify          check the FIFA 12 setup, change nothing
 #   ./setup.sh --fifa20                   set FIFA 20 up for the REFUT launcher: the
 #                                         copy if it is missing, the REFUT bottle
 #                                         (made if it is missing), its settings, two
@@ -173,6 +181,9 @@ game_exe_of() {
         fifa13) print -r -- fifa13.exe ;; fifa15) print -r -- fifa15.exe ;;
         fifa16) print -r -- fifa16.exe ;; fifa17) print -r -- FIFA17.exe ;;
         fifa21) print -r -- FIFA21.exe ;;
+        # Inside Game/: the folder a person picks is the one that holds Game,
+        # the one the game's own registry value names.
+        fifa12) print -r -- Game/fifa.exe ;;
         *) return 1 ;;
     esac
 }
@@ -187,7 +198,7 @@ case "${1:-}" in
         if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] \
            || { [ "$MODE" = forget-folder ] && [ "$#" -ne 1 ]; } \
            || ! game_exe_of "${1:-}" >/dev/null; then
-            print -r -- "Use --choose-folder <fifa13|fifa15|fifa16|fifa17|fifa21> [path]"
+            print -r -- "Use --choose-folder <fifa12|fifa13|fifa15|fifa16|fifa17|fifa21> [path]"
             print -r -- " or --forget-folder <game>"
             exit $E_UNSUPPORTED
         fi
@@ -246,6 +257,17 @@ case "${1:-}" in
             --shutdown) MODE=shutdown; shift ;;
             --resign) MODE=resign; shift ;;
             -*) print -r -- "Unknown option after --fifa21: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
+        esac ;;
+    --fifa12)
+        # And for FIFA 12 under Aurora 12: AURORA_GAME=fifa12, the same way.
+        AURORA_GAME=fifa12; MODE=fifa12; shift
+        case "${1:-}" in
+            --verify) MODE=verify; shift ;;
+            --bottle) MODE=bottle; shift ;;
+            --unstick) MODE=unstick; shift ;;
+            --shutdown) MODE=shutdown; shift ;;
+            --resign) MODE=resign; shift ;;
+            -*) print -r -- "Unknown option after --fifa12: $1  (try: ./setup.sh --help)"; exit $E_UNSUPPORTED ;;
         esac ;;
     --fifa20)
         # And for FIFA 20 under REFUT: AURORA_GAME=fifa20, the same way.
@@ -528,9 +550,11 @@ AURORA_HOSTS=(
 #
 # And only where a bottle asks for it: the library does nothing unless
 # CX_LOWPORT=1 is in wineserver's environment, which wineserver inherits from
-# the bottle's cxbottle.conf, and setup puts that in FIFA 20's REFUT bottle
-# alone (its BOTTLE_SETTINGS). In every other bottle macOS refuses those binds
-# as it always did, so a program that falls back to another port still does.
+# the bottle's cxbottle.conf, and setup puts that in FIFA 20's REFUT bottle and
+# in the bottle FIFA 12 is set up in (their BOTTLE_SETTINGS): Aurora 12's
+# forwarder binds 127.0.0.1:80 and 443. In every other bottle macOS refuses
+# those binds as it always did, so a program that falls back to another port
+# still does.
 # That is why every install can carry it, and not only --fifa20's: wired in,
 # it changes nothing until a bottle says so. CX_LOWPORT_DEBUG=1 beside it in
 # the bottle logs each move.
@@ -943,8 +967,8 @@ CAS_LINK_ID=com.fifa17-crossover.cas-link
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 case "$GAME" in
-    fifa17|fifa15|fifa16|fifa21|fifa20) ;;
-    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15, fifa16, fifa21 or fifa20)"; exit $E_UNSUPPORTED ;;
+    fifa17|fifa15|fifa16|fifa21|fifa20|fifa12) ;;
+    *) print -r -- "Unknown AURORA_GAME: $GAME  (fifa17, fifa15, fifa16, fifa21, fifa20 or fifa12)"; exit $E_UNSUPPORTED ;;
 esac
 # Whether the game was named (--fifa15, --fifa16, --fifa21, --fifa20 or AURORA_GAME) or
 # plain FIFA 17 was assumed. A plain --verify also prints the table of every
@@ -1046,11 +1070,12 @@ SHIPPED_NTDLL="$HERE/fixes/x86_64-unix/ntdll.so"
 # Which ntdll.so the bottle will run on once this run is over. An install
 # makes the copy afresh from fixes/, --repair refreshes it from there, and
 # --fifa15 and --fifa16 either install or bring the copy's ntdll.so up to
-# the shipped one (add_game_ntdll), and so does --fifa20. --fifa21 installs
-# when there is no copy and otherwise leaves it as it is, like every other mode.
+# the shipped one (add_game_ntdll), and so does --fifa20. --fifa21 and --fifa12
+# install when there is no copy and otherwise leave it as it is, like every
+# other mode.
 case "$MODE" in
     install|repair|fifa15|fifa16|fifa20) PROFILE_NTDLL="$SHIPPED_NTDLL" ;;
-    fifa21)
+    fifa21|fifa12)
         if [ -d "$COPY_APP" ]; then PROFILE_NTDLL="$COPY_NTDLL"; else PROFILE_NTDLL="$SHIPPED_NTDLL"; fi ;;
     *) PROFILE_NTDLL="$COPY_NTDLL" ;;
 esac
@@ -1159,6 +1184,17 @@ elif [ "$GAME" = fifa21 ]; then
         BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" )
     fi
     GAME_LABEL="FIFA 21"
+elif [ "$GAME" = fifa12 ]; then
+    # FIFA 12 under Aurora 12, in Aurora's common bottle. fifa.exe is not in
+    # the per-game table, so it runs with whatever the bottle says, with or
+    # without the table: CX_DR_TRAP=2 goes in bare, as Aurora17 has it from
+    # FIFA 17's setup and where this was made to work. CX_LOWPORT=1 switches
+    # cxlowport.dylib on in this bottle's wineserver, because Aurora 12's
+    # forwarder binds 127.0.0.1:80 and 443 (see "loopback ports below 1024").
+    # A running wineserver has to be restarted for it to take, so the bottle
+    # must be idle, as for every other game's settings (require_bottle_free).
+    BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" "CX_LOWPORT=1" )
+    GAME_LABEL="FIFA 12"
 elif [ "$GAME" = fifa20 ]; then
     # FIFA 20 under REFUT. FIFA20.exe is not in the per-game table, so it runs
     # with whatever the bottle says, and the bottle is FIFA 20's alone, so
@@ -1169,7 +1205,7 @@ elif [ "$GAME" = fifa20 ]; then
     # WebView2 folder is for its own launchers and stays out. CX_LOWPORT=1
     # switches cxlowport.dylib on in this bottle's wineserver, so REFUT's
     # bridge can listen on 127.0.0.1:443 (see "loopback ports below 1024");
-    # no other bottle gets it.
+    # the only other bottle that gets it is the one FIFA 12 is set up in.
     BOTTLE_SETTINGS=( "CX_GRAPHICS_BACKEND=d3dmetal" "CX_DR_TRAP=2" "WINE_SIMULATE_WRITECOPY=1" "CX_LOWPORT=1" )
     GAME_LABEL="FIFA 20 (REFUT)"
     # REFUT starts threads in FIFA20.exe from outside (the match-end guard,
@@ -1295,7 +1331,7 @@ for OTHER_GAME in fifa17 fifa15 fifa16; do
     OTHER_BOTTLE_PATH="$BOTTLE_DIR/$OTHER_BOTTLE"
     if [ "${(L)BOTTLE_PATH:A}" = "${(L)OTHER_BOTTLE_PATH:A}" ] \
        || grep -Eq "^$OTHER_SETTING" "$BOTTLE_PATH/cxbottle.conf" 2>/dev/null; then
-        if [ "$PROFILES" = 1 ] || [ "$GAME:$OTHER_GAME" = fifa21:fifa17 ]; then
+        if [ "$PROFILES" = 1 ] || [ "$GAME:$OTHER_GAME" = fifa21:fifa17 ] || [ "$GAME:$OTHER_GAME" = fifa12:fifa17 ]; then
             SHARED_WITH+=( "$OTHER_LABEL" )
             continue
         fi
@@ -1345,12 +1381,17 @@ done
 # in, so the bottle comes first. A copy there gets the ntdll.so with the
 # remote-thread fix and cxlowport.dylib if it lacks either. It ends with
 # REFUT looked for in the bottle, and how to install it if it is not there.
+#
+# --fifa12 is --fifa21's shape for FIFA 12: it never makes the bottle, since
+# Aurora 12 is played from the Aurora launcher, which has to be there first.
+# A copy there gets cxlowport.dylib if it lacks it, as for --fifa20.
 F15_ONE=0
 F16_ONE=0
 F20_ONE=0
-if [ "$MODE" = fifa15 ] || [ "$MODE" = fifa16 ] || [ "$MODE" = fifa21 ] || [ "$MODE" = fifa20 ]; then
+F12_ONE=0
+if [ "$MODE" = fifa15 ] || [ "$MODE" = fifa16 ] || [ "$MODE" = fifa21 ] || [ "$MODE" = fifa20 ] || [ "$MODE" = fifa12 ]; then
     if [ "$MODE" = fifa15 ]; then F15_ONE=1; elif [ "$MODE" = fifa16 ]; then F16_ONE=1
-    elif [ "$MODE" = fifa20 ]; then F20_ONE=1; fi
+    elif [ "$MODE" = fifa20 ]; then F20_ONE=1; elif [ "$MODE" = fifa12 ]; then F12_ONE=1; fi
     if [ ! -d "$TARGET" ] && [ "$TARGET_EXPLICIT" = 0 ] \
        && [ -d "$HOME/Applications/${TARGET:t}" ]; then
         TARGET="$HOME/Applications/${TARGET:t}"
@@ -1362,9 +1403,9 @@ fi
 ALL_PORTS=47170,47171,47172,47173,3216
 if [ "$GAME" = fifa15 ]; then
     GAME_PORTS=3216; GAME_PORTS_LABEL=3216
-elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ] || [ "$GAME" = fifa20 ]; then
-    # FIFA 16 runs on its own: no Aurora, no port. FIFA 21's Aurora launcher
-    # holds none this script knows of. REFUT's bridge holds its own ports
+elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ] || [ "$GAME" = fifa20 ] || [ "$GAME" = fifa12 ]; then
+    # FIFA 16 runs on its own: no Aurora, no port. FIFA 21's and FIFA 12's
+    # Aurora launcher holds none this script knows of. REFUT's bridge holds its own ports
     # (8080, 17502, 42230-42232, 44321, and 443 moved to 18443) only while
     # it plays, and quits with it.
     GAME_PORTS=""; GAME_PORTS_LABEL=""
@@ -1616,7 +1657,7 @@ wine_leftovers() {
 # left listening on 3216 is a normal state, not a reason to refuse to start
 # Aurora17's launcher. FIFA 16 has no Aurora, so its name is the game's alone.
 game_leftovers() {
-    local p pat='fifa1[567]|Aurora1[57](Connector|Client|Server|Launcher)'
+    local p pat='fifa1[567]|fifa\.exe|Aurora1[57](Connector|Client|Server|Launcher)'
     case "${1:-}" in
         fifa17) pat='fifa17|Aurora17(Connector|Client|Server|Launcher)' ;;
         fifa15) pat='fifa15|Aurora15(Connector|Client|Server|Launcher)' ;;
@@ -1856,7 +1897,11 @@ f20_add_lowport() {
         ok "${LOWPORT:t} -- already in, and wineserver goes through it"
         return 0
     fi
-    say "        ${app:t} cannot let REFUT's bridge listen on 127.0.0.1:443 yet"
+    if [ "$GAME" = fifa12 ]; then
+        say "        ${app:t} cannot let Aurora 12's forwarder listen on 127.0.0.1:80 and 443 yet"
+    else
+        say "        ${app:t} cannot let REFUT's bridge listen on 127.0.0.1:443 yet"
+    fi
     require_app_closed "$app"
     require_clt
     lowport_needs_writing "$wine" && require_wineserver_idle "$app"
@@ -2232,8 +2277,10 @@ OVERRIDE_LINE="\"$OVERRIDE_DLL\"=\"native,builtin\""
 # FIFA 16, which has no version.dll of its own to prefer.
 # FIFA 20 has two, for its ucrtbase (see the C runtime override below):
 # FIFA20.exe, and REFUT Launcher.exe, in whose process REFUT's maths bridge
-# runs before it loads the same DLL into the game.
-if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa16 ]; then OVERRIDE_EXES=(); elif [ "$GAME" = fifa21 ]; then OVERRIDE_EXES=(FIFA21.exe); elif [ "$GAME" = fifa20 ]; then OVERRIDE_EXES=(FIFA20.exe "REFUT Launcher.exe"); else OVERRIDE_EXES=(FIFA17.exe _fifa17.exe); fi
+# runs before it loads the same DLL into the game. FIFA 12 has none of its own:
+# its overrides are cdb.exe's (see "FIFA 12, from Aurora 12"). version stays
+# bottle-wide for it too, as every game Aurora.exe starts has it.
+if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa16 ]; then OVERRIDE_EXES=(); elif [ "$GAME" = fifa21 ]; then OVERRIDE_EXES=(FIFA21.exe); elif [ "$GAME" = fifa20 ]; then OVERRIDE_EXES=(FIFA20.exe "REFUT Launcher.exe"); elif [ "$GAME" = fifa12 ]; then OVERRIDE_EXES=(); else OVERRIDE_EXES=(FIFA17.exe _fifa17.exe); fi
 
 # ------------------------------------------------ the C runtime override
 # An online match is a lockstep simulation: every client runs the same maths on
@@ -2277,7 +2324,7 @@ if [ "$GAME" = fifa15 ]; then OVERRIDE_EXES=(fifa15.exe); elif [ "$GAME" = fifa1
 # ucrtbase for both programs (OVERRIDE_EXES); without it REFUT's maths bridge
 # never reports READY and the start-up stops there. The bottle's system32
 # ucrtbase is a Wine placeholder, so nothing else in it changes.
-if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ] || [ "$GAME" = fifa20 ]; then CRT_OVERRIDE_DLLS=(); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
+if [ "$GAME" = fifa15 ]; then CRT_OVERRIDE_DLLS=(msvcr110 msvcp110); elif [ "$GAME" = fifa16 ] || [ "$GAME" = fifa21 ] || [ "$GAME" = fifa20 ] || [ "$GAME" = fifa12 ]; then CRT_OVERRIDE_DLLS=(); else CRT_OVERRIDE_DLLS=(msvcr120 msvcp120); fi
 
 bottle_user_reg()   { print -r -- "$BOTTLE_DIR/$BOTTLE/user.reg"; }
 bottle_system_reg() { print -r -- "$BOTTLE_DIR/$BOTTLE/system.reg"; }
@@ -3282,7 +3329,7 @@ aurora_in_use() {
 #                holding RebornFUT.exe (FIFA 17 only). REBORN_DIR names one
 #                kept somewhere else.
 #   direct       the game's own exe from the bottle, no launcher.
-GT_GAMES=( fifa13 fifa15 fifa16 fifa17 fifa21 )
+GT_GAMES=( fifa12 fifa13 fifa15 fifa16 fifa17 fifa21 )
 GT_LAUNCHERS=( aurora impulsum cas reborn direct )
 
 game_label_of() { print -r -- "FIFA ${1#fifa}"; }
@@ -3452,14 +3499,14 @@ game_dir_source_says() {
 #   bare env     the bottle's [EnvironmentVariables], as before the table
 #   missing ...  none of them gives the game what it needs
 # FIFA 13 is not in the table and needs nothing anyone knows of, so it runs
-# with whatever the bottle has.
+# with whatever the bottle has. Nor is FIFA 12's fifa.exe.
 game_settings_source() {
     local g="$1" exe sec prof k v reg; local -a got lack
     reg="$(bottle_user_reg)"
     exe="$(game_exe_of "$g")"
     got=(); lack=()
     if [ "$PROFILES" = 1 ]; then
-        sec='[Software\\Wine\\AppDefaults\\'"$exe"'\\CrossOver-FIFA]'
+        sec='[Software\\Wine\\AppDefaults\\'"${exe:t}"'\\CrossOver-FIFA]'
         prof="$(reg_value "$reg" "$sec" Profile 2>/dev/null || true)"
         [ -n "$prof" ] && got+=( "Profile=$prof" )
         for k in DrTrap TopdownLimit Fifa16DstFix; do
@@ -3472,7 +3519,7 @@ game_settings_source() {
             lack+=( "CX_PF_PAE=1" )
         fi
         if [ ${#got} -gt 0 ]; then v="AppDefaults (${(j:, :)got})"
-        elif [ "$g" = fifa13 ]; then v="bare env"
+        elif [ "$g" = fifa13 ] || [ "$g" = fifa12 ]; then v="bare env"
         else v="table"; fi
         [ ${#lack} -gt 0 ] && v="$v; missing ${(j: :)lack}"
         print -r -- "$v"
@@ -3531,6 +3578,11 @@ game_dlls() {
             # The Aurora launcher's PowerShell stand-in writes this at PLAY.
             if dll_native_for ucrtbase FIFA21.exe; then print -r -- "ucrtbase"
             else print -r -- "ucrtbase at PLAY"; fi
+            return 0 ;;
+        fifa12)
+            # For the 32-bit debugger, not for the game (f12_cdb_overrides_set).
+            if f12_cdb_overrides_set; then print -r -- "${(j: :)F12_DBG_DLLS} for cdb.exe"
+            else print -r -- "missing ${(j: :)F12_DBG_DLLS} for cdb.exe"; fi
             return 0 ;;
     esac
     have=(); lack=()
@@ -3688,6 +3740,10 @@ gt_cell() {
     if [ "$l:$g" = aurora:fifa21 ]; then
         gt_powershell_ok || { print -r -- "missing PowerShell stand-in"; return 0; }
         gt_dnscache_ok   || { print -r -- "missing Dnscache stand-in"; return 0; }
+    fi
+    if [ "$l:$g" = aurora:fifa12 ]; then
+        out="$(f12_first_missing)"
+        [ -z "$out" ] || { print -r -- "missing $out"; return 0; }
     fi
     if [ "$g" = fifa17 ]; then
         gt_licence_ok || { print -r -- "missing licence file"; return 0; }
@@ -4209,11 +4265,19 @@ verify_install() {
             elif (( ${SOFT_SETTINGS[(Ie)$k]} )) && grep -q "^\"$k\" = " "$conf"; then
                 # See add_setting: another game's value, which the games the
                 # table lists do not read.
-                ok "$k is another game's value here; $GAME_LABEL takes its own from the table"
+                if [ "$GAME" = fifa12 ]; then
+                    note "$k is another game's value here; fifa.exe is not in the table, so FIFA 12 runs with it"
+                else
+                    ok "$k is another game's value here; $GAME_LABEL takes its own from the table"
+                fi
             else
                 bad "$k is not set to $v in the $BOTTLE bottle"; problems=$((problems+1))
                 # The one setting whose absence says nothing about why.
-                if [ "$k" = CX_LOWPORT ]; then
+                if [ "$k" = CX_LOWPORT ] && [ "$GAME" = fifa12 ]; then
+                    say "        so cxlowport.dylib stays off in this bottle's wineserver and"
+                    say "        Aurora 12's forwarder cannot listen on 127.0.0.1:80 and 443. Quit"
+                    say "        CrossOver fully, then re-run ./setup.sh --fifa12"
+                elif [ "$k" = CX_LOWPORT ]; then
                     say "        so cxlowport.dylib stays off in this bottle's wineserver and"
                     say "        REFUT's bridge cannot listen on 127.0.0.1:443. Quit CrossOver"
                     say "        fully, then re-run ./setup.sh --fifa20"
@@ -4226,6 +4290,8 @@ verify_install() {
         # not in the table, so the lines above are its settings.
         if [ "$GAME" = fifa20 ]; then
             ok "FIFA 20's own settings: the bottle's (FIFA20.exe is not in the per-game table)"
+        elif [ "$GAME" = fifa12 ]; then
+            ok "FIFA 12's own settings: the bottle's (fifa.exe is not in the per-game table)"
         elif [ "$PROFILES" = 1 ]; then
             GAME_SRC="$(game_settings_source "$GAME")"
             case "$GAME_SRC" in
@@ -4490,11 +4556,11 @@ verify_install() {
                    say "        .NET process (Aurora15Connector, its client) waits five seconds"
                    say "        for a proxy lookup before its first request. Quit CrossOver"
                    say "        fully, then re-run  ./setup.sh --fifa15"
-                 elif [ "$GAME" = fifa21 ]; then
+                 elif [ "$GAME" = fifa21 ] || [ "$GAME" = fifa12 ]; then
                    bad "proxy auto-detect is on in the $BOTTLE bottle, so every fresh"
                    say "        .NET process (the Aurora launcher's bridges) waits five seconds"
                    say "        for a proxy lookup before its first request. Quit CrossOver"
-                   say "        fully, then re-run  ./setup.sh --fifa21"
+                   say "        fully, then re-run  ./setup.sh --$GAME"
                  else
                    bad "proxy auto-detect is on in the $BOTTLE bottle, so Aurora's"
                    say "        helper spends five seconds looking for a proxy and misses"
@@ -4581,6 +4647,9 @@ verify_install() {
             problems=$((problems+1))
         fi
         f21_check_game
+    elif [ "$GAME" = fifa12 ]; then
+        f12_verify
+        problems=$((problems + F12_PROBLEMS))
     elif [ "$GAME" = fifa20 ]; then
         # REFUT runs both by their place in system32; each must be the file
         # this package ships, and ipconfig.exe needs its override as well.
@@ -4675,8 +4744,8 @@ verify_install() {
     fi
 
     # Loopback ports below 1024 (see "loopback ports below 1024"). Every
-    # install puts it in, but only FIFA 20 needs it, so a copy without it is
-    # BAD for FIFA 20 and a note for the others -- except a wineserver that
+    # install puts it in, but only FIFA 20 and FIFA 12 need it, so a copy without
+    # it is BAD for those two and a note for the others -- except a wineserver that
     # names a cxlowport.dylib that is not there, or a signature that does not
     # hold, which stops every bottle from starting at all.
     local cx="${wine:h:h}" lp_bad=""
@@ -4699,9 +4768,13 @@ verify_install() {
             say "        127.0.0.1:443 and stops with \"Could not bind a required local"
             say "        bridge port\". Quit CrossOver fully, then re-run ./setup.sh --fifa20"
             problems=$((problems+1))
+        elif [ "$GAME" = fifa12 ]; then
+            bad "$lp_bad, so Aurora 12's forwarder cannot listen on"
+            say "        127.0.0.1:80 and 443. Quit CrossOver fully, then re-run ./setup.sh --fifa12"
+            problems=$((problems+1))
         else
-            note "$lp_bad. Only FIFA 20 (REFUT) needs it, to listen on"
-            say "        127.0.0.1:443; ./setup.sh --repair puts it in."
+            note "$lp_bad. Only FIFA 20 (REFUT) and FIFA 12 need it, to listen on"
+            say "        127.0.0.1 below port 1024; ./setup.sh --repair puts it in."
         fi
     fi
     if wineserver_is_patched "$wine"; then
@@ -4722,6 +4795,9 @@ verify_install() {
     elif [ "$GAME" = fifa21 ]; then
         # FIFA 21's stand-in writes its own names at PLAY.
         ok "FIFA 21: Aurora17's EA names, licence and certificate checks do not apply"
+    elif [ "$GAME" = fifa12 ]; then
+        # Aurora 12's helper does its own at PLAY, through the stand-ins.
+        ok "FIFA 12: Aurora17's EA names, licence and certificate checks do not apply"
     elif [ "$GAME" = fifa20 ]; then
         # REFUT writes its own routes into this bottle's hosts file at PLAY.
         ok "FIFA 20: Aurora17's EA names, licence and certificate checks do not apply"
@@ -4904,6 +4980,12 @@ verify_install() {
         if [ "$GAME" = fifa21 ]; then
             say "These checks do not test a launch. Open the Aurora launcher in the $BOTTLE"
             say "bottle and press PLAY on FIFA 21: the game reaching its menus is the real test."
+            return 0
+        fi
+        if [ "$GAME" = fifa12 ]; then
+            say "These checks do not test a launch. Open the Aurora launcher in the $BOTTLE"
+            say "bottle, press Repair on Aurora 12, then Play: the game reaching its menus is"
+            say "the real test."
             return 0
         fi
         if [ "$GAME" = fifa20 ]; then
@@ -5942,6 +6024,7 @@ bundle_key_override() {
         fifa17) print -r -- "version (bottle-wide, for FIFA17.exe)" ;;
         fifa21) print -r -- "version (bottle-wide, for FIFA21.exe)" ;;
         fifa13) print -r -- "version (bottle-wide, for fifa13.exe)" ;;
+        fifa12) print -r -- "version (bottle-wide, for fifa.exe)" ;;
         *) return 1 ;;
     esac
 }
@@ -5949,7 +6032,7 @@ bundle_key_override_set() {
     local g="$1" BOTTLE="$2"
     case "$g" in
         fifa15) dll_native_for dinput8 fifa15.exe ;;
-        fifa13|fifa17|fifa21) dll_native_global version ;;
+        fifa12|fifa13|fifa17|fifa21) dll_native_global version ;;
         *) return 1 ;;
     esac
 }
@@ -6067,7 +6150,7 @@ bundle_checks() {
     local dir="$1" name rc
     local -a args
     mkdir -p "$dir" 2>/dev/null || return 0
-    for name in verify fifa15-verify fifa16-verify fifa21-verify fifa20-verify; do
+    for name in verify fifa15-verify fifa16-verify fifa21-verify fifa20-verify fifa12-verify; do
         case "$name" in
             verify) args=( --verify ) ;;
             *) args=( "--${name%-verify}" --verify ) ;;
@@ -6898,12 +6981,13 @@ f20_check_game() {
 
 # "Done" has to mean the game will start: the bottle's settings, a stand-in
 # where PLAY will find it, the EA names, for FIFA 21 the DNS Client its
-# launcher asks about before it starts anything, and for FIFA 20 the
-# ipconfig stand-in REFUT stops without.
+# launcher asks about before it starts anything, for FIFA 20 the ipconfig
+# stand-in REFUT stops without, and for FIFA 12 everything f12_install does.
 setup_steps_ok() {
     [ "$BOTTLE_OK" = 1 ] && [ "$PS_OK" = 1 ] && [ "$HOSTS_OK" = 1 ] \
         && { [ "$GAME" != fifa21 ] || [ "${DNSCACHE_OK:-0}" = 1 ]; } \
-        && { [ "$GAME" != fifa20 ] || [ "${IPCONFIG_OK:-0}" = 1 ]; }
+        && { [ "$GAME" != fifa20 ] || [ "${IPCONFIG_OK:-0}" = 1 ]; } \
+        && { [ "$GAME" != fifa12 ] || [ "${F12_OK:-0}" = 1 ]; }
 }
 
 # What FIFA 21 needs that is not the bottle's to give: the Aurora launcher
@@ -6923,6 +7007,505 @@ f21_check_game() {
     else
         note "no FIFA 21 folder found; the Aurora launcher asks for it, and nothing"
         say "        here needs it"
+    fi
+    return 0
+}
+
+# --------------------------------------------- FIFA 12, from Aurora 12
+# Aurora 12 is played from the Aurora launcher, in Aurora's common bottle. Its
+# helper, futlink.exe, drives Windows through PowerShell -EncodedCommand, and
+# what it asks for has no Wine equivalent, so the bottle needs these pieces:
+#
+#   1. the PowerShell stand-in, rebuilt with aurora17/fut12-link.c. Wine has no
+#      VPN stack, so the helper's dial fails, as the stand-in arranges, and the
+#      helper's own app-link fallback carries the game over TLS;
+#   2. certutil.exe (fixes/cx-certutil.c), 64-bit and 32-bit. Wine's is a stub
+#      that does nothing, so Aurora 12's setup said NOT READY: the local
+#      certificate never reached the Root store;
+#   3. CX_LOWPORT=1 (BOTTLE_SETTINGS), because the forwarder binds
+#      127.0.0.1:80 and 443;
+#   4. Microsoft's 32-bit debugger, cdb.exe, which we may not ship and so is
+#      downloaded, and native,builtin for its four DLLs for cdb.exe alone.
+#      Bottle-wide, or for fifa.exe, those overrides would be wrong;
+#   5. HKLM\SOFTWARE\EA Sports\FIFA 12 "Install Dir", in both registry views,
+#      written with a trailing backslash into system.reg directly: through
+#      CrossOver's "wine reg add" a trailing backslash eats the closing quote;
+#   6. fifasetup.ini at the Mac's own display size. Without one the game asks
+#      for 800x600, the Mac cannot switch to it, and it dies with dialog E0001.
+#
+# Everything is written straight into the bottle's files, like the rest of
+# step 7, so CrossOver has to be quit, which setup.sh makes sure of.
+F12_CERTUTIL_64="$HERE/fixes/x86_64-windows/cx-certutil.exe"
+F12_CERTUTIL_32="$HERE/fixes/i386-windows/cx-certutil.exe"
+F12_DBG_DLLS=( dbgeng dbgmodel dbgcore dbghelp )
+F12_WINDBG_APPINSTALLER='https://windbg.download.prss.microsoft.com/dbazure/prod/1-0-0/windbg.appinstaller'
+F12_WINDBG_MSIX=windbg_win-x64.msix
+# The download is 1.2 GB and is unpacked beside itself.
+F12_MIN_FREE_KB=2097152
+F12_REG_SECTIONS=( '[Software\\Wow6432Node\\EA Sports\\FIFA 12]' '[Software\\EA Sports\\FIFA 12]' )
+
+f12_certutil_64() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/certutil.exe"; }
+f12_certutil_32() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/syswow64/certutil.exe"; }
+f12_cdb() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/Program Files (x86)/Windows Kits/10/Debuggers/x86/cdb.exe"; }
+
+f12_certutil_ok() {
+    cmp -s "$F12_CERTUTIL_64" "$(f12_certutil_64)" 2>/dev/null \
+        && cmp -s "$F12_CERTUTIL_32" "$(f12_certutil_32)" 2>/dev/null
+}
+
+# One certutil.exe over Wine's, whose stub is kept once as .wine-stub, as
+# install_refut_ipconfig keeps ipconfig.exe's. <stand-in> <file in the bottle>
+f12_put_certutil() {
+    local src="$1" f="$2" arch="${2:h:t}"
+    if cmp -s "$src" "$f" 2>/dev/null; then
+        ok "certutil.exe in $arch — already the stand-in"
+        return 0
+    fi
+    if [ ! -d "${f:h}" ]; then
+        note "the $BOTTLE bottle has no $arch folder to put certutil.exe in"
+        return 1
+    fi
+    if [ -f "$f" ] && [ ! -f "$f.wine-stub" ]; then
+        cp -X "$f" "$f.wine-stub" || {
+            note "could not keep the bottle's own certutil.exe in $arch, so it was left as it is"
+            say "        Quit CrossOver completely and run ./setup.sh --fifa12 again."
+            return 1
+        }
+    fi
+    cp -X "$src" "$f" || {
+        note "could not write the certutil stand-in into $arch in the $BOTTLE bottle"
+        say "        Quit CrossOver completely and run ./setup.sh --fifa12 again."
+        return 1
+    }
+    ok "certutil.exe in $arch is now the stand-in"
+    [ -f "$f.wine-stub" ] && say "        (Wine's own is kept beside it as certutil.exe.wine-stub)"
+    return 0
+}
+
+f12_install_certutil() {
+    local rc=0
+    f12_put_certutil "$F12_CERTUTIL_64" "$(f12_certutil_64)" || rc=1
+    f12_put_certutil "$F12_CERTUTIL_32" "$(f12_certutil_32)" || rc=1
+    return $rc
+}
+
+# native,builtin for each DLL, for cdb.exe and only cdb.exe. Checked under its
+# own AppDefaults key and nowhere else: a bottle-wide override is not this one.
+f12_cdb_overrides_set() {
+    local dll
+    for dll in $F12_DBG_DLLS; do
+        reg_line_is_set "$(bottle_user_reg)" "$(appdefaults_section cdb.exe)" "\"$dll\"=\"native,builtin\"" || return 1
+    done
+    return 0
+}
+f12_set_cdb_overrides() {
+    local dll
+    for dll in $F12_DBG_DLLS; do
+        set_reg_line "$(bottle_user_reg)" "$(appdefaults_section cdb.exe)" \
+            "\"$dll\"=\"native,builtin\"" "\"$dll\"" || return 1
+    done
+    return 0
+}
+
+# The folder that holds Game, as the bottle's Z: reaches it, trailing
+# backslash included, or through whichever drive letter does when the bottle
+# has no Z: on the Mac's root. Fails when no game folder is found.
+f12_install_dir_win() {
+    local d w z="$BOTTLE_DIR/$BOTTLE/dosdevices/z:"
+    d="$(game_dir_of fifa12 2>/dev/null)" || return 1
+    if [ -e "$z" ] && [ "${z:A}" = / ]; then
+        w="Z:${d//\//\\}"
+    else
+        w="$(unix_path_to_win "$d" 2>/dev/null)" || return 1
+    fi
+    print -r -- "$w\\"
+}
+# That path as the registry file spells it, every backslash doubled.
+f12_install_dir_line() {
+    local w
+    w="$(f12_install_dir_win)" || return 1
+    print -r -- "\"Install Dir\"=\"${w//\\/\\\\}\""
+}
+# Aurora 12's launch records the folder again, in the spelling it starts the
+# game with (C:\users\...), so any path ending in this game's folder is right.
+f12_registry_ok() {
+    local line sec win name v
+    line="$(f12_install_dir_line)" || return 1
+    win="$(f12_install_dir_win)" || return 1
+    win="${win%\\}"; name="${win##*\\}"
+    for sec in "${F12_REG_SECTIONS[@]}"; do
+        reg_line_is_set "$(bottle_system_reg)" "$sec" "$line" && continue
+        v="$(reg_value "$(bottle_system_reg)" "$sec" "Install Dir" 2>/dev/null || true)"
+        v="${v//\\\\/\\}"
+        [[ "${v:l}" == *'\'"${name:l}"'\' ]] || return 1
+    done
+    return 0
+}
+f12_set_registry() {
+    local line sec
+    line="$(f12_install_dir_line)" || return 1
+    for sec in "${F12_REG_SECTIONS[@]}"; do
+        set_reg_line "$(bottle_system_reg)" "$sec" "$line" '"Install Dir"' || return 1
+    done
+    return 0
+}
+
+# Where the game reads fifasetup.ini: the bottle's Documents, which is often a
+# link to the Mac's, and the Mac's own when the bottle has no such folder yet.
+f12_ini_path() {
+    local a docs
+    if a="$(bottle_appdata 2>/dev/null)"; then
+        docs="${a:h:h:h}/Documents"
+        if [ -d "$docs" ]; then
+            print -r -- "$docs/FIFA 12/fifasetup.ini"
+            return 0
+        fi
+    fi
+    print -r -- "$HOME/Documents/FIFA 12/fifasetup.ini"
+}
+
+# The main display's size in points, as WxH: AppKit's first screen is the one
+# with the menu bar. system_profiler says "UI Looks like" only on some Macs and
+# is the second try. Prints 1280x800 and returns 1 when neither answers.
+f12_main_display() {
+    local s
+    s="$(osascript -l JavaScript -e 'ObjC.import("AppKit"); var f = $.NSScreen.screens.objectAtIndex(0).frame; f.size.width + "x" + f.size.height' 2>/dev/null || true)"
+    if [[ "$s" != <->x<-> ]]; then
+        s="$(system_profiler SPDisplaysDataType 2>/dev/null | awk '
+            function emit() { if (main && ui != "") { print ui; done = 1; exit } }
+            /^        [^ ].*:[[:space:]]*$/ { emit(); main = 0; ui = ""; next }
+            /UI Looks like:/ { ui = $4 "x" $6 }
+            /Main Display: Yes/ { main = 1 }
+            END { if (!done) emit() }' || true)"
+    fi
+    if [[ "$s" == <->x<-> ]]; then
+        print -r -- "$s"
+        return 0
+    fi
+    print -r -- 1280x800
+    return 1
+}
+
+# fifasetup.ini, written once from the game's own default file with the three
+# display lines changed. An existing one is the player's and is left alone.
+f12_write_ini() {
+    local ini d src size w h ar tmp
+    ini="$(f12_ini_path)"
+    if [ -f "$ini" ]; then
+        ok "fifasetup.ini — already there, left as it is (in ${ini:h})"
+        return 0
+    fi
+    if ! d="$(game_dir_of fifa12 2>/dev/null)"; then
+        note "no FIFA 12 folder found, so fifasetup.ini was not written"
+        return 1
+    fi
+    src="$d/Game/fifasetup/fifasetup_default.ini"
+    if [ ! -f "$src" ]; then
+        note "no fifasetup_default.ini in $d/Game/fifasetup, so fifasetup.ini was not written"
+        return 1
+    fi
+    if ! size="$(f12_main_display)"; then
+        note "could not read this Mac's display size, so the game gets $size"
+    fi
+    w="${size%x*}"; h="${size#*x}"
+    ar="$(awk -v w="$w" -v h="$h" 'BEGIN { printf "%.5f", w / h }')"
+    mkdir -p "${ini:h}" || { note "could not make ${ini:h}"; return 1; }
+    tmp="$ini.new$$"
+    # Each line keeps its own ending: the default file is CRLF.
+    if ! awk -v w="$w" -v h="$h" -v ar="$ar" '
+            { cr = sub(/\r$/, "") ? "\r" : "" }
+            /^RESOLUTIONWIDTH[ =]/  { $0 = "RESOLUTIONWIDTH = " w }
+            /^RESOLUTIONHEIGHT[ =]/ { $0 = "RESOLUTIONHEIGHT = " h }
+            /^ASPECTRATIO[ =]/      { $0 = "ASPECTRATIO = " ar }
+            { printf "%s%s\n", $0, cr }' "$src" > "$tmp" \
+       || ! grep -q "^RESOLUTIONWIDTH = $w" "$tmp" \
+       || ! grep -q "^RESOLUTIONHEIGHT = $h" "$tmp" \
+       || ! grep -q "^ASPECTRATIO = $ar" "$tmp"; then
+        rm -f "$tmp"
+        note "$src is not the file expected, so fifasetup.ini was not written"
+        return 1
+    fi
+    mv -f "$tmp" "$ini" || { rm -f "$tmp"; note "could not write $ini"; return 1; }
+    ok "fifasetup.ini — ${w}x${h}, this Mac's display (in ${ini:h})"
+    say "        without it the game asks for 800x600 and dies with dialog E0001"
+    return 0
+}
+
+# Whether the folder holding $1 has the room the download needs. A df that
+# says nothing useful is no reason to stop; curl will say when it is full.
+f12_room_for_download() {
+    local kb
+    kb="$(df -k "$1" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+    [[ "$kb" == <-> ]] || return 0
+    if [ "$kb" -lt "$F12_MIN_FREE_KB" ]; then
+        note "not enough free disk for Microsoft's debugger: it needs 2 GB and"
+        say "        $1"
+        say "        has $((kb / 1024)) MB. Nothing was downloaded. Free some space and run"
+        say "        ./setup.sh --fifa12 again."
+        return 1
+    fi
+    return 0
+}
+
+# Gets the WinDbg package and unpacks its x86 folder into the staging folder
+# $2. Everything it fetches stays in the scratch folder $1.
+f12_unpack_windbg() {
+    local tmp="$1" stage="$2" bundle url rc=0
+    if [ -n "${WINDBG_BUNDLE:-}" ]; then
+        bundle="${WINDBG_BUNDLE:A}"
+        if [ ! -f "$bundle" ]; then
+            note "no file at $bundle (WINDBG_BUNDLE)"
+            say "        Unset WINDBG_BUNDLE to download it instead."
+            return 1
+        fi
+        say "        from $bundle — nothing downloaded"
+    else
+        f12_room_for_download "$tmp" || return 1
+        f12_room_for_download "${stage:h}" || return 1
+        say "        downloading Microsoft's WinDbg package from Microsoft, 1.2 GB, once."
+        say "        This takes a few minutes. It is unpacked, its 32-bit debugger is"
+        say "        kept in the bottle, and the rest is deleted."
+        if ! curl -fsSL --retry 2 -o "$tmp/windbg.appinstaller" "$F12_WINDBG_APPINSTALLER"; then
+            note "could not reach Microsoft's WinDbg page:"
+            say "        $F12_WINDBG_APPINSTALLER"
+            say "        Check the internet connection and run ./setup.sh --fifa12 again."
+            return 1
+        fi
+        url="$(LC_ALL=C grep -aoE 'https://[^"<> ]+\.msixbundle' "$tmp/windbg.appinstaller" | head -1 || true)"
+        if [ -z "$url" ]; then
+            note "Microsoft's WinDbg page does not name a package any more, so there is"
+            say "        nothing to download. Nothing was installed. The page is:"
+            say "        $F12_WINDBG_APPINSTALLER"
+            return 1
+        fi
+        bundle="$tmp/windbg.msixbundle"
+        if ! curl -fL --retry 2 -o "$bundle" "$url"; then
+            note "could not download the WinDbg package from"
+            say "        $url"
+            say "        Nothing was installed. Run ./setup.sh --fifa12 again, or fetch that"
+            say "        file elsewhere and run:"
+            say "          WINDBG_BUNDLE=/path/to/windbg.msixbundle ./setup.sh --fifa12"
+            return 1
+        fi
+    fi
+    say "        unpacking the 32-bit debugger out of it"
+    # unzip exits 1 for a warning; what counts is cdb.exe coming out at the end.
+    unzip -qo "$bundle" "$F12_WINDBG_MSIX" -d "$tmp" || rc=$?
+    if [ "$rc" -gt 1 ] || [ ! -f "$tmp/$F12_WINDBG_MSIX" ]; then
+        note "could not find $F12_WINDBG_MSIX in the WinDbg package, so nothing was installed"
+        return 1
+    fi
+    [ -n "${WINDBG_BUNDLE:-}" ] || rm -f "$bundle"
+    rc=0
+    unzip -qo "$tmp/$F12_WINDBG_MSIX" 'x86/*' -d "$stage" || rc=$?
+    if [ "$rc" -gt 1 ] || [ ! -f "$stage/x86/cdb.exe" ]; then
+        note "could not unpack the 32-bit debugger from the WinDbg package, so nothing was installed"
+        return 1
+    fi
+    # Loading these costs about 55 seconds of cdb.exe's start-up under Wine.
+    if [ -d "$stage/x86/Visualizers" ] && ! mv "$stage/x86/Visualizers" "$stage/x86/Visualizers.off"; then
+        note "could not turn the debugger's Visualizers folder off, so nothing was installed"
+        return 1
+    fi
+    return 0
+}
+
+# Microsoft's 32-bit debugger, into the bottle. cdb.exe appears only by the one
+# rename at the end, from a staging folder beside its place on the same disk, so
+# a failure or a stopped run leaves no half-installed cdb.exe. Never shipped in
+# this package: it is Microsoft's. Returns 1 when it is not in place.
+f12_install_cdb() {
+    local cdb dest parent stage tmp rc=0
+    cdb="$(f12_cdb)"; dest="${cdb:h}"; parent="${dest:h}"; stage="$parent/.x86-fifa12-partial"
+    if [ -f "$cdb" ]; then
+        ok "cdb.exe — already in the $BOTTLE bottle"
+        return 0
+    fi
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE/drive_c" ]; then
+        note "the $BOTTLE bottle has no drive_c yet, so there is nowhere to put it"
+        return 1
+    fi
+    mkdir -p "$parent" || { note "could not make $parent"; return 1; }
+    rm -rf "$stage"
+    tmp="$(mktemp -d -t fifa12windbg)" || { note "could not make a scratch folder"; return 1; }
+    f12_unpack_windbg "$tmp" "$stage" || rc=1
+    rm -rf "$tmp"
+    if [ "$rc" = 0 ] && [ -e "$dest" ]; then
+        # Something else is there without a cdb.exe in it. Kept once.
+        if [ ! -e "$dest.before-fifa12" ] && mv "$dest" "$dest.before-fifa12"; then
+            note "kept the folder that was there as ${dest:t}.before-fifa12"
+        else
+            note "$dest is in the way; move it aside and run ./setup.sh --fifa12 again"
+            rc=1
+        fi
+    fi
+    if [ "$rc" = 0 ] && ! mv "$stage/x86" "$dest"; then
+        note "could not put the debugger at $dest"
+        rc=1
+    fi
+    rm -rf "$stage"
+    if [ "$rc" = 0 ]; then
+        ok "cdb.exe, Microsoft's 32-bit debugger, is in the $BOTTLE bottle"
+        say "        (its Visualizers folder is switched off: loading it costs about 55 s)"
+    fi
+    return $rc
+}
+
+# Steps 9 to 9d of configure_bottle, all of what FIFA 12 needs beyond the
+# stand-in. Each is skipped when already right, and one failing leaves the
+# others done; the download is last, as it is the only one that can take long.
+# Sets F12_OK=1 only when everything is in place.
+f12_install() {
+    F12_OK=1
+    say ""
+    say "9. Installing the certutil stand-in Aurora 12's setup needs"
+    f12_install_certutil || F12_OK=0
+    say ""
+    say "9a. Letting Microsoft's debugger load its own DLLs"
+    if [ ! -f "$(bottle_user_reg)" ]; then
+        note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once, then run this again"
+        F12_OK=0
+    elif f12_cdb_overrides_set; then
+        ok "${(j: + :)F12_DBG_DLLS} = native,builtin for cdb.exe — already set"
+    elif f12_set_cdb_overrides; then
+        ok "${(j: + :)F12_DBG_DLLS} = native,builtin for cdb.exe (kept the old user.reg as user.reg.bak-aurora17)"
+    else
+        note "could not set cdb.exe's overrides in $(bottle_user_reg)"
+        say "        Quit CrossOver completely and run ./setup.sh --fifa12 again."
+        F12_OK=0
+    fi
+    say ""
+    say "9b. Telling the game where it is (EA Sports\\FIFA 12, Install Dir)"
+    if ! f12_install_dir_win >/dev/null; then
+        note "no FIFA 12 folder found, so the registry value was not written. If it is elsewhere:"
+        say "        FIFA12_DIR='/path/to/FIFA 12' ./setup.sh --fifa12"
+        F12_OK=0
+    elif f12_registry_ok; then
+        ok "Install Dir — already $(f12_install_dir_win)"
+    elif f12_set_registry; then
+        ok "Install Dir = $(f12_install_dir_win) (kept the old system.reg as system.reg.bak-aurora17)"
+    else
+        note "could not write Install Dir in $(bottle_system_reg)"
+        say "        Quit CrossOver completely and run ./setup.sh --fifa12 again."
+        F12_OK=0
+    fi
+    # Aurora offers Play only with this marker, and only writes it after its
+    # Install step works. Install has no app-link fallback, so on a Mac it can
+    # never finish; Repair and Play do not need it.
+    local f12_ac
+    if f12_ac="$(aurora_launcher_dir 2>/dev/null)"; then
+        mkdir -p "$f12_ac/fifa12" && : > "$f12_ac/fifa12/enabled" \
+            && ok "Aurora 12 is switched on in the Aurora launcher" \
+            || { note "could not write $f12_ac/fifa12/enabled"; F12_OK=0; }
+    else
+        note "the Aurora launcher is not in the $BOTTLE bottle yet. Run Aurora.exe once there,"
+        say "        then run ./setup.sh --fifa12 again so Aurora offers Play for FIFA 12."
+    fi
+    say ""
+    say "9c. The game's display settings"
+    f12_write_ini || F12_OK=0
+    say ""
+    say "9d. Microsoft's 32-bit debugger"
+    f12_install_cdb || F12_OK=0
+    return 0
+}
+
+# The first thing FIFA 12 lacks in this bottle, for the games table.
+f12_first_missing() {
+    if ! gt_powershell_ok; then print -r -- "PowerShell stand-in"
+    elif ! f12_certutil_ok; then print -r -- "certutil stand-in"
+    elif [ "$(conf_value CX_LOWPORT)" != 1 ]; then print -r -- "CX_LOWPORT=1"
+    elif [ ! -f "$(f12_cdb)" ]; then print -r -- "32-bit debugger"
+    elif ! f12_cdb_overrides_set; then print -r -- "cdb.exe overrides"
+    elif ! f12_registry_ok; then print -r -- "Install Dir"
+    elif [ ! -f "$(f12_ini_path)" ]; then print -r -- "fifasetup.ini"
+    fi
+    return 0
+}
+
+# --fifa12 --verify. Changes nothing. CX_LOWPORT is the settings check's.
+f12_verify() {
+    F12_PROBLEMS=0
+    if gt_powershell_ok; then
+        ok "PowerShell stand-in in the bottle"
+    else
+        bad "the $BOTTLE bottle has no PowerShell stand-in, so Aurora 12's helper"
+        say "        gets nothing back from its secure-link steps. Quit CrossOver fully,"
+        say "        then re-run ./setup.sh --fifa12"
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    fi
+    if f12_certutil_ok; then
+        ok "certutil stand-in in system32 and syswow64"
+    else
+        bad "the $BOTTLE bottle's certutil.exe is not the shipped stand-in, so Aurora 12's"
+        say "        setup reports NOT READY. Quit CrossOver fully, then re-run ./setup.sh --fifa12"
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    fi
+    if [ -f "$(f12_cdb)" ]; then
+        ok "Microsoft's 32-bit debugger (cdb.exe) in the bottle"
+        if [ -d "${$(f12_cdb):h}/Visualizers" ]; then
+            note "the debugger's Visualizers folder is switched on, which costs about 55 s"
+            say "        of its start-up. Rename it to Visualizers.off."
+        fi
+    else
+        bad "Microsoft's 32-bit debugger is not in the $BOTTLE bottle. ./setup.sh --fifa12"
+        say "        downloads it (1.2 GB, once)."
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    fi
+    if f12_cdb_overrides_set; then
+        ok "${(j: + :)F12_DBG_DLLS} = native,builtin for cdb.exe"
+    else
+        bad "cdb.exe does not prefer Microsoft's own DLLs in the $BOTTLE bottle."
+        say "        Quit CrossOver fully, then re-run ./setup.sh --fifa12"
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    fi
+    if ! f12_install_dir_win >/dev/null; then
+        bad "no FIFA 12 folder found, so its Install Dir cannot be checked."
+        say "        If it is elsewhere:  FIFA12_DIR='/path/to/FIFA 12' ./setup.sh --fifa12"
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    elif f12_registry_ok; then
+        ok "Install Dir = $(f12_install_dir_win), in both registry views"
+    else
+        bad "the $BOTTLE bottle's EA Sports\\FIFA 12 Install Dir is not $(f12_install_dir_win)"
+        say "        Quit CrossOver fully, then re-run ./setup.sh --fifa12"
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    fi
+    if [ -f "$(f12_ini_path)" ]; then
+        ok "fifasetup.ini in ${$(f12_ini_path):h}"
+    else
+        bad "no fifasetup.ini at $(f12_ini_path), so the game asks for"
+        say "        800x600 and dies with dialog E0001. Run ./setup.sh --fifa12"
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    fi
+    f12_check_game
+    return 0
+}
+
+# What FIFA 12 needs that is not the bottle's to give: the Aurora launcher and
+# a game folder. Notes, never a stop; the folder's absence is f12_install's.
+f12_check_game() {
+    local d l
+    if aurora_launcher_dir >/dev/null 2>&1; then
+        ok "the Aurora launcher is in the $BOTTLE bottle"
+        if [ -f "$(aurora_launcher_dir)/fifa12/enabled" ]; then
+            ok "Aurora 12 is switched on in the Aurora launcher"
+        else
+            note "Aurora 12 is not switched on, so Aurora will not offer Play. ./setup.sh --fifa12"
+        fi
+    else
+        note "the Aurora launcher (Aurora.exe) is not in the $BOTTLE bottle yet, and FIFA 12"
+        say "        plays only from it. Run Aurora.exe once in this bottle (CrossOver's"
+        say "        Run Command), then install Aurora 12 from it."
+    fi
+    if d="$(game_dir_choice_lost fifa12 2>/dev/null)"; then
+        note "your choice $d is not reachable (drive not connected?)"
+    fi
+    if l="$(game_dir_line fifa12 2>/dev/null)"; then
+        ok "FIFA 12 is in ${l#*$'\t'}  ($(game_dir_source_says "$l"))"
+    else
+        note "no FIFA 12 folder found (looked at ~/Downloads, ~/Desktop, ~/Games,"
+        say "        ~/Documents, ~, /Applications and each drive in /Volumes). If it is elsewhere:"
+        say "            FIFA12_DIR='/path/to/FIFA 12' ./setup.sh --fifa12"
     fi
     return 0
 }
@@ -7014,8 +7597,13 @@ add_setting() {
         # stopping would make a second game impossible to add.
         if (( ${SOFT_SETTINGS[(Ie)$1]} )); then
             note "$1 is $(sed -n "s/^\"$1\" = \"\(.*\)\"$/\1/p" "$CONF" | head -1) in this bottle, from a game set up in it before;"
-            say "        left as it is. $GAME_LABEL gets its own value from the copy's"
-            say "        per-game table, which ignores this one."
+            if [ "${GAME:-}" = fifa12 ]; then
+                say "        left as it is. fifa.exe is not in the per-game table, so FIFA 12"
+                say "        runs with this value; it has only been tried under 2."
+            else
+                say "        left as it is. $GAME_LABEL gets its own value from the copy's"
+                say "        per-game table, which ignores this one."
+            fi
             return 0
         fi
         die $E_INCOMPLETE "$1 is set to something else in
@@ -7371,6 +7959,25 @@ configure_bottle() {
         say "9d. Letting the Aurora launcher start FIFA 21"
         DNSCACHE_OK=0
         install_dnscache_standin && DNSCACHE_OK=1
+        return 0
+    fi
+    if [ "$GAME" = fifa12 ]; then
+        # Aurora 12, in Aurora's common bottle: see "FIFA 12, from Aurora 12".
+        # Step 9's names are Aurora17's, and 9a to 9c are FIFA 17's. In a
+        # bottle CAS is in, Aurora17's stand-in goes beside CAS's, which
+        # keeps the name and hands -EncodedCommand on to it.
+        say ""
+        say "8. Installing the PowerShell stand-in Aurora 12's helper needs"
+        PS_OK=0; PS_AURORA_DIR=""; PS_BOTTLE_ACTION=""
+        if gt_powershell_ok; then
+            ok "PowerShell stand-in — already in the $BOTTLE bottle"
+            PS_OK=1
+        else
+            install_bottle_powershell
+            [ "$PS_OK" = 1 ] || note "no bottle called '$BOTTLE' yet, so there is nowhere to put it"
+        fi
+        HOSTS_OK=1; LICENCE_OK=1
+        f12_install
         return 0
     fi
 
@@ -8364,6 +8971,16 @@ if [ "$MODE" = bottle ]; then
         add_game_ntdll "$TARGET"
         f20_add_lowport "$TARGET"
         [ -d "$BOTTLE_DIR/$BOTTLE" ] || make_bottle "$TARGET"
+    elif [ "$F12_ONE" = 1 ]; then
+        # cxlowport.dylib for Aurora 12's forwarder. The bottle is Aurora's.
+        f20_add_lowport "$TARGET"
+    fi
+    if [ ! -d "$BOTTLE_DIR/$BOTTLE" ] && [ "$GAME" = fifa12 ]; then
+        die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
+         $BOTTLE_DIR
+         FIFA 12 plays from the Aurora launcher: make the bottle in CrossOver,
+         run Aurora.exe in it once, quit CrossOver, then run this again. For
+         another name:   AURORA_BOTTLE='name' ./setup.sh --fifa12"
     fi
     if [ ! -d "$BOTTLE_DIR/$BOTTLE" ] && [ "$GAME" = fifa21 ]; then
         die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' at
@@ -8384,6 +9001,7 @@ if [ "$MODE" = bottle ]; then
     [ "$GAME" = fifa16 ] && f16_check_game map
     [ "$GAME" = fifa21 ] && f21_check_game
     [ "$GAME" = fifa20 ] && f20_check_game
+    [ "$GAME" = fifa12 ] && f12_check_game
     end_own_wine_session
     say ""
     if setup_steps_ok; then
@@ -8409,6 +9027,10 @@ if [ "$MODE" = bottle ]; then
         elif [ "$GAME" = fifa21 ]; then
             green "Done. Open ${TARGET:t:r}, then the Aurora launcher in the $BOTTLE bottle,"
             say "      and play FIFA 21 from it."
+        elif [ "$GAME" = fifa12 ]; then
+            green "Done. Open ${TARGET:t:r}, then the Aurora launcher in the $BOTTLE bottle,"
+            say "      and play FIFA 12 from Aurora 12: Repair first, then Play. Repair"
+            say "      replaces Game/patch.big with Aurora's data."
         elif [ "$GAME" = fifa20 ]; then
             green "Done. Open ${TARGET:t:r}, then REFUT in the $BOTTLE bottle, and play"
             say "      FIFA 20 from it (not installed yet? the lines above say how)."
@@ -8424,6 +9046,8 @@ if [ "$MODE" = bottle ]; then
             say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa16 --verify"
         elif [ "$GAME" = fifa21 ]; then
             say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa21 --verify"
+        elif [ "$GAME" = fifa12 ]; then
+            say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }./setup.sh --fifa12 --verify"
         elif [ "$GAME" = fifa20 ]; then
             say "To check:  ${AURORA_BOTTLE:+AURORA_BOTTLE='$BOTTLE' }${FIFA20_BOTTLE:+FIFA20_BOTTLE='$BOTTLE' }./setup.sh --fifa20 --verify"
         else
@@ -8734,7 +9358,7 @@ if [ "$MODE" = verify ]; then
     if [ "$GAME_EXPLICIT" = 0 ]; then
         verify_games_table "$TARGET"
         say ""
-        say "FIFA 17 in detail (--fifa15, --fifa16, --fifa21 and --fifa20 with --verify do the others)"
+        say "FIFA 17 in detail (--fifa15, --fifa16, --fifa21, --fifa20 and --fifa12 with --verify do the others)"
     fi
     verify_install "$TARGET" || exit $E_INCOMPLETE
     exit 0
@@ -8858,7 +9482,8 @@ $APP_MGMT_HINT"
 # goes in its own too, and is known by REFUT rather than by a folder: its
 # download in ~/Downloads, or REFUT installed in any bottle (refut_present).
 # Without REFUT it is skipped without a word, since nobody without it is
-# missing anything. One game failing never stops the others.
+# missing anything. FIFA 12 goes in the common bottle, as FIFA 21 does. One
+# game failing never stops the others.
 typeset -A GAME_RESULT
 GAMES_DONE=0
 GAMES_FAILED=0
@@ -8900,7 +9525,7 @@ add_game_to_its_bottle() {
                 return 0
             fi
             shown="$b" ;;
-        fifa21) b="$AURORA_BOTTLE_GIVEN"; shown="${b:-${FIFA17_BOTTLE:-Aurora17}}" ;;
+        fifa21|fifa12) b="$AURORA_BOTTLE_GIVEN"; shown="${b:-${FIFA17_BOTTLE:-Aurora17}}" ;;
         fifa16) b=""; shown="${FIFA16_BOTTLE:-FIFA16}" ;;
         fifa20) b=""; shown="${FIFA20_BOTTLE:-REFUT}" ;;
     esac
@@ -8929,12 +9554,12 @@ add_game_to_its_bottle() {
 }
 add_other_games() {
     local g
-    for g in fifa15 fifa21 fifa16 fifa20; do add_game_to_its_bottle "$g"; done
+    for g in fifa15 fifa21 fifa16 fifa20 fifa12; do add_game_to_its_bottle "$g"; done
 }
 games_summary() {
     local g
     say "Games:"
-    for g in fifa17 fifa15 fifa21 fifa16 fifa20; do
+    for g in fifa17 fifa15 fifa21 fifa16 fifa20 fifa12; do
         [ -n "${GAME_RESULT[$g]:-}" ] && say "  FIFA ${g#fifa}   ${GAME_RESULT[$g]}"
     done
     if [ "$GAMES_MISSING" -gt 0 ] || [ "${GAME_RESULT[fifa17]:-}" = "skipped: no game folder found" ]; then
@@ -9410,6 +10035,13 @@ elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && [ "$GAME" = fifa21 ]; then
          once, quit CrossOver completely (Command-Q), then run this again.
          Already using another name?   AURORA_BOTTLE='name' ./setup.sh --fifa21
          Nothing has been changed."
+elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ] && [ "$GAME" = fifa12 ]; then
+    die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
+         FIFA 12 plays from the Aurora launcher: make the bottle in CrossOver
+         (+ > Windows 10 64-bit, named exactly $BOTTLE), run Aurora.exe in it
+         once, quit CrossOver completely (Command-Q), then run this again.
+         Already using another name?   AURORA_BOTTLE='name' ./setup.sh --fifa12
+         Nothing has been changed."
 elif [ ! -f "$BOTTLE_DIR/$BOTTLE/cxbottle.conf" ]; then
     die $E_UNSUPPORTED "There is no bottle called '$BOTTLE' yet.
          Make it first, in CrossOver, along with the Aurora17 launcher:
@@ -9540,7 +10172,7 @@ fi
 # The same trick for wineserver, so REFUT's bridge (FIFA 20) can listen on
 # 127.0.0.1:443: cxlowport.dylib into lib64, and wineserver's libSystem load
 # command pointed at it. Every install gets it, and it acts only in a bottle
-# with CX_LOWPORT=1 (REFUT's); see "loopback ports below 1024".
+# with CX_LOWPORT=1 (REFUT's and FIFA 12's); see "loopback ports below 1024".
 install_lowport "$WINE" "$APP"
 
 # ------------------------------------------------- 5. the search path fix
@@ -9593,6 +10225,7 @@ fi
 [ "$GAME" = fifa16 ] && f16_check_game map
 [ "$GAME" = fifa21 ] && f21_check_game
 [ "$GAME" = fifa20 ] && f20_check_game
+[ "$GAME" = fifa12 ] && f12_check_game
 end_own_wine_session
 # The copy is finished, so the lock goes before each game's run takes its own.
 if [ "$GAME" = fifa17 ]; then
@@ -9690,6 +10323,10 @@ if setup_steps_ok; then
         say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
         say "          $BOTTLE bottle, run the Aurora launcher and play FIFA 21 from it"
         say "          (SETUP.md, 9d)."
+    elif [ "$GAME" = fifa12 ]; then
+        say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
+        say "          $BOTTLE bottle, run the Aurora launcher and play FIFA 12 from Aurora 12:"
+        say "          Repair first, then Play (SETUP.md, \"FIFA 12\")."
     elif [ "$GAME" = fifa20 ]; then
         say "To play:  open ${TARGET:t:r}  (not your normal CrossOver), pick the"
         say "          $BOTTLE bottle, open REFUT and play FIFA 20 from it (SETUP.md,"
@@ -9754,6 +10391,10 @@ fi
 if [ "$GAME" = fifa21 ] && [ "${DNSCACHE_OK:-0}" != 1 ]; then
     say "  * the DNS Client stand-in is not in the bottle, so the Aurora launcher"
     say "    will stop before FIFA 21 starts"
+fi
+if [ "$GAME" = fifa12 ] && [ "${F12_OK:-0}" != 1 ]; then
+    say "  * part of FIFA 12's setup is not in place; the lines above say which,"
+    say "    and ./setup.sh --fifa12 --verify lists what is left"
 fi
 if [ "$GAME" = fifa20 ] && [ "${IPCONFIG_OK:-0}" != 1 ]; then
     say "  * the ipconfig stand-in or its override is not in the bottle, so REFUT"

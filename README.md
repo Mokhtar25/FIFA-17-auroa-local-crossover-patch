@@ -84,11 +84,12 @@ Pick one:
 | Both games, in the bottle your Aurora launcher is in | **Both games.command** |
 | FIFA 15 only (makes the copy first if it is not there) | **FIFA 15.command** |
 | FIFA 16 (makes the copy first if it is not there) | **FIFA 16.command** |
+| FIFA 12 from Aurora 12 (needs the Aurora launcher in its bottle first) | **FIFA 12.command** |
 
 START HERE sets up every game it finds (Aurora's record, a saved choice,
 Downloads, your drives), each in the bottle it is played from: FIFA 15 where
-your Aurora launcher is, FIFA 21 with FIFA 17, FIFA 16 in its own, and FIFA 20
-in its own when REFUT is here (`REFUT Launcher.exe` in Downloads, or REFUT
+your Aurora launcher is, FIFA 21 and FIFA 12 with FIFA 17, FIFA 16 in its own,
+and FIFA 20 in its own when REFUT is here (`REFUT Launcher.exe` in Downloads, or REFUT
 installed in a bottle). No FIFA 17?
 Choose **Skip FIFA 17** when it asks, and the other games are still set up.
 One game failing never stops the others; the games list at the end says
@@ -144,6 +145,13 @@ verify this device." and sign-in never starts), and a small app in
 `~/Applications`, **CAS Link (CrossOver)**, that brings the browser's
 `cas://` sign-in link back to the bottle. `CAS_SUPPORT=skip` leaves both out.
 SETUP.md, "9c. The CAS launcher", says what each one does and what it sends.
+
+**FIFA 12** plays online from Aurora 12, in Aurora's bottle. Wine has no VPN
+stack, so Aurora 12's helper takes its own app link over TLS. `./setup.sh
+--fifa12` fits the bottle out for it, downloading Microsoft's 32-bit debugger
+from Microsoft (1.2 GB, once; we do not ship it). In Aurora, the first run is
+Repair, then Play; Repair replaces `Game/patch.big` with Aurora's data.
+Performance has not been tuned yet. SETUP.md, "FIFA 12", has the details.
 
 Custom bottle name: `FIFA17_BOTTLE="My FIFA 17" ./setup-both.sh` puts both
 games in that bottle. `FIFA15_BOTTLE="My FIFA 15"` puts FIFA 15 in a bottle of
@@ -284,6 +292,7 @@ game folder, which Uninstall never touches.
 | `Both games.command` | install FIFA 17, then set FIFA 15 up |
 | `FIFA 15.command` | set FIFA 15 up on its own (experimental) |
 | `FIFA 16.command` | set FIFA 16 up on its own (experimental) |
+| `FIFA 12.command` | set FIFA 12 up for Aurora 12 (experimental) |
 | `PLAY FIFA 17 offline.command` | play offline without opening CrossOver |
 | `Stop.command` | quit game, Aurora and CrossOver cleanly |
 | `Diagnostics.command` | collect the logs for a bug report |

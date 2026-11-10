@@ -191,8 +191,8 @@ The Terminal equivalents are:
 ./setup.sh --forget-folder fifa15
 ```
 
-Use `fifa16`, `fifa17` or `fifa21` for another game (`fifa13` is also accepted
-by the folder commands). Leave the path out of `--choose-folder` to open the
+Use `fifa16`, `fifa17`, `fifa21` or `fifa12` for another game (`fifa13` is also
+accepted by the folder commands; FIFA 12's folder is the one holding `Game`). Leave the path out of `--choose-folder` to open the
 native picker. Plain Terminal setup and SSH do not open automatic dialogs;
 `CX_DIALOGS=1` enables them for an explicitly selected game, and
 `CX_NO_DIALOGS=1` disables them. A cancelled automatic picker returns exit 130;
@@ -1485,6 +1485,39 @@ a reason for that game's installer to fail.
 
 To undo it, with the bottle running: `sc delete Dnscache` from CrossOver's
 **Run Command** in the Aurora17 bottle.
+
+### 9f. FIFA 12 (Aurora 12)
+
+FIFA 12 plays online through Aurora 12, from the Aurora launcher, in Aurora's
+existing bottle. With the launcher installed in it and CrossOver quit:
+
+```sh
+./setup.sh --fifa12
+./setup.sh --fifa12 --verify
+```
+
+The default bottle is `Aurora17`; `AURORA_BOTTLE='name'` before both commands
+chooses another. The game folder is the one holding `Game`, found like the
+other games' (`FIFA12_DIR='/path/to/FIFA 12'`, **Choose game folders**,
+`~/Downloads/FIFA 12`). Setup puts in, each only when it is not already right:
+
+- the PowerShell stand-in, which answers the helper's `-EncodedCommand` steps.
+  Wine has no VPN stack, so the helper's dial fails and its own app-link
+  fallback carries the game over TLS;
+- `certutil.exe` stand-ins in `system32` and `syswow64` (Wine's is a stub, and
+  Aurora 12's setup needs the certificate in the Root store). Wine's are kept
+  as `certutil.exe.wine-stub`;
+- `CX_LOWPORT=1`, because the forwarder binds `127.0.0.1:80` and `443`;
+- Microsoft's 32-bit debugger, `cdb.exe`, with its four DLLs set to
+  `native,builtin` for `cdb.exe` only. It is downloaded from Microsoft, about
+  1.2 GB, once, and needs 2 GB free; it is not in this package.
+  `WINDBG_BUNDLE=/path/to/windbg.msixbundle` uses a copy already on this Mac;
+- `Install Dir` under `HKLM\SOFTWARE\EA Sports\FIFA 12`, in both registry views;
+- `~/Documents/FIFA 12/fifasetup.ini`, if there is none, at this Mac's display
+  size. Without it the game asks for 800x600 and dies with dialog E0001.
+
+In Aurora, the first run is **Repair**, then **Play**. Repair replaces
+`Game/patch.big` with Aurora's data. Performance has not been tuned yet.
 
 ### 10. Offline menu entry (offline install only)
 

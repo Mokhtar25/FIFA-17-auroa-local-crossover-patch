@@ -1401,7 +1401,7 @@ class SharedBottleTests(unittest.TestCase):
         self.assertIn("  game ", out)
         self.assertNotIn("| ", out)
         rows, launchers = self.tables(out)
-        self.assertEqual(sorted(rows), ["FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
+        self.assertEqual(sorted(rows), ["FIFA 12", "FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
         # game | folder | settings | DLL overrides | offline
         self.assertEqual(rows["FIFA 21"][1:4], ["found (Aurora.exe)", "table", "ucrtbase"])
         self.assertEqual(rows["FIFA 16"][1:4],
@@ -1415,9 +1415,9 @@ class SharedBottleTests(unittest.TestCase):
         self.assertEqual(rows["FIFA 16"][4], "ready")
         # Which launcher starts which game: only those rows are there.
         self.assertEqual(sorted(g for l, g in launchers if l == "Aurora.exe"),
-                         ["FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
+                         ["FIFA 12", "FIFA 13", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"])
         self.assertEqual(sorted(l for l, _ in launchers), sorted(
-            ["Aurora.exe"] * 5 + ["Impulsum17", "CAS", "RebornFUT"]))
+            ["Aurora.exe"] * 6 + ["Impulsum17", "CAS", "RebornFUT"]))
         self.assertNotIn("unsupported", out.split("FIFA 17 in detail")[0])
         # Present but not ready, each saying what it lacks first.
         self.assertEqual(launchers[("Aurora.exe", "FIFA 15")], "missing game folder")
@@ -1991,6 +1991,320 @@ class SharedBottleTests(unittest.TestCase):
                                    AURORA_TARGET=str(old))
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("needs its own bottle", result.stdout)
+
+    # ------------------------------------------------- FIFA 12 (--fifa12)
+
+    CERT_STUB = b"MZ Wine's own certutil stub"
+    F12_DEFAULT_INI = (b"RESOLUTIONWIDTH = 800\r\nRESOLUTIONHEIGHT = 600\r\n"
+                       b"ASPECTRATIO = 1.33333\r\nRENDERINGQUALITY = 1\r\n")
+
+    def fifa12_bottle(self, name, *settings):
+        """A bottle with the Aurora launcher, Wine's stubs, and FIFA 12 in
+        ~/Downloads, its exe inside Game/."""
+        conf, psdir = self.fifa21_bottle(name, *settings)
+        root = self.bottles / name
+        (root / "dosdevices/z:").symlink_to("/", target_is_directory=True)
+        for sys_dir in ("system32", "syswow64"):
+            (root / "drive_c/windows" / sys_dir).mkdir(parents=True, exist_ok=True)
+            (root / "drive_c/windows" / sys_dir / "certutil.exe").write_bytes(self.CERT_STUB)
+        game = self.work / "Downloads/FIFA 12"
+        (game / "Game/fifasetup").mkdir(parents=True, exist_ok=True)
+        (game / "Game/fifa.exe").write_bytes(b"MZ")
+        (game / "Game/fifasetup/fifasetup_default.ini").write_bytes(self.F12_DEFAULT_INI)
+        return conf, psdir, root, game
+
+    def tool(self, name, script):
+        """A stand-in for a command on PATH; returns the PATH to use."""
+        bin_dir = self.work / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        tool = bin_dir / name
+        tool.write_text("#!/bin/sh\n" + script)
+        tool.chmod(0o755)
+        return str(bin_dir) + ":" + self.env["PATH"]
+
+    def windbg_bundle(self, path=None):
+        """A .msixbundle the way Microsoft's is laid out, in miniature."""
+        path = path or self.work / "windbg.msixbundle"
+        msix = self.work / "windbg_win-x64.msix"
+        with zipfile.ZipFile(msix, "w") as z:
+            z.writestr("x86/cdb.exe", b"MZ cdb")
+            z.writestr("x86/dbgeng.dll", b"MZ dbgeng")
+            z.writestr("x86/Visualizers/stl.natvis", b"<x/>")
+            z.writestr("amd64/cdb.exe", b"MZ the other one")
+        with zipfile.ZipFile(path, "w") as z:
+            z.write(msix, "windbg_win-x64.msix")
+            z.writestr("windbg_win-arm64.msix", b"not this one")
+        msix.unlink()
+        return path
+
+    def set_up_fifa12(self, app, **env):
+        """--fifa12 on an existing copy, up to and including configure_bottle,
+        as set_up_fifa21 does it. The display is the test's own."""
+        source = (ROOT / "setup.sh").read_text().split(
+            "# ------------------------------------------------- the launch that is watched", 1)[0]
+        for path in ("aurora17/powershell.exe", "fixes/x86_64-windows/cas-powershell.exe",
+                     "fixes/x86_64-unix/cx-fifa17-gate", "fixes/x86_64-windows/cx-certutil.exe",
+                     "fixes/i386-windows/cx-certutil.exe"):
+            (self.work / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / path, self.work / path)
+        script = self.work / "setup12.sh"
+        script.write_text(source + '\nconfigure_bottle "$TARGET"\nf12_check_game\n'
+                          'print -r -- "MODE=$MODE OK=$BOTTLE_OK$PS_OK$HOSTS_OK$F12_OK"\n'
+                          'if setup_steps_ok; then print -r -- "VERDICT=done"; '
+                          'else print -r -- "VERDICT=incomplete"; fi\n')
+        path = self.tool("osascript", "echo 1728x1117\n")
+        return subprocess.run(["/bin/zsh", str(script), "--fifa12"],
+                              env={**self.env, "AURORA_TARGET": str(app), "PATH": path,
+                                   "TMPDIR": str(self.work), **env},
+                              capture_output=True, text=True, timeout=60)
+
+    def verify_fifa12(self, app, **env):
+        return subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--fifa12", "--verify"],
+                              env={**self.env, "AURORA_TARGET": str(app), **env},
+                              capture_output=True, text=True, timeout=120)
+
+    def test_fifa12_setup_then_verify(self):
+        app = self.copy(marker=True)
+        self.shipped(True)
+        conf, psdir, root, game = self.fifa12_bottle(
+            "Aurora17", ("CX_GRAPHICS_BACKEND", "d3dmetal"), ("CX_DR_TRAP", "2"),
+            ("WINE_SIMULATE_WRITECOPY", "1"))
+        result = self.set_up_fifa12(app, WINDBG_BUNDLE=str(self.windbg_bundle()))
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn("MODE=bottle OK=1111", out)
+        self.assertIn("VERDICT=done", out)
+        self.assertIn('"CX_LOWPORT" = "1"', conf.read_text())
+        # The stand-in, with Wine's stub kept once.
+        self.assertEqual((psdir / "powershell.exe").read_bytes(),
+                         (ROOT / "aurora17/powershell.exe").read_bytes())
+        self.assertEqual((psdir / "powershell.exe.wine-stub-orig").read_bytes(), self.STUB)
+        # certutil in both places, each architecture its own.
+        for sys_dir, arch in (("system32", "x86_64"), ("syswow64", "i386")):
+            f = root / "drive_c/windows" / sys_dir / "certutil.exe"
+            self.assertEqual(f.read_bytes(),
+                             (ROOT / f"fixes/{arch}-windows/cx-certutil.exe").read_bytes())
+            self.assertEqual(f.with_name("certutil.exe.wine-stub").read_bytes(), self.CERT_STUB)
+        # The debugger: only x86/, Visualizers off, nothing left behind.
+        dbg = root / "drive_c/Program Files (x86)/Windows Kits/10/Debuggers"
+        self.assertTrue((dbg / "x86/cdb.exe").is_file())
+        self.assertTrue((dbg / "x86/Visualizers.off/stl.natvis").is_file())
+        self.assertFalse((dbg / "x86/Visualizers").exists())
+        self.assertFalse((dbg / "amd64").exists())
+        self.assertEqual([p.name for p in dbg.iterdir()], ["x86"])
+        self.assertEqual(list(self.work.glob("fifa12windbg*")), [])
+        # Overrides for cdb.exe, and only for cdb.exe.
+        reg = root / "user.reg"
+        self.assertEqual(self.section_lines(reg, r'[Software\\Wine\\AppDefaults\\cdb.exe\\DllOverrides]'),
+                         sorted(f'"{d}"="native,builtin"' for d in
+                                ("dbgeng", "dbgmodel", "dbgcore", "dbghelp")))
+        for name in ("dbgeng", "dbghelp"):
+            self.assertNotIn(f'"{name}"', "".join(self.section_lines(reg, r'[Software\\Wine\\DllOverrides]')))
+        # The registry value, the trailing backslash doubled, in both views.
+        want = ['"Install Dir"="Z:' + str(game.resolve()).replace("/", "\\\\") + '\\\\"']
+        for sec in (r'[Software\\Wow6432Node\\EA Sports\\FIFA 12]', r'[Software\\EA Sports\\FIFA 12]'):
+            self.assertEqual(self.section_lines(root / "system.reg", sec), want)
+        # fifasetup.ini: the display's size, CRLF kept.
+        ini = self.work / "Documents/FIFA 12/fifasetup.ini"
+        self.assertEqual(ini.read_bytes(), b"RESOLUTIONWIDTH = 1728\r\nRESOLUTIONHEIGHT = 1117\r\n"
+                                           b"ASPECTRATIO = 1.54700\r\nRENDERINGQUALITY = 1\r\n")
+
+        # Idempotent: nothing downloaded or unpacked, not one byte changed.
+        before = self.snapshot("Aurora17")
+        ini_before = ini.read_bytes()
+        self.tool("curl", "exit 9\n")
+        again = self.set_up_fifa12(app)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("VERDICT=done", again.stdout)
+        for line in ("certutil.exe in system32 — already the stand-in",
+                     "certutil.exe in syswow64 — already the stand-in",
+                     "PowerShell stand-in — already in the Aurora17 bottle",
+                     "cdb.exe — already in the Aurora17 bottle",
+                     "for cdb.exe — already set", "Install Dir — already Z:",
+                     "fifasetup.ini — already there"):
+            self.assertIn(line, again.stdout)
+        self.assertEqual(self.snapshot("Aurora17"), before, "a second --fifa12 changed the bottle")
+        self.assertEqual(ini.read_bytes(), ini_before)
+
+        # --verify reports each piece and changes nothing.
+        verify = self.verify_fifa12(app)
+        for line in ("ok    CX_LOWPORT", "ok    PowerShell stand-in in the bottle",
+                     "ok    certutil stand-in in system32 and syswow64",
+                     "ok    Microsoft's 32-bit debugger (cdb.exe) in the bottle",
+                     "for cdb.exe", "in both registry views", "ok    fifasetup.ini in",
+                     "ok    the Aurora launcher is in the Aurora17 bottle",
+                     "ok    FIFA 12 is in", "ok    FIFA 12: no Aurora ports to check"):
+            self.assertIn(line, verify.stdout)
+        self.assertEqual(self.snapshot("Aurora17"), before, "--verify changed the bottle")
+        _, launchers = self.tables(self.verify(app, AURORA_BOTTLE="Aurora17").stdout)
+        self.assertEqual(launchers[("Aurora.exe", "FIFA 12")], "ready")
+
+    def test_fifa12_verify_says_what_is_missing_and_changes_nothing(self):
+        app = self.copy(marker=True)
+        self.shipped(True)
+        self.fifa12_bottle("Aurora17", ("CX_GRAPHICS_BACKEND", "d3dmetal"))
+        before = self.snapshot("Aurora17")
+        verify = self.verify_fifa12(app)
+        self.assertEqual(verify.returncode, 5, verify.stdout + verify.stderr)
+        for line in ("CX_LOWPORT is not set to 1 in the Aurora17 bottle",
+                     "no PowerShell stand-in, so Aurora 12's helper",
+                     "certutil.exe is not the shipped stand-in",
+                     "Microsoft's 32-bit debugger is not in the Aurora17 bottle",
+                     "cdb.exe does not prefer Microsoft's own DLLs",
+                     "EA Sports\\FIFA 12 Install Dir is not Z:",
+                     "no fifasetup.ini at"):
+            self.assertIn(line, verify.stdout)
+        self.assertEqual(self.snapshot("Aurora17"), before)
+        self.assertFalse((self.work / "Documents/FIFA 12").exists())
+
+    def test_fifa12_downloads_the_debugger(self):
+        app = self.copy(marker=True)
+        self.shipped(True)
+        _, _, root, _ = self.fifa12_bottle("Aurora17", ("CX_GRAPHICS_BACKEND", "d3dmetal"),
+                                           ("WINE_SIMULATE_WRITECOPY", "1"))
+        bundle = self.windbg_bundle()
+        log = self.work / "curl.log"
+        self.tool("curl", f'''echo "$@" >> "{log}"
+for last; do :; done
+while [ "$#" -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done
+case "$last" in
+  *.appinstaller) printf '%s\\n' '<MainBundle Uri="https://example.invalid/pkg/windbg.msixbundle" />' > "$out" ;;
+  *.msixbundle) cp "{bundle}" "$out" ;;
+  *) exit 22 ;;
+esac
+''')
+        self.tool("df", "echo Filesystem 1024-blocks Used Available; echo disk 99999999 1 9999999\n")
+        result = self.set_up_fifa12(app)
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn("VERDICT=done", out)
+        self.assertIn("1.2 GB", out)
+        self.assertEqual(log.read_text().count("example.invalid/pkg/windbg.msixbundle"), 1)
+        self.assertTrue((root / "drive_c/Program Files (x86)/Windows Kits/10/Debuggers/x86/cdb.exe").is_file())
+        self.assertEqual(list(self.work.glob("fifa12windbg*")), [])
+
+    def test_fifa12_failed_debugger_leaves_nothing_half_installed(self):
+        app = self.copy(marker=True)
+        self.shipped(True)
+        _, _, root, _ = self.fifa12_bottle("Aurora17", ("CX_GRAPHICS_BACKEND", "d3dmetal"),
+                                           ("WINE_SIMULATE_WRITECOPY", "1"))
+        dbg = root / "drive_c/Program Files (x86)/Windows Kits/10/Debuggers"
+        # The network is down.
+        self.tool("curl", "exit 6\n")
+        self.tool("df", "echo Filesystem 1024-blocks Used Available; echo disk 99999999 1 9999999\n")
+        result = self.set_up_fifa12(app)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("could not reach Microsoft's WinDbg page", result.stdout)
+        self.assertIn("VERDICT=incomplete", result.stdout)
+        self.assertEqual(list(dbg.rglob("*")), [])
+        self.assertEqual(list(self.work.glob("fifa12windbg*")), [])
+        # The rest was done regardless.
+        self.assertEqual((root / "drive_c/windows/system32/certutil.exe").read_bytes(),
+                         (ROOT / "fixes/x86_64-windows/cx-certutil.exe").read_bytes())
+        # Not enough disk: says so and does not start.
+        log = self.work / "curl2.log"
+        self.tool("curl", f'echo "$@" >> "{log}"\nexit 6\n')
+        self.tool("df", "echo Filesystem 1024-blocks Used Available; echo disk 99999999 1 1048576\n")
+        result = self.set_up_fifa12(app)
+        self.assertIn("not enough free disk", result.stdout)
+        self.assertFalse(log.exists())
+        # A package with no 32-bit debugger in it.
+        msix = self.work / "windbg_win-x64.msix"
+        with zipfile.ZipFile(msix, "w") as z:
+            z.writestr("amd64/cdb.exe", b"MZ")
+        empty = self.work / "empty.msixbundle"
+        with zipfile.ZipFile(empty, "w") as z:
+            z.write(msix, "windbg_win-x64.msix")
+        msix.unlink()
+        result = self.set_up_fifa12(app, WINDBG_BUNDLE=str(empty))
+        self.assertIn("could not unpack the 32-bit debugger", result.stdout)
+        self.assertEqual(list(dbg.rglob("*")), [])
+
+    def test_fifa12_ini_size_and_where_it_goes(self):
+        app = self.copy(marker=True)
+        self.shipped(True)
+        _, _, root, _ = self.fifa12_bottle("Aurora17", ("CX_GRAPHICS_BACKEND", "d3dmetal"),
+                                           ("WINE_SIMULATE_WRITECOPY", "1"))
+        # A bottle whose Documents is a folder of its own takes the file there.
+        docs = root / "drive_c/users/crossover/Documents"
+        docs.mkdir(parents=True)
+        # osascript fails; system_profiler names the main display, second.
+        self.tool("osascript", "exit 1\n")
+        self.tool("system_profiler", """cat <<'EOF'
+      Displays:
+        Other:
+          UI Looks like: 2560 x 1440 @ 60.00Hz
+          Online: Yes
+        Color LCD:
+          Resolution: 3456 x 2234 Retina
+          UI Looks like: 1512 x 982 @ 120.00Hz
+          Main Display: Yes
+EOF
+""")
+        source = (ROOT / "setup.sh").read_text().split(
+            "# ------------------------------------------------- the launch that is watched", 1)[0]
+        (self.work / "fixes/x86_64-unix").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "fixes/x86_64-unix/cx-fifa17-gate", self.work / "fixes/x86_64-unix/cx-fifa17-gate")
+        script = self.work / "ini.sh"
+        script.write_text(source + '\nf12_write_ini\n')
+        env = {**self.env, "AURORA_TARGET": str(app), "PATH": str(self.work / "bin") + ":" + self.env["PATH"]}
+        run = subprocess.run(["/bin/zsh", str(script), "--fifa12"], env=env,
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        ini = docs / "FIFA 12/fifasetup.ini"
+        self.assertIn(b"RESOLUTIONWIDTH = 1512\r\nRESOLUTIONHEIGHT = 982\r\nASPECTRATIO = 1.53971\r\n",
+                      ini.read_bytes())
+        self.assertFalse((self.work / "Documents/FIFA 12").exists())
+        # A file the player has is left alone.
+        ini.write_bytes(b"mine")
+        subprocess.run(["/bin/zsh", str(script), "--fifa12"], env=env, capture_output=True, timeout=60)
+        self.assertEqual(ini.read_bytes(), b"mine")
+        # Neither tells: 1280x800, and it says so.
+        ini.unlink()
+        self.tool("system_profiler", "exit 1\n")
+        run = subprocess.run(["/bin/zsh", str(script), "--fifa12"], env=env,
+                             capture_output=True, text=True, timeout=60)
+        self.assertIn("could not read this Mac's display size", run.stdout)
+        self.assertIn(b"RESOLUTIONWIDTH = 1280\r\nRESOLUTIONHEIGHT = 800\r\nASPECTRATIO = 1.60000\r\n",
+                      ini.read_bytes())
+
+    def test_fifa12_shares_aurora17_and_finds_its_folder_inside_game(self):
+        self.bottle("Aurora17", ("CX_DR_TRAP", "2"))
+        self.bottle("Aurora15", ("CX_TOPDOWN_LIMIT", "0x1ffffffff"))
+        app = self.copy(marker=True)
+        result, lines = self.run_probe("--fifa12", "--verify", AURORA_TARGET=str(app))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SHARED=FIFA 17", lines)
+        self.assertEqual(sorted(lines[2:]), ["CX_DR_TRAP=2", "CX_GRAPHICS_BACKEND=d3dmetal", "CX_LOWPORT=1",
+                                             "WINE_SIMULATE_WRITECOPY=1"])
+        result, lines = self.run_probe("--fifa12", "--verify", AURORA_BOTTLE="Other", AURORA_TARGET=str(app))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        old = self.copy(marker=False, name="old.app")
+        result, lines = self.run_probe("--fifa12", "--verify", AURORA_TARGET=str(old))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SHARED=FIFA 17", lines)
+        # The folder is the one holding Game, not Game itself.
+        game = self.work / "Elsewhere/FIFA 12"
+        (game / "Game").mkdir(parents=True)
+        (game / "Game/fifa.exe").write_bytes(b"MZ")
+        env = {**self.env, "CHOICES": ""}
+        saved = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--choose-folder", "fifa12", str(game)],
+                               env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(saved.returncode, 0, saved.stdout + saved.stderr)
+        self.assertIn("saved FIFA 12:", saved.stdout)
+        refused = subprocess.run(["/bin/zsh", str(ROOT / "setup.sh"), "--choose-folder", "fifa12", str(game / "Game")],
+                                 env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertIn('"FIFA 12"', (ROOT / "lib/ui.zsh").read_text())
+        self.assertIn("game=fifa12", (ROOT / "Choose game folders.command").read_text())
+        self.assertIn("--fifa12", (ROOT / "FIFA 12.command").read_text())
+
+    def test_fifa12_prebuilt_files_are_listed_and_not_microsofts(self):
+        sums = (ROOT / "fixes/SHA256SUMS").read_text()
+        for name in ("x86_64-windows/cx-certutil.exe", "i386-windows/cx-certutil.exe"):
+            self.assertIn(hashlib.sha256((ROOT / "fixes" / name).read_bytes()).hexdigest()
+                          + "  " + name, sums)
+        self.assertEqual(sorted(p.name for p in ROOT.rglob("cdb.exe")), [])
 
 
 class RepairTests(unittest.TestCase):

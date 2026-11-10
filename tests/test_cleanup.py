@@ -151,7 +151,7 @@ class BottleGuardTests(unittest.TestCase):
             (work / 'Aurora17').mkdir()
             harness = 'set -eu\nTARGET=' + shlex.quote(str(work / 'app')) + '\n'
             harness += 'BOTTLE_DIR=' + shlex.quote(directory) + '\n'
-            harness += 'MODE=bottle; TARGET_EXPLICIT=1; F15_ONE=0; F16_ONE=0; F20_ONE=0; BOTTLE=Aurora17; GAME=fifa17\n'
+            harness += 'MODE=bottle; TARGET_EXPLICIT=1; F15_ONE=0; F16_ONE=0; F20_ONE=0; F12_ONE=0; BOTTLE=Aurora17; GAME=fifa17\n'
             harness += 'E_PAYLOAD=4; E_UNSUPPORTED=2; E_INCOMPLETE=5; E_PERMISSION=3\n'
             harness += 'say() { :; }; ok() { :; }; green() { :; }; note() { :; }\n'
             harness += 'die() { print -r -- "STOPPED $2"; exit "$1"; }\n'

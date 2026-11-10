@@ -57,7 +57,7 @@ ui_pick_game() {
     local answer
     answer="$(osascript - "$1" "${2:-0}" <<'EOS'
 on run argv
-    set games to {"FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"}
+    set games to {"FIFA 12", "FIFA 15", "FIFA 16", "FIFA 17", "FIFA 21"}
     if item 2 of argv is "1" then set end of games to "Forget a choice…"
     set pickedGames to choose from list games with title (item 1 of argv) with prompt "Choose a game" without multiple selections allowed
     if pickedGames is false then return ""
