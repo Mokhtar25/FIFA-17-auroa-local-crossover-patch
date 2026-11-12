@@ -15,8 +15,13 @@
  * verify that debug-register emulation (e.g. CrossOver's CX_DR_TRAP feature)
  * behaves the way Windows documents, on any bottle.
  *
- * Build: x86_64-w64-mingw32-gcc -O2 -o drbp_test.exe drbp_test.c
+ * Build: x86_64-w64-mingw32-gcc -O2 -o drbp_test64.exe drbp_test.c
+ *        i686-w64-mingw32-gcc   -O2 -o drbp_test.exe  drbp_test.c
  * Exit code 0 = every case passed.
+ *
+ * Two ABIs, one source: the instruction pointer is Rip on x86-64 and Eip on
+ * i386, and the debug registers are 64 bits there and 32 bits here, so the
+ * spellings the test needs come from CX_IP / cx_word_t below.
  */
 
 #define __USE_MINGW_ANSI_STDIO 1
@@ -37,9 +42,17 @@
 #define DR7_RW1_WRITE (1ULL << 20)          /* R/W1 = 01 (write) */
 #define DR7_ENABLES   (DR7_L0|DR7_G0|DR7_L1|DR7_G1|DR7_L3|DR7_G3|0xFULL)
 
+#ifdef _WIN64
+typedef DWORD64  cx_word_t;
+#define CX_IP    Rip
+#else
+typedef DWORD    cx_word_t;
+#define CX_IP    Eip
+#endif
+
 #define TF_FLAG 0x100ULL
 
-static int set_drs(DWORD64 dr0, DWORD64 dr1, DWORD64 dr3, DWORD64 dr7);
+static int set_drs(cx_word_t dr0, cx_word_t dr1, cx_word_t dr3, cx_word_t dr7);
 
 static volatile LONG g_phase      = 0;   /* 1..8 = case in flight */
 static volatile LONG g_bp0_hits   = 0;
@@ -78,7 +91,7 @@ static LONG CALLBACK veh(PEXCEPTION_POINTERS ep)
     switch (g_phase)
     {
     case 1:                              /* execute bp at bp0_target */
-        if (ctx->Rip == (DWORD64)(uintptr_t)bp0_target)
+        if (ctx->CX_IP == (cx_word_t)(uintptr_t)bp0_target)
         {
             g_bp0_hits++;
             ctx->Dr7 = (ctx->Dr7 & ~DR7_L0) | DR7_RES10;
@@ -97,11 +110,11 @@ static LONG CALLBACK veh(PEXCEPTION_POINTERS ep)
         return EXCEPTION_CONTINUE_EXECUTION;
 
     case 6:                              /* bp armed by another thread */
-        if (ctx->Rip == (DWORD64)(uintptr_t)bp0_target)
+        if (ctx->CX_IP == (cx_word_t)(uintptr_t)bp0_target)
         {
             g_x_seen_dr0 = ctx->Dr0;
             g_x_seen_dr7 = ctx->Dr7;
-            if (ctx->Dr0 == (DWORD64)(uintptr_t)bp0_target) g_x_dr0_ok++;
+            if (ctx->Dr0 == (cx_word_t)(uintptr_t)bp0_target) g_x_dr0_ok++;
             if (ctx->Dr7 & DR7_L0) g_x_dr7_ok++;
             g_bp0_hits++;
             ctx->Dr7 = (ctx->Dr7 & ~DR7_L0) | DR7_RES10;
@@ -139,13 +152,13 @@ static DWORD WINAPI t6_proc(LPVOID arg)
 static DWORD WINAPI t7_proc(LPVOID arg)
 {
     (void)arg;
-    set_drs((DWORD64)(uintptr_t)bp0_target, 0, 0, DR7_RES10 | DR7_L0);
+    set_drs((cx_word_t)(uintptr_t)bp0_target, 0, 0, DR7_RES10 | DR7_L0);
     SetEvent(g_ev_ready);
     WaitForSingleObject(g_ev_go, 5000);
     return 0;                        /* dies with the breakpoint armed */
 }
 
-static int set_drs(DWORD64 dr0, DWORD64 dr1, DWORD64 dr3, DWORD64 dr7)
+static int set_drs(cx_word_t dr0, cx_word_t dr1, cx_word_t dr3, cx_word_t dr7)
 {
     CONTEXT c;
     memset(&c, 0, sizeof c);
@@ -157,7 +170,7 @@ static int set_drs(DWORD64 dr0, DWORD64 dr1, DWORD64 dr3, DWORD64 dr7)
     return SetThreadContext(GetCurrentThread(), &c);
 }
 
-static DWORD64 get_dr7(void)
+static cx_word_t get_dr7(void)
 {
     CONTEXT c;
     memset(&c, 0, sizeof c);
@@ -181,7 +194,7 @@ int main(void)
     total++;
     printf("[case 1] DR0 execute breakpoint, self-armed via SetThreadContext ... ");
     g_bp0_hits = 0;
-    if (set_drs((DWORD64)(uintptr_t)bp0_target, 0, 0, DR7_RES10 | DR7_L0))
+    if (set_drs((cx_word_t)(uintptr_t)bp0_target, 0, 0, DR7_RES10 | DR7_L0))
     {
         g_phase = 1;
         g_bp0_fp();
@@ -200,7 +213,7 @@ int main(void)
     printf("[case 2] DR1 write watchpoint (1 byte), self-armed ... ");
     g_wp_hits = 0;
     g_watch = 0;
-    if (set_drs(0, (DWORD64)(uintptr_t)&g_watch, 0,
+    if (set_drs(0, (cx_word_t)(uintptr_t)&g_watch, 0,
                 DR7_RES10 | DR7_L1 | DR7_RW1_WRITE))
     {
         g_phase = 2;
@@ -247,7 +260,7 @@ int main(void)
     total++;
     printf("[case 4] CONTEXT_DEBUG_REGISTERS round-trip (Dr3/Dr7) ... ");
     {
-        DWORD64 probe = (DWORD64)(uintptr_t)main;
+        cx_word_t probe = (cx_word_t)(uintptr_t)main;
         int ok = set_drs(0, 0, probe, DR7_RES10 | DR7_L3);
         if (ok)
         {
@@ -300,7 +313,7 @@ int main(void)
             WaitForSingleObject(g_ev_ready, 5000);
             memset(&c, 0, sizeof c);
             c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            c.Dr0 = (DWORD64)(uintptr_t)bp0_target;
+            c.Dr0 = (cx_word_t)(uintptr_t)bp0_target;
             c.Dr7 = DR7_RES10 | DR7_L0;
             armed = SetThreadContext(t, &c) ? 1 : 0;
             SetEvent(g_ev_go);
@@ -367,7 +380,7 @@ int main(void)
     {
         int ok;
         g_xrw_hits = 0;
-        if (set_drs(0, 0, (DWORD64)(uintptr_t)&g_watch,
+        if (set_drs(0, 0, (cx_word_t)(uintptr_t)&g_watch,
                     DR7_RES10 | DR7_L3 | (3ULL << 28) | (1ULL << 30)))
         {
             g_phase = 8;

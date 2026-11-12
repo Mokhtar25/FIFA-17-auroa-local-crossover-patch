@@ -221,3 +221,174 @@ with `pushfq/orq/popfq` is delivered on time (drrf phase 7). See
 - Mode 3 turns the drcache on, which logs a `CTXDR` line to stderr for every
   context get/set that carries debug registers. The shipped mode 2 does the
   same (baseline code in the rosetta patch).
+
+## 32-bit programs (wow64), 2026-11-10
+
+Everything above is the native x86-64 context path (`NtSetContextThread`,
+`signal_x86_64.c`). A 32-bit program does not use it: its
+`SetThreadContext`/`GetThreadContext` become
+`NtSetInformationThread(ThreadWow64Context)` and land in
+`set_thread_wow64_context`/`get_thread_wow64_context`, which until this patch
+always went to the server. Under Rosetta the server answers
+`STATUS_UNSUCCESSFUL` for debug registers, Wine warns "Setting debug
+registers is not supported under Rosetta, faking success" and the registers
+are dropped. Mode 3 did nothing for a 32-bit guest at all: the repository's
+own `drbp_test`, rebuilt with `i686-w64-mingw32-gcc`, scored 2/8 with
+`CX_DR_TRAP=3` resolved for it.
+
+`crossover-26.3-wow64-debug-registers.patch` closes that:
+
+- `set_thread_wow64_context` keeps a self-arm thread-local (as the native
+  path does) and does not call the server, then arms the emulation through
+  `xbp_apply_wow64`, which borrows `xbp_sync` with an amd64-shaped copy of the
+  i386 context. A cross-thread arm is emulated and stored in the drcache.
+- `get_thread_wow64_context` answers a `CONTEXT_DEBUG_REGISTERS` request from
+  the thread-local copy and the drcache instead of the server.
+- `xbp_decode_load` decodes 32-bit guest code with the 32-bit rules: ModRM
+  `mod=00 rm=101` is absolute disp32, not RIP-relative, and a moffs operand is
+  four bytes. Wine's own 64-bit code in the same process keeps the long-mode
+  rules; the two are told apart by the faulting `SegCs`.
+- After measuring the same sequence on Windows (`tests/drbp/wow32_probe.c`,
+  the probe's output beside it), two differences were corrected in mode 3
+  only: `Dr7` reads back with its legal bits alone (`& 0xffff0155`), and `Dr6`
+  is cleared once a hit has been delivered (or `0` when the slots are
+  disarmed). The third correction made here -- `EFLAGS.RF` set on every fault
+  context -- was wrong for a `#DB`; see the 2026-11-10 entry below.
+
+Result on this Mac: `drbp_test` 32-bit goes from 2/8 to case 1 (self-armed
+execute breakpoint) passing and the context round trip reading back the
+registers that were written. A plain 32-bit probe (`Dr0=0x11111111`,
+`Dr3=0x44444444`, `Dr7=0x404`) reads all six back unchanged.
+
+**Data watchpoints for a 32-bit guest, 2026-11-10 (`tests/trapstorm`).**
+These used to be dropped from the emulation's table with one warning per
+process. They now take the same path as a 64-bit guest's: the page loses
+write, the faulting access is decoded (`xbp_decode_load` knows the 32-bit
+addressing rules), stepped over under TF, and a trap-type `#DB` is delivered
+after it. Two things stood in the way, both fixed in this patch:
+
+- `EFLAGS.RF` swallowed the hit. A 32-bit handler resumes with the RF it was
+  delivered with, and `xbp_sync` turns RF into `skip_addr`, which the data path
+  honoured ("RF: run it once, no trap"). RF suppresses an *instruction*
+  breakpoint for one instruction and nothing else; on hardware a data access
+  still hits. `xbp_handle_fault` ignores `skip_addr` for a wow64 guest's data
+  accesses. A 64-bit guest keeps the old rule (see "Not fixed" below).
+- The hit's Dr6 was cleared before the guest read it. The `#DB` reaches
+  `xbp_apply_wow64` as a context write, and the Windows rule "a continued
+  context drops the status" was applied to it unless `Eip` sat on the
+  breakpoint, which is true of an execute breakpoint and never of a data trap
+  (it reports the next instruction). `setup_raise_exception` now remembers the
+  Dr6 it is delivering (`cx_wow_deliver_dr6`) and `xbp_apply_wow64` lets
+  exactly that value through once.
+
+Not fixed: a 64-bit guest still lets RF swallow a data watchpoint at the
+instruction a handler resumed to with RF set. It is the validated FIFA 16
+behaviour and nothing 64-bit has shown it to be wrong.
+
+**Exception context, closed 2026-11-10 (`tests/trapstorm`, 31/37 -> 37/37).**
+Two things a 32-bit handler saw differently from Windows, both only for a
+32-bit guest under mode 3:
+
+- `EFLAGS.RF`: **corrected 2026-11-10 -- see the next entry.** This made the
+  patch set RF for an execute breakpoint's `#DB` too. The Windows output kept
+  beside the probe shows `eflags=0x246` on the `#DB` lines, i.e. RF clear;
+  only the `#UD` and the access violation carry `0x10000`.
+- `ContextFlags` is `0x1007f`, not `0x1003f`: Windows adds `CONTEXT_XSTATE`
+  with an XSTATE area behind the context. Rosetta's signal frame has no area to
+  point at, so `wow64`'s dispatcher saw no `CONTEXT_AMD64_XSTATE` and left the
+  flag off. `setup_raise_exception` now builds an empty area (Mask 0, state in
+  its initial configuration) in the space it already reserves for one, when the
+  faulting code is 32-bit and the process has extended features (the bottle
+  reports `GetEnabledXStateFeatures() == 7`). No `wow64.dll` change.
+
+## Image sections that are writable but have no raw data
+
+`crossover-26.3-image-demand-zero-protect.patch`, one hunk in
+`dlls/ntdll/unix/virtual.c`, unrelated to debug registers except that a packed
+image is where it shows. A section with `IMAGE_SCN_MEM_WRITE` and
+`SizeOfRawData == 0` is demand-zero: there is no file content behind it, so
+Windows backs it with private pages and `VirtualQuery` reports a plain
+writable protection. Wine marked it `VPROT_WRITECOPY`, so it reported
+`PAGE_EXECUTE_WRITECOPY` where Windows reports `PAGE_EXECUTE_READWRITE`. A
+packer that checks its own unpack target section sees the difference.
+
+**Round 5, 2026-11-10 night 5: a single-stepped `call` pushes 8 bytes under Rosetta.**
+Three 32-bit conformance failures had one cause. `tests/drbp/wow32_arm.c` phase B
+(arm an execute breakpoint on a page the process is also running code from: no
+exception, zeroed registers, death reading address 0), `drbp_test32` case 4
+(`Dr3=10010 Dr7=0`: ContextFlags printed where Dr3 should be) and case 6 (the arming
+thread dies at `EIP=0x2cc`, `sizeof(CONTEXT)`) all arm a page that holds running
+code. The emulation runs every instruction of such a page one at a time (fetch
+fault, execute restored, TF step, execute taken away again), and Rosetta executes
+a TF-stepped 32-bit `call rel32` (E8) as a 64-bit call: Esp drops by 8, not 4, the
+return address is stored with a zero dword above it, and the callee finds that
+zero where the caller's last argument was (`printf` got a NULL format) and its
+`ret` leaves the caller 4 bytes off. Measured without any emulation involved
+(`tests/drbp/wow32_tfstep.c`, an exe with no `DrTrap` entry, the guest sets TF
+itself): E8 is -8; `call reg`, `call [mem]`, `ret`, `ret n`, `push`, `pop`, `enter`,
+`leave`, `pushad`, string instructions, `cpuid`, jumps are all correct. The
+registers were never zeroed: the earlier "eax=ebx=esi=edi=0" was `__mingw_pformat`'s
+own `xor edi,edi; xor esi,esi` and a NULL format pointer. Case 6's "dr0=0 dr7=0"
+`CTXDR store` line and the `0x2cc` were the same skew reaching the arguments of the
+next `SetThreadContext` and a later `ret`.
+
+`xbp_note_call` remembers, in both step-over paths (execute and data), that the
+instruction about to be stepped is a 32-bit E8 and the Esp before it;
+`xbp_fix_call`, at the step trap and before the page is stripped again, moves the
+return address to the right dword when Esp is exactly 8 lower. Only a wow64 guest's
+32-bit code is touched. Not covered: a guest that sets TF itself and steps over an
+E8 still sees Esp -8 (case 3's TF delivery fails on Windows too, and the game was
+not seen to use TF). Results: `wow32_arm` A/B/C OK, `drbp_test32` 7/8 (case 3 fails
+as on Windows), `drbp_test` 64-bit 7/8, `trapstorm` 66/66, `wow32_probe` output
+unchanged.
+
+**Round 4, 2026-11-10 night: Windows 11 measured, round 3's run-once removed.**
+`trapstorm` and `wow32_probe` were run on a real Windows 11 build 26200 machine
+(`tests/windows/baseline-windows/`). Two things changed:
+
+- Round 3's run-once (`cx_wow_db_skip`, below) is **deleted**. It assumed Windows
+  runs the tapped instruction once whatever the handler returns; Windows does not.
+  A handler that resumes at the breakpoint with RF clear is handed the same `#DB`
+  again (the test saw nine deliveries until its own cap), and one that sets RF
+  runs the instruction once, which `xbp_sync`'s RF handling (`skip_addr`) already
+  did. `trapstorm` now has phase 3b for exactly this and passes 66/66.
+- The segment selectors in the context a 32-bit handler is handed are Windows'
+  (`cs=0x23 ds/es/gs=0x2b fs=0x53`) instead of Rosetta's (`0x107 0x23 0x10f`). They
+  are given out for the one 32-bit context read the exception dispatch makes
+  (`cx_wow_seg_lie`, set in `setup_raise_exception`) and translated back in
+  `set_thread_wow64_context`; the real selectors stay in the CPU area. **`ss` is
+  excluded by default** (`CX_SEGLIE` bit 1): a Windows-valued `ss` makes a nested
+  exception inside a handler lose its stack and kills the process, cause not found.
+  Widening the lie to every `GetThreadContext` broke wow64's own start-up.
+
+Neither change moved FIFA 14 off its splash (the access-violation storm at
+`0x03413A96` is identical); they are fidelity fixes against measured Windows
+behaviour. Not regression-tested: FIFA 16 (64-bit, so untouched by both).
+
+**`#DB` delivery vs Windows, 2026-11-10 (round 3, `wow32_probe` + `trapstorm`,
+64/64).** The Windows probe output that the previous round had read the other
+way turned up again (`/Volumes/Untitled/wow32_probe.txt`, Windows 6.2/9200). It
+says two things the patch did not do:
+
+- A `#DB` from an instruction breakpoint is handed to a 32-bit handler with
+  **RF clear** (`eflags=0x246`), while `#UD` and access violations carry
+  `0x10000`. The resume, not the delivery, is what runs the instruction once.
+  `setup_raise_exception` therefore no longer marks the delivered context, and
+  `xbp_apply_wow64` no longer sees RF on that path.
+- A handler that continues at a *different* `Eip` still traps at the new
+  address on Windows (`hit-l1` in the probe). The old build tied the run-once
+  to the resume address (`xbp_sync`'s `skip_addr`), so it silently skipped that
+  trap: 6 exceptions against Windows' 7.
+
+Both are one change. The address a `#DB` was delivered *for* is pushed on a
+small per-thread stack (`cx_wow_db_skip`, four deep, one per dispatch in
+flight) and consumed by the next instruction fetch on an armed page: same
+address, run it once; any other address, clear the entry and trap normally.
+It has to be a separate stack rather than `skip_addr` because an interpreter
+in the handler (a nested access violation, say) writes contexts of its own and
+would clobber a single slot -- that is exactly how `trapstorm` phase 2 caught
+the first version of this change.
+
+`wow32_probe` now prints the same lines as Windows, the same seven exceptions,
+same `Dr6`/`Dr7`/`ContextFlags`, same RF on each; only the low EFLAGS bits that
+the caller itself produces differ (`0x206` vs `0x246`, AF vs ZF).

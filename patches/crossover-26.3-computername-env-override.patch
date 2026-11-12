@@ -1,0 +1,57 @@
+GetComputerNameEx: honour the _CLUSTER_NETWORK_*_ environment overrides.
+
+Windows lets four environment variables replace the non-physical computer
+names: _CLUSTER_NETWORK_NAME_ (NetBIOS, so GetComputerNameA/W too),
+_CLUSTER_NETWORK_HOSTNAME_, _CLUSTER_NETWORK_DOMAIN_ and _CLUSTER_NETWORK_FQDN_.
+Wine ignored them.  FIFA 14's 3DM loader sets _CLUSTER_NETWORK_NAME_ in the
+game process before the licence check reads the computer name; without the
+override the game sees the real host name, decides the licence is for another
+machine and exits with code 1 about 5 s after start.  Measured 2026-11-11: with
+this change the game opens its FIFANG main window and keeps running.
+
+The game is 32-bit, so the binary that matters is i386-windows/kernelbase.dll.
+
+--- a/dlls/kernelbase/registry.c	2026-11-11 03:39:35
++++ b/dlls/kernelbase/registry.c	2026-11-11 03:39:35
+@@ -3312,10 +3312,40 @@
+  */
+ BOOL WINAPI GetComputerNameExW( COMPUTER_NAME_FORMAT type, WCHAR *name, DWORD *len )
+ {
+-    const WCHAR *keyname, *valuename;
++    const WCHAR *keyname, *valuename, *override = NULL;
+     LRESULT ret;
+     HKEY key;
++
++    /* Windows lets the environment replace the non-physical names (it is how a
++     * cluster resource presents its network name to a program). */
++    switch (type)
++    {
++    case ComputerNameNetBIOS:           override = L"_CLUSTER_NETWORK_NAME_"; break;
++    case ComputerNameDnsHostname:       override = L"_CLUSTER_NETWORK_HOSTNAME_"; break;
++    case ComputerNameDnsDomain:         override = L"_CLUSTER_NETWORK_DOMAIN_"; break;
++    case ComputerNameDnsFullyQualified: override = L"_CLUSTER_NETWORK_FQDN_"; break;
++    default: break;
++    }
++    if (override && len)
++    {
++        WCHAR buffer[256];
++        DWORD size = GetEnvironmentVariableW( override, buffer, ARRAY_SIZE(buffer) );
+ 
++        if (size && size < ARRAY_SIZE(buffer))
++        {
++            TRACE( "%s overrides name type %u: %s\n", debugstr_w(override), type, debugstr_w(buffer) );
++            if (name && size < *len)
++            {
++                lstrcpyW( name, buffer );
++                *len = size;
++                return TRUE;
++            }
++            *len = size + 1;
++            SetLastError( ERROR_MORE_DATA );
++            return FALSE;
++        }
++    }
++
+     switch (type)
+     {
+     case ComputerNameNetBIOS:

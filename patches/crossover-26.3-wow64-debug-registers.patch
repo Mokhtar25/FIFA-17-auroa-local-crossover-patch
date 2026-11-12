@@ -1,0 +1,443 @@
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1761,6 +1761,8 @@
+     ULONG_PTR skip_addr;
+     int step_tf;
+     unsigned int deliver_bmask;   /* B bits to deliver at the step trap, 0 none */
++    DWORD call_sp;                /* a 32-bit "call rel32" is being stepped: Esp before it, */
++    DWORD call_ret;               /* and the return address it pushes (see xbp_note_call) */
+ } xbp_thread[DRCACHE_MAX];
+ static unsigned int xbp_thread_count;
+ 
+@@ -1983,8 +1985,19 @@
+     xbp_thread[i].skip_addr = 0;
+     xbp_thread[i].step_tf = 0;
+     xbp_thread[i].deliver_bmask = 0;
++    xbp_thread[i].call_ret = 0;
+     return i;
+ }
++
++/* An instruction-breakpoint #DB is a fault.  Windows (hardware) hands the 32-bit
++ * handler its context with RF clear, and the same #DB is delivered again for as
++ * long as the handler resumes at that address with RF still clear: measured on
++ * Windows 11 build 26200 by tests/trapstorm (phase 3b; an earlier version of this
++ * code assumed the resume runs the instruction once whatever the handler did,
++ * which Windows does not).  A handler that wants the instruction to run sets RF
++ * itself, and that is what xbp_sync's skip_addr honours.  Nothing here has to
++ * remember anything: the page stays stripped, the fetch faults, and
++ * xbp_handle_fault decides from skip_addr. */
+ 
+ /* Bounded x86-64 decoder for the reads of the user shared data page,
+  * completed inside the fault handler itself.  Reads of that page are what
+@@ -2039,6 +2052,11 @@
+     unsigned int disp_len = 0, imm_len = 0, imm_z, ext;
+     int need_ext = -1;   /* the ModRM reg field a group opcode must carry, -1 none */
+     BOOL rip_rel = FALSE, opsize16 = FALSE, lock = FALSE;
++    /* 32-bit guest code runs in a wow64 process with the 32-bit selector; for
++     * it, ModRM mod=00 rm=101 and a moffs operand are absolute, not
++     * RIP-relative and 64 bits wide.  Wine's own 64-bit code in the same
++     * process keeps the long-mode rules. */
++    BOOL guest32 = is_wow64() && CS_sig(ucontext) != cs64_sel;
+     ULONG_PTR ea = 0;
+ 
+     /* stay inside the faulting instruction's own page: the page is
+@@ -2070,12 +2088,21 @@
+     out->width = (rex & 8) ? 8 : opsize16 ? 2 : 4;
+     imm_z = opsize16 ? 2 : 4;
+ 
+-    if (op >= 0xa0 && op <= 0xa3)   /* mov between al/eax/rax and moffs: always a 64-bit address here */
++    if (op >= 0xa0 && op <= 0xa3)   /* mov between al/eax/rax and moffs */
+     {
+-        if (i + 8 > n) return 0;
+         if (!(op & 1)) out->width = 1;
+         out->kind = op == 0xa0 ? XBP_LOAD_MOV8 : op == 0xa1 ? XBP_LOAD_MOV : XBP_LOAD_OTHER;
+         if (opsize16 || lock) out->kind = XBP_LOAD_OTHER;
++        if (guest32)   /* a 32-bit address here, zero-extended */
++        {
++            DWORD moffs;
++            if (i + 4 > n) return 0;
++            memcpy( &moffs, code + i, 4 );
++            out->ea = moffs;
++            out->len = i + 4;
++            return 1;
++        }
++        if (i + 8 > n) return 0;
+         memcpy( &out->ea, code + i, 8 );
+         out->len = i + 8;
+         return 1;
+@@ -2165,9 +2192,9 @@
+         if (mod == 0 && (sib & 7) == 5) disp_len = 4;   /* no base register: disp32 */
+         else ea += xbp_get_gpr( ucontext, (rex & 1 ? 8 : 0) | (sib & 7) );
+     }
+-    else if (mod == 0 && rm == 5)   /* RIP-relative disp32 */
++    else if (mod == 0 && rm == 5)   /* RIP-relative disp32; absolute in 32-bit code */
+     {
+-        rip_rel = TRUE;
++        if (!guest32) rip_rel = TRUE;
+         disp_len = 4;
+     }
+     else ea += xbp_get_gpr( ucontext, (rex & 1 ? 8 : 0) | rm );
+@@ -2431,6 +2458,98 @@
+         (context->EFlags & 0x10000) && (t = xbp_thread_slot( tid, TRUE )) >= 0)
+         xbp_thread[t].skip_addr = context->Rip;
+     xbp_release();
++}
++
++static void drcache_store( HANDLE handle, unsigned int event, const CONTEXT *context );
++
++/* Mode 3, 32-bit guests: the selectors a Windows wow64 thread reports in the
++ * context its exception handler is handed are cs=0x23, ss/ds/es/gs=0x2b, fs=0x53
++ * (measured on Windows 11 build 26200 by tests/drbp/wow32_probe.c); under Rosetta
++ * they are cs=0x107 (an LDT entry), ss/ds/es/gs=0x23, fs=0x10f.  Guest code that
++ * tests CONTEXT.SegCs against 0x23 -- the usual wow64 check -- sees the
++ * difference.  The real selectors stay in the CPU area and are what the thread
++ * resumes with: the Windows values are given out for the one read the exception
++ * dispatch makes (set in setup_raise_exception, consumed by the next 32-bit
++ * context read), and are translated back when a context comes in.  Other reads
++ * are left alone: widening this to every GetThreadContext broke wow64's own
++ * start-up, which compares the CPU area's cs with cs32_sel. */
++static __thread int cx_wow_seg_lie;
++/* bit n of CX_SEGLIE selects cs ss ds es fs gs.  The default leaves ss out: a
++ * Windows-valued ss (0x2b) in the delivered context makes the next nested
++ * exception dispatch from inside a handler (tests/trapstorm phase 2, the
++ * protector's own AV) lose its stack -- "Exception frame is not in stack
++ * limits" -- and kills the process.  Cause not found; cs, ds, es, fs and gs
++ * are safe (trapstorm 66/66) and do not change what the game does. */
++static int cx_wow_seg_mask(void)
++{
++    static int mask = -1;
++    if (mask == -1)
++    {
++        const char *v = getenv( "CX_SEGLIE" );
++        mask = v && v[0] ? (int)strtol( v, NULL, 0 ) : 0x3d;
++    }
++    return mask;
++}
++#define CXSEG(bit,lie,real) ((cx_wow_seg_lie && (cx_wow_seg_mask() & (bit))) ? (lie) : (real))
++
++static inline WORD cx_wow_seg_in_cs( WORD cs )   { return drbp_mode() == 3 && cs == 0x23 ? cs32_sel : cs; }
++static inline WORD cx_wow_seg_in_ss( WORD ss )   { return drbp_mode() == 3 && ss == 0x2b ? ds64_sel : ss; }
++
++/* Mode 3: Windows reports RF set in the context of a UD2 or an access
++ * violation (measured on Windows by tests/drbp/wow32_probe.c), as the CPU
++ * pushes it with a fault.  Rosetta's frame has no RF, so the next 32-bit
++ * context read after such an exception adds it.  An instruction-breakpoint
++ * #DB is the exception: its delivered context has RF clear there, so it is
++ * not marked here at all; the resume's run-once is the RF the handler sets. */
++static __thread int cx_wow_fault_rf;
++
++/* Mode 3: the Dr6 of the #DB being delivered to a 32-bit guest, when it names
++ * a hit (B0-B3).  The delivery reaches xbp_apply_wow64 as a context write, and
++ * that is told from the handler's own continue -- which must drop the status,
++ * as Windows does -- by carrying exactly this value once.  An execute
++ * breakpoint is also recognisable by Eip sitting on it; a data trap, which
++ * reports the next instruction, is not. */
++static __thread DWORD cx_wow_deliver_dr6;
++
++/* The same for a context written through the wow64 path, where the guest's
++ * debug registers are 32 bits wide and its code address lives in Eip.  The
++ * emulation arms the same pages; only the shape of the context differs. */
++static void xbp_apply_wow64( HANDLE handle, const I386_CONTEXT *context, BOOL self )
++{
++    CONTEXT ctx;
++
++    memset( &ctx, 0, sizeof(ctx) );
++    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_DEBUG_REGISTERS;
++    ctx.Dr0 = context->Dr0;
++    ctx.Dr1 = context->Dr1;
++    ctx.Dr2 = context->Dr2;
++    ctx.Dr3 = context->Dr3;
++    /* Measured on Windows (tests/drbp/wow32_probe.c): Dr7 reads back with only
++     * its legal bits, and a continued context does not carry the hit's Dr6
++     * status forward; later exceptions report it cleared, or 0 once disarmed.
++     * The delivery of a hit comes through here too, with Eip on the breakpoint
++     * its status bit names, and a single-step's BS is left as it was. */
++    ctx.Dr7 = context->Dr7 & 0xffff0155;
++    ctx.Dr6 = context->Dr6;
++    if (!(context->Dr6 & 0x4000) &&
++        !(cx_wow_deliver_dr6 && context->Dr6 == cx_wow_deliver_dr6) &&
++        !((context->Dr6 & 1) && context->Eip == context->Dr0) &&
++        !((context->Dr6 & 2) && context->Eip == context->Dr1) &&
++        !((context->Dr6 & 4) && context->Eip == context->Dr2) &&
++        !((context->Dr6 & 8) && context->Eip == context->Dr3))
++        ctx.Dr6 = (ctx.Dr7 & 0xff) ? 0xffff0ff0 : 0;
++    cx_wow_deliver_dr6 = 0;
++    ctx.EFlags = context->EFlags;
++    ctx.Rip = context->Eip;
++    /* Data watchpoints go through the same page-protection path as a 64-bit
++     * guest's: the faulting access is decoded (xbp_decode_load knows the
++     * 32-bit addressing rules for a wow64 guest's code), stepped over under TF,
++     * and the #DB is delivered after it.  Dr0-3 are zero-extended addresses. */
++    xbp_sync( drcache_tid( handle ), &ctx, self );
++    /* the native path keeps both copies in step for mode 3, and a later
++     * GetThreadContext reads the cache first: an arm on another thread has
++     * only the cache (that thread's data is not writable from here) */
++    drcache_store( handle, 0, &ctx );
+ }
+ 
+ /* Every syscall stub in Wine's ntdll and win32u has the Windows form
+@@ -2485,6 +2604,40 @@
+     p[4] = 0x10;   /* 0x7ffe0308 -> 0x7ffe1008 */
+     mprotect( (void *)page, 0x1000, PROT_READ | PROT_EXEC );
+     return TRUE;
++}
++
++/* Rosetta runs a single-stepped (EFLAGS.TF) 32-bit "call rel32" (E8) as a
++ * 64-bit call: it pushes an 8-byte return address, so Esp ends 8 lower
++ * instead of 4 and the callee finds a zero dword where the caller's last
++ * argument was.  Measured with no breakpoint emulation involved at all
++ * (a guest that sets TF itself and steps over E8: Esp -8, the following ret
++ * +4); call through a register or memory, ret, push, pop, enter, leave,
++ * pushad and the string instructions step correctly.  The emulation steps
++ * every instruction it runs on a page it has stripped, so it has to undo
++ * this: remember the instruction before the step and fix the stack after it. */
++static void xbp_note_call( ucontext_t *ucontext, int t )
++{
++    BYTE op = 0;
++
++    xbp_thread[t].call_ret = 0;
++    if (!is_wow64() || CS_sig(ucontext) == cs64_sel) return;
++    if (NtReadVirtualMemory( GetCurrentProcess(), (void *)RIP_sig(ucontext), &op, 1, NULL ) || op != 0xe8)
++        return;
++    xbp_thread[t].call_sp = (DWORD)RSP_sig(ucontext);
++    xbp_thread[t].call_ret = (DWORD)RIP_sig(ucontext) + 5;
++}
++
++static void xbp_fix_call( ucontext_t *ucontext, int t )
++{
++    ULONG_PTR sp = RSP_sig(ucontext);
++    DWORD ret = xbp_thread[t].call_ret;
++
++    xbp_thread[t].call_ret = 0;
++    if (!ret || (DWORD)sp != xbp_thread[t].call_sp - 8) return;
++    /* the dword the callee will pop sits 4 bytes higher than where the
++     * 64-bit push left it */
++    if (NtWriteVirtualMemory( GetCurrentProcess(), (void *)(sp + 4), &ret, sizeof(ret), NULL )) return;
++    RSP_sig(ucontext) = sp + 4;
+ }
+ 
+ /* Called from segv_handler for a page fault.
+@@ -2518,6 +2671,12 @@
+          * kernel's: Windows never raises a user-mode #DB for it.  It is
+          * completed or stepped over like any other, and hits nothing. */
+         BOOL guest = !is_inside_syscall( RSP_sig(ucontext) );
++        /* EFLAGS.RF suppresses an instruction breakpoint for one instruction
++         * and nothing else: a data access still hits.  A 32-bit guest's
++         * contexts carry RF (a handler resumes with the RF it was delivered
++         * with), so for it RF must not swallow a data watchpoint.  64-bit
++         * guests keep the older rule. */
++        BOOL wow32 = is_wow64() && CS_sig(ucontext) != cs64_sel;
+         ULONG_PTR efl = EFL_sig(ucontext), ea = fault_addr, width = 1;
+         struct xbp_load ld;
+         BOOL decoded = xbp_decode_load( ucontext, rip, &ld );
+@@ -2593,7 +2752,7 @@
+             if (xbp[i].rw == 1 && !write) continue;
+             if (xbp[i].addr + xbp[i].len <= ea || ea + width <= xbp[i].addr)
+                 continue;   /* the access does not overlap the watched range */
+-            if (t >= 0 && xbp_thread[t].skip_addr == rip)   /* RF: run it once, no trap */
++            if (!wow32 && t >= 0 && xbp_thread[t].skip_addr == rip)   /* RF: run it once, no trap */
+             {
+                 xbp_thread[t].skip_addr = 0;
+                 *bmask = 0;
+@@ -2610,6 +2769,7 @@
+         xbp_thread[t].step_tf = !!(efl & 0x100);
+         xbp_thread[t].deliver_bmask = *bmask;
+         xbp_set_prot( page, xbp_page[p].oldprot );
++        xbp_note_call( ucontext, t );
+         EFL_sig(ucontext) = efl | 0x100;
+         ret = 1;
+         goto done;
+@@ -2629,6 +2789,7 @@
+     xbp_thread[t].step_tf = !!(EFL_sig(ucontext) & 0x100);
+     xbp_thread[t].deliver_bmask = 0;
+     xbp_set_prot( page, xbp_page[p].oldprot );
++    xbp_note_call( ucontext, t );
+     EFL_sig(ucontext) |= 0x100;
+     ret = 1;
+ done:
+@@ -2649,6 +2810,7 @@
+     xbp_acquire();
+     if ((t = xbp_thread_slot( tid, FALSE )) >= 0 && xbp_thread[t].step_page)
+     {
++        xbp_fix_call( ucontext, t );
+         if ((p = xbp_find_page( xbp_thread[t].step_page )) >= 0)
+             xbp_set_prot( xbp_page[p].page, xbp_page[p].stripped_prot );
+         xbp_thread[t].step_page = 0;
+@@ -3094,8 +3256,20 @@
+ 
+     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
+ 
++    if (self && (flags & CONTEXT_I386_DEBUG_REGISTERS) && drbp_mode() == 3)
++    {
++        /* Rosetta refuses them (CW HACK 22131) and mode 3 keeps them in
++         * this thread-local copy, as the native context path does.  No
++         * server call: it has nothing to answer with. */
++        amd64_thread_data()->dr0 = context->Dr0;
++        amd64_thread_data()->dr1 = context->Dr1;
++        amd64_thread_data()->dr2 = context->Dr2;
++        amd64_thread_data()->dr3 = context->Dr3;
++        amd64_thread_data()->dr6 = context->Dr6;
++        amd64_thread_data()->dr7 = xbp_mask_dr7( context->Dr7 );
++    }
+     /* debug registers require a server call */
+-    if (self && (flags & CONTEXT_I386_DEBUG_REGISTERS))
++    else if (self && (flags & CONTEXT_I386_DEBUG_REGISTERS))
+         self = (amd64_thread_data()->dr0 == context->Dr0 &&
+                 amd64_thread_data()->dr1 == context->Dr1 &&
+                 amd64_thread_data()->dr2 == context->Dr2 &&
+@@ -3114,6 +3288,9 @@
+             ret = STATUS_SUCCESS;
+         }
+ #endif
++        /* mode 3: the arm is emulated here, the server declined it */
++        if (drbp_mode() == 3 && (flags & CONTEXT_I386_DEBUG_REGISTERS))
++            xbp_apply_wow64( handle, context, FALSE );
+         if (ret || !self) return ret;
+         if (flags & CONTEXT_I386_DEBUG_REGISTERS)
+         {
+@@ -3127,6 +3304,10 @@
+         if (!(flags & ~CONTEXT_I386_DEBUG_REGISTERS)) return ret;
+     }
+ 
++    /* mode 3: arm the pages the registers stand for */
++    if (drbp_mode() == 3 && (flags & CONTEXT_I386_DEBUG_REGISTERS))
++        xbp_apply_wow64( handle, context, TRUE );
++
+     if (!(wow_frame = get_cpu_area( IMAGE_FILE_MACHINE_I386 ))) return STATUS_INVALID_PARAMETER;
+ 
+     if (flags & CONTEXT_I386_INTEGER)
+@@ -3145,9 +3326,9 @@
+         wow_frame->Esp    = context->Esp;
+         wow_frame->Ebp    = context->Ebp;
+         wow_frame->Eip    = context->Eip;
+-        wow_frame->EFlags = context->EFlags;
+-        wow_frame->SegCs  = context->SegCs;
+-        wow_frame->SegSs  = context->SegSs;
++        wow_frame->EFlags = context->EFlags & (drbp_mode() == 3 ? ~0x10000u : ~0u);
++        wow_frame->SegCs  = cx_wow_seg_in_cs( context->SegCs );
++        wow_frame->SegSs  = cx_wow_seg_in_ss( context->SegSs );
+         cpu->Flags |= WOW64_CPURESERVED_FLAG_RESET_STATE;
+     }
+     if (flags & CONTEXT_I386_SEGMENTS)
+@@ -3206,6 +3387,36 @@
+ 
+     needed_flags = context->ContextFlags & ~CONTEXT_i386;
+ 
++    if ((needed_flags & CONTEXT_I386_DEBUG_REGISTERS) && drbp_mode() == 3)
++    {
++        DWORD64 dr0, dr1, dr2, dr3, dr6, dr7;
++        ULONG_PTR tid = drcache_tid( handle );
++
++        /* mode 3: the registers the server never got.  A thread armed by
++         * another thread has them in the cache; a self-armed thread has
++         * them in its own thread data. */
++        if (!drcache_get( tid, &dr0, &dr1, &dr2, &dr3, &dr6, &dr7 ))
++        {
++            BOOL self_thread = (tid == xbp_self());
++
++            dr0 = self_thread ? amd64_thread_data()->dr0 : 0;
++            dr1 = self_thread ? amd64_thread_data()->dr1 : 0;
++            dr2 = self_thread ? amd64_thread_data()->dr2 : 0;
++            dr3 = self_thread ? amd64_thread_data()->dr3 : 0;
++            dr6 = self_thread ? amd64_thread_data()->dr6 : 0;
++            dr7 = self_thread ? amd64_thread_data()->dr7 : 0;
++        }
++        context->Dr0 = dr0;
++        context->Dr1 = dr1;
++        context->Dr2 = dr2;
++        context->Dr3 = dr3;
++        context->Dr6 = dr6;
++        context->Dr7 = dr7;
++        context->ContextFlags |= CONTEXT_I386_DEBUG_REGISTERS;
++        needed_flags &= ~CONTEXT_I386_DEBUG_REGISTERS;
++        if (!needed_flags) return STATUS_SUCCESS;
++    }
++
+     /* debug registers require a server call */
+     if (needed_flags & CONTEXT_I386_DEBUG_REGISTERS) self = FALSE;
+ 
+@@ -3244,17 +3455,23 @@
+         context->Ebp    = wow_frame->Ebp;
+         context->Eip    = wow_frame->Eip;
+         context->EFlags = wow_frame->EFlags;
+-        context->SegCs  = LOWORD(wow_frame->SegCs);
+-        context->SegSs  = LOWORD(wow_frame->SegSs);
++        if (cx_wow_fault_rf)
++        {
++            context->EFlags |= 0x10000;
++            cx_wow_fault_rf = 0;
++        }
++        context->SegCs  = CXSEG( 1, 0x23, LOWORD(wow_frame->SegCs) );
++        context->SegSs  = CXSEG( 2, 0x2b, LOWORD(wow_frame->SegSs) );
+         context->ContextFlags |= CONTEXT_I386_CONTROL;
+     }
+     if (needed_flags & CONTEXT_I386_SEGMENTS)
+     {
+-        context->SegDs = ds64_sel;
+-        context->SegEs = ds64_sel;
+-        context->SegFs = amd64_thread_data()->fs;
+-        context->SegGs = ds64_sel;
++        context->SegDs = CXSEG( 4, 0x2b, ds64_sel );
++        context->SegEs = CXSEG( 8, 0x2b, ds64_sel );
++        context->SegFs = CXSEG( 16, 0x53, amd64_thread_data()->fs );
++        context->SegGs = CXSEG( 32, 0x2b, ds64_sel );
+         context->ContextFlags |= CONTEXT_I386_SEGMENTS;
++        cx_wow_seg_lie = 0;
+     }
+     if (needed_flags & CONTEXT_I386_EXTENDED_REGISTERS)
+     {
+@@ -3392,6 +3609,11 @@
+     XSAVE_AREA_HEADER *src_xs;
+     void *callback;
+ 
++    BOOL wow_guest = drbp_mode() == 3 && is_wow64() && CS_sig(sigcontext) != cs64_sel;
++
++    cx_wow_fault_rf = drbp_mode() == 3 && (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ||
++                                           rec->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION);
++
+     if (rec->ExceptionCode == EXCEPTION_SINGLE_STEP)
+     {
+         /* when single stepping can't tell whether this is a hw bp or a
+@@ -3407,6 +3629,15 @@
+             context->ContextFlags |= saved_flags;  /* restore flags */
+         }
+         context->EFlags &= ~0x100;  /* clear single-step flag */
++        if (wow_guest) cx_wow_deliver_dr6 = (context->Dr6 & 0xf) ? (DWORD)context->Dr6 : 0;
++
++        /* An execute breakpoint (Dr7 R/W = 00 for a slot whose Dr6 B bit is
++         * set) is a fault.  Windows hands the 32-bit handler its context with
++         * RF clear (tests/drbp/wow32_probe.c) and delivers the same #DB again
++         * if the handler resumes there without setting RF (tests/trapstorm
++         * phase 3b); the RF the handler sets reaches xbp_sync through the
++         * context it returns.  Nothing is arranged here.  Data breakpoints and
++         * the trap flag are traps and carry no RF either. */
+     }
+ 
+     status = send_debug_event( rec, context, TRUE, TRUE );
+@@ -3427,6 +3658,7 @@
+     stack = virtual_setup_exception( (void *)rsp, stack_size, rec );
+     stack->rec               = *rec;
+     stack->context           = *context;
++    cx_wow_seg_lie = wow_guest && drbp_mode() == 3;
+     stack->machine_frame.rip = context->Rip;
+     stack->machine_frame.rsp = context->Rsp;
+ 
+@@ -3439,6 +3671,18 @@
+         dst_xs->CompactionMask = user_shared_data->XState.CompactionEnabled ? 0x8000000000000000 | xstate_extended_features : 0;
+         copy_xstate( dst_xs, src_xs, src_xs->Mask );
+     }
++    else if (wow_guest && xstate_extended_features)
++    {
++        /* Windows hands a 32-bit handler CONTEXT_XSTATE (ContextFlags 0x1007f)
++         * with an XSTATE area behind the context.  Rosetta's signal frame has
++         * no area to point at, so give it an empty one -- Mask 0, the state
++         * all in its initial configuration -- reserved with the stack above. */
++        XSAVE_AREA_HEADER *dst_xs = (XSAVE_AREA_HEADER *)(stack + 1);
++        assert( !((ULONG_PTR)dst_xs & 63) );
++        context_init_xstate( &stack->context, dst_xs );
++        memset( dst_xs, 0, sizeof(*dst_xs) );
++        dst_xs->CompactionMask = user_shared_data->XState.CompactionEnabled ? 0x8000000000000000 | xstate_extended_features : 0;
++    }
+     else
+     {
+         context_init_xstate( &stack->context, NULL );

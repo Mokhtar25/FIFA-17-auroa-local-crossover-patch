@@ -465,6 +465,9 @@ FILES=(
   x86_64-windows/secur32.dll
   x86_64-windows/gdiplus.dll
   x86_64-windows/ole32.dll
+  # FIFA 14, a 32-bit game: GetComputerNameEx honours the _CLUSTER_NETWORK_*_
+  # environment variables, as Windows does. See patches/README.
+  i386-windows/kernelbase.dll
 )
 # One more file, added rather than replaced, so it is not in FILES: the thing
 # that makes name resolution work without touching /etc/hosts. See below.
@@ -9867,7 +9870,7 @@ done
 ok "all ${#FILES} replacement files present in CrossOver, and the ws2_32.so we edit"
 
 # Keeping CrossOver's own permissions is the one step with nothing to fall back
-# on, and it runs at the very end -- after 2 GB has been copied and nine files
+# on, and it runs at the very end -- after 2 GB has been copied and ten files
 # replaced. Read them from the original now, while nothing has happened yet, so
 # a CrossOver that cannot supply them stops here instead of there.
 PRE_ENT="$(mktemp -t cxpre)"
@@ -10065,7 +10068,7 @@ say ""
 if [ "$IN_PLACE" = "1" ]; then
     say "2. Using your real CrossOver (AURORA_IN_PLACE=1)"
     say "        This changes every bottle you run in CrossOver, not just FIFA."
-    say "        ./uninstall.sh puts the nine files back, but it cannot restore"
+    say "        ./uninstall.sh puts the ten files back, but it cannot restore"
     say "        CodeWeavers' own signature -- only reinstalling CrossOver does."
 else
     say "2. Making a separate CrossOver for FIFA"
@@ -10109,8 +10112,8 @@ rm -f "$PROBE"
 
 # ------------------------------------------------------------- 3. backup
 # Only in-place installs can ever use these. The default install is undone by
-# deleting the whole copy, so writing .orig files into it would be nine pointless
-# writes and nine more things to go wrong.
+# deleting the whole copy, so writing .orig files into it would be ten pointless
+# writes and ten more things to go wrong.
 say ""
 if [ "$IN_PLACE" = "1" ]; then
     say "3. Backing up the files we replace"

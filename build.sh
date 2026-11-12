@@ -127,6 +127,20 @@ PATCHES=(
 # every bottle, same value). Made against the tree with all three above.
 [ -f "$HERE/patches/crossover-26.3-drtrap-syscall-stub.patch" ] \
     && PATCHES+=( crossover-26.3-drtrap-syscall-stub.patch )
+# And mode 3 for 32-bit programs: FIFA 14 is a wow64 guest and its protector's
+# debug registers went through set_thread_wow64_context, which asked the server
+# and got "not supported under Rosetta" -- so the registers were dropped and
+# the protection failed with 3000. The same patch makes the 32-bit context
+# match what Windows reports (Dr7's legal bits, Dr6 cleared after a delivery,
+# RF on faults), all gated on mode 3. Made against the tree with all above.
+[ -f "$HERE/patches/crossover-26.3-wow64-debug-registers.patch" ] \
+    && PATCHES+=( crossover-26.3-wow64-debug-registers.patch )
+# A section marked writable with no raw data is demand-zero: Windows backs it
+# with private pages and reports a plain writable protection, Wine reported
+# copy-on-write. Nothing to do with debug registers; it is the shape of a
+# packed image's unpack target section. See patches/README-debug-register-emulation.md.
+[ -f "$HERE/patches/crossover-26.3-image-demand-zero-protect.patch" ] \
+    && PATCHES+=( crossover-26.3-image-demand-zero-protect.patch )
 # Last, the game profiles: each process picks CX_DR_TRAP, CX_TOPDOWN_LIMIT and
 # CX_FIFA16_DSTFIX by its main exe's name instead of taking the bottle's, so
 # one launcher bottle can start FIFA 15, 16, 17 and 21 each with its own. It
@@ -154,6 +168,12 @@ PATCHES=(
 # FIFA 21 up. See the patch header.
 [ -f "$HERE/patches/crossover-26.3-aurora-elevate.patch" ] \
     && PATCHES+=( crossover-26.3-aurora-elevate.patch )
+# For FIFA 14: GetComputerNameEx takes the name from the _CLUSTER_NETWORK_*_
+# environment variables when they are set, as Windows does. Wine ignored them.
+# kernelbase only, and the game is 32-bit, so this one is built as a 32-bit DLL
+# (BUILD32 below). See the patch header.
+[ -f "$HERE/patches/crossover-26.3-computername-env-override.patch" ] \
+    && PATCHES+=( crossover-26.3-computername-env-override.patch )
 
 # What `make` is asked for, and where each artefact ends up in fixes/.
 TARGETS=(
@@ -174,6 +194,12 @@ BUILD_WIN32U=""
 [ -f "$HERE/patches/crossover-26.3-win32u-shm-flush-under-user-lock.patch" ] && BUILD_WIN32U=1
 [ -f "$HERE/patches/crossover-26.3-drtrap-syscall-stub.patch" ] && BUILD_WIN32U=1
 [ -n "$BUILD_WIN32U" ] && TARGETS+=( dlls/win32u/all )
+# 32-bit Windows DLLs come out of a second build directory, build32, which is
+# configured with the i386 PE architecture as well. Only made when a patch
+# needs one: the unix half and the 64-bit DLLs still come from build64.
+TARGETS32=()
+[ -f "$HERE/patches/crossover-26.3-computername-env-override.patch" ] \
+    && TARGETS32+=( dlls/kernelbase/i386-windows/kernelbase.dll )
 
 # The compiler for the unix half. The architecture is named here, not left to
 # "arch -x86_64" (see check_deps for why that stopped being enough).
@@ -254,7 +280,7 @@ check_deps() {
 
     # cx-certutil.exe is built for both Windows architectures.
     if command -v i686-w64-mingw32-gcc >/dev/null 2>&1; then
-        ok "mingw-w64 for 32-bit Windows (builds the 32-bit cx-certutil.exe)"
+        ok "mingw-w64 for 32-bit Windows (builds the 32-bit cx-certutil.exe and kernelbase.dll)"
     else
         bad "no i686-w64-mingw32-gcc:  brew install mingw-w64"
         missing=1
@@ -456,6 +482,21 @@ fi
 ( cd "$WINE/build64" && arch -x86_64 make -j"$JOBS" $MAKE_ARGS $TARGETS ) \
     || fail "The build failed. The error is above."
 ok "built"
+if [ "${#TARGETS32}" -ne 0 ]; then
+    if [ -f "$WINE/build32/Makefile" ]; then
+        note "build32 is already configured — reusing it"
+    else
+        mkdir -p "$WINE/build32"
+        ( cd "$WINE/build32" && arch -x86_64 ../configure \
+            --cache-file=/dev/null --enable-win64 --enable-archs=i386,x86_64 --with-mingw \
+            --without-freetype --disable-tests "BISON=$BISON" "CC=$UNIX_CC" >/dev/null ) \
+            || fail "configure for the 32-bit DLLs failed. Its output is in $WINE/build32/config.log."
+        ok "configured build32 (32-bit Windows DLLs)"
+    fi
+    ( cd "$WINE/build32" && arch -x86_64 make -j"$JOBS" "CC=$UNIX_CC" $TARGETS32 ) \
+        || fail "The 32-bit build failed. The error is above."
+    ok "built the 32-bit DLLs"
+fi
 
 # ---------------------------------------------------------- 6. collect them
 say ""
@@ -501,6 +542,16 @@ collect dlls/secur32/secur32.dll                x86_64-windows/secur32.dll
     && collect dlls/ole32/ole32.dll                 x86_64-windows/ole32.dll
 [ -n "$BUILD_WIN32U" ] \
     && collect dlls/win32u/win32u.so                x86_64-unix/win32u.so
+# The 32-bit DLLs, out of build32. Stripped: the debug information is more than
+# half the file and nothing at run time reads it.
+for t in $TARGETS32; do
+    mkdir -p "$OUT/i386-windows"
+    [ -f "$WINE/build32/$t" ] || fail "$t was not built. Look for it above."
+    cp "$WINE/build32/$t" "$OUT/i386-windows/${t:t}"
+    i686-w64-mingw32-strip "$OUT/i386-windows/${t:t}" \
+        || fail "Could not strip i386-windows/${t:t}."
+    ok "i386-windows/${t:t}"
+done
 
 # a17hosts.dylib is ours outright, not a patched Wine component, so it needs
 # none of the above -- just clang. -arch x86_64 matches ws2_32.so, which is the
@@ -595,7 +646,7 @@ say ""
 say "12. Comparing with the files this package ships"
 say ""
 ( cd "$OUT" && shasum -a 256 x86_64-unix/*.so x86_64-unix/*.dylib x86_64-windows/*.dll \
-                             x86_64-windows/*.exe i386-windows/*.exe ) \
+                             x86_64-windows/*.exe i386-windows/*.exe i386-windows/*.dll(N) ) \
     > "$OUT/SHA256SUMS.built"
 
 same=0; differ=0

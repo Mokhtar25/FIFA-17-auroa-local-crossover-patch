@@ -1,0 +1,18 @@
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3245,7 +3245,14 @@
+             size = ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+ 
+         if (sec[i].Characteristics & IMAGE_SCN_MEM_READ)    vprot |= VPROT_READ;
+-        if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
++        /* A writable section with no raw data is demand-zero: there is no file content
++         * behind it, so Windows backs it with private pages and VirtualQuery reports a
++         * plain writable protection, never a copy-on-write one.  Marking it WRITECOPY
++         * makes Wine report PAGE_EXECUTE_WRITECOPY where Windows reports
++         * PAGE_EXECUTE_READWRITE -- which is exactly the shape of the unpack target
++         * section of a packed executable (UPX and friends). */
++        if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)
++            vprot |= sec[i].SizeOfRawData ? VPROT_WRITECOPY : VPROT_WRITE;
+         if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
+ 
+         if (!set_vprot( view, ptr + sec[i].VirtualAddress, size, vprot ) && (vprot & VPROT_EXEC))

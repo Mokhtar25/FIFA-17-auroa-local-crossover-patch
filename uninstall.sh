@@ -155,6 +155,7 @@ FILES=(
   x86_64-windows/secur32.dll
   x86_64-windows/gdiplus.dll     # FIFA 15 profile only; restored when a backup exists
   x86_64-windows/ole32.dll       # RebornFUT launcher; restored when a backup exists
+  i386-windows/kernelbase.dll    # FIFA 14; restored when a backup exists
 )
 
 say ""
