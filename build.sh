@@ -271,16 +271,16 @@ check_deps() {
     fi
 
     if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-        ok "mingw-w64 (builds the .dll half, cas-powershell.exe, cx-ipconfig.exe and cx-certutil.exe)"
+        ok "mingw-w64 (builds the .dll half, cas-powershell.exe, cx-ipconfig.exe, cx-certutil.exe and cx-tasklist.exe)"
     else
         bad "no x86_64-w64-mingw32-gcc. Without it --with-mingw fails and"
         say "        you get no Windows-side DLLs at all:  brew install mingw-w64"
         missing=1
     fi
 
-    # cx-certutil.exe is built for both Windows architectures.
+    # cx-certutil.exe and cx-tasklist.exe are built for both Windows architectures.
     if command -v i686-w64-mingw32-gcc >/dev/null 2>&1; then
-        ok "mingw-w64 for 32-bit Windows (builds the 32-bit cx-certutil.exe and kernelbase.dll)"
+        ok "mingw-w64 for 32-bit Windows (builds the 32-bit cx-certutil.exe, cx-tasklist.exe and kernelbase.dll)"
     else
         bad "no i686-w64-mingw32-gcc:  brew install mingw-w64"
         missing=1
@@ -630,7 +630,7 @@ ok "cx-ipconfig.exe"
 # (see the top of fixes/cx-certutil.c). FIFA 12 is a 32-bit game and its setup
 # reaches syswow64's as well as system32's.
 say ""
-say "11. Building cx-certutil.exe, 64-bit and 32-bit"
+say "11. Building cx-certutil.exe and cx-tasklist.exe, 64-bit and 32-bit"
 [ -f "$HERE/fixes/cx-certutil.c" ] || fail "fixes/cx-certutil.c is missing from this package."
 mkdir -p "$OUT/i386-windows"
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
@@ -640,6 +640,19 @@ i686-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
       -o "$OUT/i386-windows/cx-certutil.exe" "$HERE/fixes/cx-certutil.c" -lcrypt32 \
     || fail "the 32-bit cx-certutil.exe did not build."
 ok "cx-certutil.exe"
+
+# cx-tasklist.exe, the same way and for both architectures too: the
+# tasklist.exe that answers Aurora 12's "Not Responding" filter (see the top
+# of fixes/cx-tasklist.c). Aurora's helper is 32-bit, so syswow64's is the one
+# it runs.
+[ -f "$HERE/fixes/cx-tasklist.c" ] || fail "fixes/cx-tasklist.c is missing from this package."
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
+      -o "$OUT/x86_64-windows/cx-tasklist.exe" "$HERE/fixes/cx-tasklist.c" \
+    || fail "the 64-bit cx-tasklist.exe did not build."
+i686-w64-mingw32-gcc -O2 -Wall -Wextra -municode -s -Wl,--no-insert-timestamp \
+      -o "$OUT/i386-windows/cx-tasklist.exe" "$HERE/fixes/cx-tasklist.c" \
+    || fail "the 32-bit cx-tasklist.exe did not build."
+ok "cx-tasklist.exe"
 
 # -------------------------------------------------------- 12. the comparison
 say ""

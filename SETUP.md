@@ -1508,7 +1508,9 @@ other games' (`FIFA12_DIR='/path/to/FIFA 12'`, **Choose game folders**,
   script: under Wine it made the menus drop to about 5 fps while they loaded;
 - `certutil.exe` stand-ins in `system32` and `syswow64` (Wine's is a stub, and
   Aurora 12's setup needs the certificate in the Root store). Wine's are kept
-  as `certutil.exe.wine-stub`;
+  as `certutil.exe.wine-stub`. The stand-in has `-addstore`, `-delstore`,
+  `-store` and `-verifystore`, and reads the store back before it reports
+  success;
 - `tasklist.exe` stand-ins in `system32` and `syswow64`. Wine's ignores the
   "Not Responding" filter, so Aurora 12's helper took a running game for a
   hung one and froze it twice in the first minute to take its stacks. Wine's
