@@ -79,19 +79,23 @@ Pick one:
 
 | I want | Double-click |
 |---|---|
-| Every game it finds, online (FIFA 17, 15, 16, 21, and 20 with REFUT) | **START HERE.command** |
+| Every game it finds, online (FIFA 17, 15, 16, 21, 12, and 20 with REFUT) | **START HERE.command** |
 | Single player only, no Aurora17 | **START HERE offline.command** |
 | Both games, in the bottle your Aurora launcher is in | **Both games.command** |
 | FIFA 15 only (makes the copy first if it is not there) | **FIFA 15.command** |
 | FIFA 16 (makes the copy first if it is not there) | **FIFA 16.command** |
 | FIFA 12 from Aurora 12 (needs the Aurora launcher in its bottle first) | **FIFA 12.command** |
+| FIFA 14, offline only, experimental (sets it up and starts it) | **FIFA 14.command** |
 
 START HERE sets up every game it finds (Aurora's record, a saved choice,
 Downloads, your drives), each in the bottle it is played from: FIFA 15 where
 your Aurora launcher is, FIFA 21 and FIFA 12 with FIFA 17, FIFA 16 in its own,
 and FIFA 20 in its own when REFUT is here (`REFUT Launcher.exe` in Downloads, or REFUT
 installed in a bottle). No FIFA 17?
-Choose **Skip FIFA 17** when it asks, and the other games are still set up.
+Choose **Skip FIFA 17** when it asks: that skips FIFA 17 only. START HERE then
+lists the other games it did not find (FIFA 12, 15, 16, 21); select the ones
+you have and choose each one's folder, or skip them. Skipping one game never
+skips another.
 One game failing never stops the others; the games list at the end says
 which game is set up, which was not found, and which is not finished.
 **Choose game folders.command** adds a game it did not find.

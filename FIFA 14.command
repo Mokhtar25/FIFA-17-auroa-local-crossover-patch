@@ -6,7 +6,8 @@
 #
 # Environment: FIFA14_BOTTLE (default Aurora17), FIFA14_DIR (the folder with
 # fifa14.exe in it; asked for when it cannot be found), FIFA14_SKIP_SETUP=1
-# (do not run setup.sh, only the setting and the start).
+# (do not run setup.sh, only the setting and the start), FIFA14_FORCE_SETUP=1
+# (run setup.sh even when the copy already has this package's files).
 
 cd "${0:A:h}" || exit 1
 xattr -dr com.apple.quarantine . 2>/dev/null || true
@@ -34,7 +35,25 @@ BOTTLES="$HOME/Library/Application Support/CrossOver/Bottles"
 APP=/Applications/CrossOver-FIFA.app
 [ -d "$APP" ] || { [ -d "$HOME/Applications/CrossOver-FIFA.app" ] && APP="$HOME/Applications/CrossOver-FIFA.app"; }
 
+# What the copy has to carry for FIFA 14: this package's 32-bit kernelbase.dll.
+# It goes in with every other fix file, so a copy that has it has had this
+# package's install or repair.
+kb_is_ours() {
+    local want have
+    want="$(awk '$2=="i386-windows/kernelbase.dll"{print $1}' fixes/SHA256SUMS)"
+    have="$(shasum -a 256 "$1/Contents/SharedSupport/CrossOver/lib/wine/i386-windows/kernelbase.dll" 2>/dev/null | awk '{print $1}')"
+    [ -n "$want" ] && [ "$have" = "$want" ]
+}
+
 # 1. The copy and its fix files (the new 32-bit kernelbase.dll among them).
+# Not again on every start: a repair quits CrossOver and goes through every
+# game, which is no way to start one. Only when the copy lacks the files.
+if [ "${FIFA14_SKIP_SETUP:-0}" != 1 ] && [ "${FIFA14_FORCE_SETUP:-0}" != 1 ] \
+   && [ -d "$APP" ] && kb_is_ours "$APP"; then
+    say "1. ${APP:t} already has this package's fix files, so setup is not run again"
+    say "   (to run it anyway:  FIFA14_FORCE_SETUP=1 ./'FIFA 14.command')"
+    FIFA14_SKIP_SETUP=1
+fi
 if [ "${FIFA14_SKIP_SETUP:-0}" != 1 ]; then
     if [ -d "$APP" ]; then
         say "1. Bringing the fix files in ${APP:t} up to date (./setup.sh --repair)"
@@ -50,10 +69,7 @@ if [ "${FIFA14_SKIP_SETUP:-0}" != 1 ]; then
 fi
 [ -d "$APP" ] || fail "No CrossOver-FIFA copy was found. Run \"START HERE.command\" first."
 
-KB="$APP/Contents/SharedSupport/CrossOver/lib/wine/i386-windows/kernelbase.dll"
-want="$(awk '$2=="i386-windows/kernelbase.dll"{print $1}' fixes/SHA256SUMS)"
-have="$(shasum -a 256 "$KB" 2>/dev/null | awk '{print $1}')"
-[ -n "$want" ] && [ "$have" = "$want" ] \
+kb_is_ours "$APP" \
     || fail "${APP:t} does not have FIFA 14's kernelbase.dll. Run this again; if it repeats, send the window's text."
 say "${GRN}ok${OFF}    ${APP:t} has FIFA 14's kernelbase.dll"
 
