@@ -1995,6 +1995,7 @@ class SharedBottleTests(unittest.TestCase):
     # ------------------------------------------------- FIFA 12 (--fifa12)
 
     CERT_STUB = b"MZ Wine's own certutil stub"
+    TASKLIST_OWN = b"MZ Wine's own tasklist"
     F12_DEFAULT_INI = (b"RESOLUTIONWIDTH = 800\r\nRESOLUTIONHEIGHT = 600\r\n"
                        b"ASPECTRATIO = 1.33333\r\nRENDERINGQUALITY = 1\r\n")
 
@@ -2007,6 +2008,7 @@ class SharedBottleTests(unittest.TestCase):
         for sys_dir in ("system32", "syswow64"):
             (root / "drive_c/windows" / sys_dir).mkdir(parents=True, exist_ok=True)
             (root / "drive_c/windows" / sys_dir / "certutil.exe").write_bytes(self.CERT_STUB)
+            (root / "drive_c/windows" / sys_dir / "tasklist.exe").write_bytes(self.TASKLIST_OWN)
         game = self.work / "Downloads/FIFA 12"
         (game / "Game/fifasetup").mkdir(parents=True, exist_ok=True)
         (game / "Game/fifa.exe").write_bytes(b"MZ")
@@ -2044,7 +2046,8 @@ class SharedBottleTests(unittest.TestCase):
             "# ------------------------------------------------- the launch that is watched", 1)[0]
         for path in ("aurora17/powershell.exe", "fixes/x86_64-windows/cas-powershell.exe",
                      "fixes/x86_64-unix/cx-fifa17-gate", "fixes/x86_64-windows/cx-certutil.exe",
-                     "fixes/i386-windows/cx-certutil.exe"):
+                     "fixes/i386-windows/cx-certutil.exe", "fixes/x86_64-windows/cx-tasklist.exe",
+                     "fixes/i386-windows/cx-tasklist.exe"):
             (self.work / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / path, self.work / path)
         script = self.work / "setup12.sh"
@@ -2085,6 +2088,12 @@ class SharedBottleTests(unittest.TestCase):
             self.assertEqual(f.read_bytes(),
                              (ROOT / f"fixes/{arch}-windows/cx-certutil.exe").read_bytes())
             self.assertEqual(f.with_name("certutil.exe.wine-stub").read_bytes(), self.CERT_STUB)
+            # tasklist the same way; Wine's own is what the stand-in runs for
+            # every command line but the Not Responding filter.
+            f = root / "drive_c/windows" / sys_dir / "tasklist.exe"
+            self.assertEqual(f.read_bytes(),
+                             (ROOT / f"fixes/{arch}-windows/cx-tasklist.exe").read_bytes())
+            self.assertEqual(f.with_name("tasklist.exe.wine-stub").read_bytes(), self.TASKLIST_OWN)
         # The debugger: only x86/, Visualizers off, nothing left behind.
         dbg = root / "drive_c/Program Files (x86)/Windows Kits/10/Debuggers"
         self.assertTrue((dbg / "x86/cdb.exe").is_file())
@@ -2118,6 +2127,8 @@ class SharedBottleTests(unittest.TestCase):
         self.assertIn("VERDICT=done", again.stdout)
         for line in ("certutil.exe in system32 — already the stand-in",
                      "certutil.exe in syswow64 — already the stand-in",
+                     "tasklist.exe in system32 — already the stand-in",
+                     "tasklist.exe in syswow64 — already the stand-in",
                      "PowerShell stand-in — already in the Aurora17 bottle",
                      "cdb.exe — already in the Aurora17 bottle",
                      "for cdb.exe — already set", "Install Dir — already Z:",
@@ -2130,6 +2141,7 @@ class SharedBottleTests(unittest.TestCase):
         verify = self.verify_fifa12(app)
         for line in ("ok    CX_LOWPORT", "ok    PowerShell stand-in in the bottle",
                      "ok    certutil stand-in in system32 and syswow64",
+                     "ok    tasklist stand-in in system32 and syswow64",
                      "ok    Microsoft's 32-bit debugger (cdb.exe) in the bottle",
                      "for cdb.exe", "in both registry views", "ok    fifasetup.ini in",
                      "ok    the Aurora launcher is in the Aurora17 bottle",
@@ -2149,6 +2161,7 @@ class SharedBottleTests(unittest.TestCase):
         for line in ("CX_LOWPORT is not set to 1 in the Aurora17 bottle",
                      "no PowerShell stand-in, so Aurora 12's helper",
                      "certutil.exe is not the shipped stand-in",
+                     "tasklist.exe is not the shipped stand-in",
                      "Microsoft's 32-bit debugger is not in the Aurora17 bottle",
                      "cdb.exe does not prefer Microsoft's own DLLs",
                      "EA Sports\\FIFA 12 Install Dir is not Z:",
@@ -2301,7 +2314,8 @@ EOF
 
     def test_fifa12_prebuilt_files_are_listed_and_not_microsofts(self):
         sums = (ROOT / "fixes/SHA256SUMS").read_text()
-        for name in ("x86_64-windows/cx-certutil.exe", "i386-windows/cx-certutil.exe"):
+        for name in ("x86_64-windows/cx-certutil.exe", "i386-windows/cx-certutil.exe",
+                     "x86_64-windows/cx-tasklist.exe", "i386-windows/cx-tasklist.exe"):
             self.assertIn(hashlib.sha256((ROOT / "fixes" / name).read_bytes()).hexdigest()
                           + "  " + name, sums)
         self.assertEqual(sorted(p.name for p in ROOT.rglob("cdb.exe")), [])

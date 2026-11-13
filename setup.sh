@@ -7025,6 +7025,9 @@ f21_check_game() {
 #   2. certutil.exe (fixes/cx-certutil.c), 64-bit and 32-bit. Wine's is a stub
 #      that does nothing, so Aurora 12's setup said NOT READY: the local
 #      certificate never reached the Root store;
+#   2a. tasklist.exe (fixes/cx-tasklist.c), 64-bit and 32-bit. Wine's ignores
+#      the "Not Responding" filter, so Aurora 12's helper took a running game
+#      for a hung one and stopped it twice, 5 to 10 s each, to take its stacks;
 #   3. CX_LOWPORT=1 (BOTTLE_SETTINGS), because the forwarder binds
 #      127.0.0.1:80 and 443;
 #   4. Microsoft's 32-bit debugger, cdb.exe, which we may not ship and so is
@@ -7040,6 +7043,8 @@ f21_check_game() {
 # step 7, so CrossOver has to be quit, which setup.sh makes sure of.
 F12_CERTUTIL_64="$HERE/fixes/x86_64-windows/cx-certutil.exe"
 F12_CERTUTIL_32="$HERE/fixes/i386-windows/cx-certutil.exe"
+F12_TASKLIST_64="$HERE/fixes/x86_64-windows/cx-tasklist.exe"
+F12_TASKLIST_32="$HERE/fixes/i386-windows/cx-tasklist.exe"
 F12_DBG_DLLS=( dbgeng dbgmodel dbgcore dbghelp )
 F12_WINDBG_APPINSTALLER='https://windbg.download.prss.microsoft.com/dbazure/prod/1-0-0/windbg.appinstaller'
 F12_WINDBG_MSIX=windbg_win-x64.msix
@@ -7049,6 +7054,8 @@ F12_REG_SECTIONS=( '[Software\\Wow6432Node\\EA Sports\\FIFA 12]' '[Software\\EA 
 
 f12_certutil_64() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/certutil.exe"; }
 f12_certutil_32() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/syswow64/certutil.exe"; }
+f12_tasklist_64() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/tasklist.exe"; }
+f12_tasklist_32() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/windows/syswow64/tasklist.exe"; }
 f12_cdb() { print -r -- "$BOTTLE_DIR/$BOTTLE/drive_c/Program Files (x86)/Windows Kits/10/Debuggers/x86/cdb.exe"; }
 
 f12_certutil_ok() {
@@ -7056,39 +7063,52 @@ f12_certutil_ok() {
         && cmp -s "$F12_CERTUTIL_32" "$(f12_certutil_32)" 2>/dev/null
 }
 
-# One certutil.exe over Wine's, whose stub is kept once as .wine-stub, as
-# install_refut_ipconfig keeps ipconfig.exe's. <stand-in> <file in the bottle>
-f12_put_certutil() {
-    local src="$1" f="$2" arch="${2:h:t}"
+f12_tasklist_ok() {
+    cmp -s "$F12_TASKLIST_64" "$(f12_tasklist_64)" 2>/dev/null \
+        && cmp -s "$F12_TASKLIST_32" "$(f12_tasklist_32)" 2>/dev/null
+}
+
+# One stand-in over Wine's own program, which is kept once as .wine-stub, as
+# install_refut_ipconfig keeps ipconfig.exe's. The tasklist stand-in runs the
+# kept one for everything but its one filter. <name> <stand-in> <file in the bottle>
+f12_put_standin() {
+    local name="$1" src="$2" f="$3" arch="${3:h:t}"
     if cmp -s "$src" "$f" 2>/dev/null; then
-        ok "certutil.exe in $arch — already the stand-in"
+        ok "$name.exe in $arch — already the stand-in"
         return 0
     fi
     if [ ! -d "${f:h}" ]; then
-        note "the $BOTTLE bottle has no $arch folder to put certutil.exe in"
+        note "the $BOTTLE bottle has no $arch folder to put $name.exe in"
         return 1
     fi
     if [ -f "$f" ] && [ ! -f "$f.wine-stub" ]; then
         cp -X "$f" "$f.wine-stub" || {
-            note "could not keep the bottle's own certutil.exe in $arch, so it was left as it is"
+            note "could not keep the bottle's own $name.exe in $arch, so it was left as it is"
             say "        Quit CrossOver completely and run ./setup.sh --fifa12 again."
             return 1
         }
     fi
     cp -X "$src" "$f" || {
-        note "could not write the certutil stand-in into $arch in the $BOTTLE bottle"
+        note "could not write the $name stand-in into $arch in the $BOTTLE bottle"
         say "        Quit CrossOver completely and run ./setup.sh --fifa12 again."
         return 1
     }
-    ok "certutil.exe in $arch is now the stand-in"
-    [ -f "$f.wine-stub" ] && say "        (Wine's own is kept beside it as certutil.exe.wine-stub)"
+    ok "$name.exe in $arch is now the stand-in"
+    [ -f "$f.wine-stub" ] && say "        (Wine's own is kept beside it as $name.exe.wine-stub)"
     return 0
 }
 
 f12_install_certutil() {
     local rc=0
-    f12_put_certutil "$F12_CERTUTIL_64" "$(f12_certutil_64)" || rc=1
-    f12_put_certutil "$F12_CERTUTIL_32" "$(f12_certutil_32)" || rc=1
+    f12_put_standin certutil "$F12_CERTUTIL_64" "$(f12_certutil_64)" || rc=1
+    f12_put_standin certutil "$F12_CERTUTIL_32" "$(f12_certutil_32)" || rc=1
+    return $rc
+}
+
+f12_install_tasklist() {
+    local rc=0
+    f12_put_standin tasklist "$F12_TASKLIST_64" "$(f12_tasklist_64)" || rc=1
+    f12_put_standin tasklist "$F12_TASKLIST_32" "$(f12_tasklist_32)" || rc=1
     return $rc
 }
 
@@ -7364,6 +7384,9 @@ f12_install() {
     say "9. Installing the certutil stand-in Aurora 12's setup needs"
     f12_install_certutil || F12_OK=0
     say ""
+    say "9e. Installing the tasklist stand-in, so Aurora 12 does not stop a running game"
+    f12_install_tasklist || F12_OK=0
+    say ""
     say "9a. Letting Microsoft's debugger load its own DLLs"
     if [ ! -f "$(bottle_user_reg)" ]; then
         note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once, then run this again"
@@ -7417,6 +7440,7 @@ f12_install() {
 f12_first_missing() {
     if ! gt_powershell_ok; then print -r -- "PowerShell stand-in"
     elif ! f12_certutil_ok; then print -r -- "certutil stand-in"
+    elif ! f12_tasklist_ok; then print -r -- "tasklist stand-in"
     elif [ "$(conf_value CX_LOWPORT)" != 1 ]; then print -r -- "CX_LOWPORT=1"
     elif [ ! -f "$(f12_cdb)" ]; then print -r -- "32-bit debugger"
     elif ! f12_cdb_overrides_set; then print -r -- "cdb.exe overrides"
@@ -7442,6 +7466,14 @@ f12_verify() {
     else
         bad "the $BOTTLE bottle's certutil.exe is not the shipped stand-in, so Aurora 12's"
         say "        setup reports NOT READY. Quit CrossOver fully, then re-run ./setup.sh --fifa12"
+        F12_PROBLEMS=$((F12_PROBLEMS+1))
+    fi
+    if f12_tasklist_ok; then
+        ok "tasklist stand-in in system32 and syswow64"
+    else
+        bad "the $BOTTLE bottle's tasklist.exe is not the shipped stand-in, so Aurora 12 takes"
+        say "        a running game for a hung one and freezes it twice in the first minute or so."
+        say "        Quit CrossOver fully, then re-run ./setup.sh --fifa12"
         F12_PROBLEMS=$((F12_PROBLEMS+1))
     fi
     if [ -f "$(f12_cdb)" ]; then

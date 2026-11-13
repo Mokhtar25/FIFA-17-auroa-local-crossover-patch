@@ -399,18 +399,18 @@ if [ -d "$F20_SYS" ]; then
         "$HERE/fixes/x86_64-windows/cx-ipconfig.exe" "the ipconfig stand-in"
 fi
 
-# --------------------------------------------------- FIFA 12's certutil
-# setup.sh --fifa12 replaced Wine's certutil.exe in system32 and syswow64 in
-# this bottle. Each comes out only while it is still the file setup.sh put
+# ------------------------------------- FIFA 12's certutil and tasklist
+# setup.sh --fifa12 replaced Wine's certutil.exe and tasklist.exe in system32
+# and syswow64 in this bottle. Each comes out only while it is still the file setup.sh put
 # there, and Wine's own, kept beside it as .wine-stub, goes back.
 f12_put_back() {  # <file> <shipped stand-in>
     [ -f "$1" ] && cmp -s "$2" "$1" || return 0
     if [ -f "$1.wine-stub" ]; then
         mv -f "$1.wine-stub" "$1"
-        ok "put Wine's own certutil.exe back in ${1:h:t} in the $BOTTLE bottle"
+        ok "put Wine's own ${1:t} back in ${1:h:t} in the $BOTTLE bottle"
     else
         rm -f "$1"
-        ok "removed the certutil stand-in from ${1:h:t} in the $BOTTLE bottle"
+        ok "removed the ${1:t:r} stand-in from ${1:h:t} in the $BOTTLE bottle"
     fi
     undone=$((undone+1))
 }
@@ -418,6 +418,10 @@ f12_put_back "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/certutil.exe" \
     "$HERE/fixes/x86_64-windows/cx-certutil.exe"
 f12_put_back "$BOTTLE_DIR/$BOTTLE/drive_c/windows/syswow64/certutil.exe" \
     "$HERE/fixes/i386-windows/cx-certutil.exe"
+f12_put_back "$BOTTLE_DIR/$BOTTLE/drive_c/windows/system32/tasklist.exe" \
+    "$HERE/fixes/x86_64-windows/cx-tasklist.exe"
+f12_put_back "$BOTTLE_DIR/$BOTTLE/drive_c/windows/syswow64/tasklist.exe" \
+    "$HERE/fixes/i386-windows/cx-tasklist.exe"
 
 # An explicit AURORA_DIR, or the folder recorded at install time, means that
 # folder and no other. Only fall back to searching when we have neither.

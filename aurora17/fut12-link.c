@@ -778,6 +778,31 @@ static char *f12_replace(char *s, const char *tok, const char *with)
     return (char *)o.p;
 }
 
+/* Aurora's debugger script carries diagnostic breakpoints that change nothing
+ * in the game. One sits on the game's zlib call and fires for every asset the
+ * menus load; under Wine each stop is a trip through wineserver and cdb, and
+ * the menus drop to about 5 fps while it lasts. Lines starting with one of
+ * these are left out of the script cdb is given. */
+static char *f12_drop_lines(char *s)
+{
+    static const char *const drop[] = { "bp 0x00b7e190 " };
+    f12buf o = {0};
+    char *line, *next;
+    size_t i;
+    for (line = s; *line; line = next)
+    {
+        size_t len;
+        next = strchr(line, '\n');
+        len = next ? (size_t)(++next - line) : strlen(line);
+        if (!next) next = line + len;
+        for (i = 0; i < sizeof(drop) / sizeof(drop[0]); i++)
+            if (!strncmp(line, drop[i], strlen(drop[i]))) break;
+        if (i == sizeof(drop) / sizeof(drop[0])) bput(&o, line, len);
+    }
+    bput(&o, "", 1);
+    return (char *)o.p;
+}
+
 /* launch_fifa.ps1 -PatchScript <file> -Display <mode> -TunnelServer <addr>
  * The parts of it that mean anything in a bottle: hosts, the resolution, the
  * tokens in the debugger script, EALaunchCode, the game under cdb, and the wait.
@@ -842,6 +867,7 @@ static int fut12_launch(const wchar_t *script, int argc, wchar_t **argv)
             raw = f12_replace(raw, files[k].tok, val);
         }
     }
+    raw = f12_drop_lines(raw);
     _snwprintf(run, MAX_PATH, L"%s\\cdb_run.txt", here);
     if (!f12_write(run, raw, strlen(raw))) return fail_code(1, L"launch_fifa: could not write %s", run);
 

@@ -1503,10 +1503,17 @@ other games' (`FIFA12_DIR='/path/to/FIFA 12'`, **Choose game folders**,
 
 - the PowerShell stand-in, which answers the helper's `-EncodedCommand` steps.
   Wine has no VPN stack, so the helper's dial fails and its own app-link
-  fallback carries the game over TLS;
+  fallback carries the game over TLS. It also leaves one diagnostic
+  breakpoint (`bp 0x00b7e190`, on the game's zlib call) out of the debugger
+  script: under Wine it made the menus drop to about 5 fps while they loaded;
 - `certutil.exe` stand-ins in `system32` and `syswow64` (Wine's is a stub, and
   Aurora 12's setup needs the certificate in the Root store). Wine's are kept
   as `certutil.exe.wine-stub`;
+- `tasklist.exe` stand-ins in `system32` and `syswow64`. Wine's ignores the
+  "Not Responding" filter, so Aurora 12's helper took a running game for a
+  hung one and froze it twice in the first minute to take its stacks. Wine's
+  are kept as `tasklist.exe.wine-stub`, and the stand-in runs them for every
+  other command line;
 - `CX_LOWPORT=1`, because the forwarder binds `127.0.0.1:80` and `443`;
 - Microsoft's 32-bit debugger, `cdb.exe`, with its four DLLs set to
   `native,builtin` for `cdb.exe` only. It is downloaded from Microsoft, about
