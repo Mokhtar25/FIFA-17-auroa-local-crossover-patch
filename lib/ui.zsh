@@ -68,3 +68,23 @@ EOS
     [ -n "$answer" ] || return 1
     print -r -- "$answer"
 }
+
+# Several games from a list: <title> <prompt> <ok button> <cancel button>
+# <game>... Prints the ones picked, one per line. Fails when none is picked or
+# the list is cancelled.
+ui_pick_games() {
+    ui_gui_ok || return 1
+    local answer
+    answer="$(osascript - "$@" 2>/dev/null <<'EOS'
+on run argv
+    set games to items 5 thru -1 of argv
+    set pickedGames to choose from list games with title (item 1 of argv) with prompt (item 2 of argv) OK button name (item 3 of argv) cancel button name (item 4 of argv) with multiple selections allowed and empty selection allowed
+    if pickedGames is false then return ""
+    set AppleScript's text item delimiters to linefeed
+    return pickedGames as text
+end run
+EOS
+)" || return 1
+    [ -n "$answer" ] || return 1
+    print -r -- "$answer"
+}

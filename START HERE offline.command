@@ -37,9 +37,10 @@ print -r -- "  The game is never modified. One download: Microsoft's Edge WebVie
 print -r -- "  runtime 99 (165 MB, once). WEBVIEW2_RUNTIME=skip leaves it out."
 print -r -- "  CrossOver must be closed while this runs."
 print -r -- ""
-print -r -- "  You still need FIFA 17 itself -- in your Downloads folder, or say"
-print -r -- "  where with AURORA_GAME_DIR. The Aurora17 bottle it lives in is made"
-print -r -- "  for you if it is not there yet."
+print -r -- "  You still need FIFA 17 itself. If it is not found (Downloads, your"
+print -r -- "  drives) a dialog asks where it is. The Aurora17 bottle it lives in"
+print -r -- "  is made for you if it is not there yet. Other FIFA games found on"
+print -r -- "  this Mac are set up too, and a second dialog asks about the rest."
 print -r -- ""
 
 CX_DIALOGS=1 AURORA_GAME="${AURORA_GAME:-fifa17}" ./setup.sh --offline

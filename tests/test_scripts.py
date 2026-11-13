@@ -142,6 +142,32 @@ bundle_summary() { print -r -- "summary stub"; }
             self.assertFalse(list(work.glob("fifa-diagnostics*")))
 
 
+class StandInBuildTests(unittest.TestCase):
+    def test_build_sh_builds_every_stand_in_the_package_ships(self):
+        # cx-tasklist.exe shipped without a build step: nobody could rebuild
+        # it, and build.sh's own comparison reported it missing.
+        build = (ROOT / "build.sh").read_text()
+        shipped = [line.split("  ", 1)[1] for line in (ROOT / "fixes/SHA256SUMS").read_text().splitlines()
+                   if line.endswith(".exe")]
+        self.assertIn("i386-windows/cx-tasklist.exe", shipped)
+        for name in shipped:
+            with self.subTest(name=name):
+                self.assertIn('-o "$OUT/' + name + '"', build)
+                self.assertIn('"$HERE/fixes/' + Path(name).stem + '.c"', build)
+
+    def test_certutil_never_deletes_by_part_of_a_name(self):
+        # `certutil -delstore Root ""` matched every certificate by substring
+        # and would have emptied the bottle's Root store.
+        source = (ROOT / "fixes/cx-certutil.c").read_text()
+        self.assertNotIn("wcsstr", source)
+        self.assertIn("if (!id || !*id) return FALSE;", source)
+        # Nothing is reported done until it has been read back.
+        self.assertIn("if (!in_store(store, user, hash))", source)
+        self.assertIn("if (in_store(store, user, ids[i])) left++;", source)
+        for verb in ('L"addstore"', 'L"delstore"', 'L"store"', 'L"verifystore"'):
+            self.assertIn(verb, source)
+
+
 class BundleTests(unittest.TestCase):
     """./setup.sh --bundle, the real one, in a package copy with a HOME,
     bottles and CrossOver-FIFA path of its own. It only reads, and its checks
@@ -754,9 +780,14 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
                 result = self.run_setup_preflight(args, replies, AURORA_GAME=game)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn('CONTINUED folder=' + str(folder.resolve()), result.stdout)
-                record = json.loads(self.log.read_text().splitlines()[-1])
+                # START HERE's FIFA 17 run goes on to ask about the other
+                # games, so its folder chooser is not the last dialog.
+                records = [json.loads(line) for line in self.log.read_text().splitlines()]
+                record = [r for r in records if r['args'][1].startswith('Select FIFA ')][0]
                 self.assertIn('Select FIFA ' + game[4:] + ' game files', record['args'][1])
                 self.assertIn(exe, record['args'][1])
+                self.assertEqual([r['args'][1] for r in records].count('Other FIFA games'),
+                                 1 if game == 'fifa17' else 0)
                 self.assertIn(f'{game}.folder={folder.resolve()}\n', choices.read_text())
                 self.assertFalse((self.work / 'no-app.app').exists())
                 self.assertFalse((self.work / 'no-bottles').exists())
@@ -842,6 +873,161 @@ sys.exit(int(os.environ.get('SETUP_RC', '0')))
         self.assertIn('FIFA17_SKIP=0', result.stdout)
         result = self.run_setup_preflight(['--verify'])
         self.assertIn('FIFA17_SKIP=0', result.stdout)
+
+    def dialogs(self):
+        return [json.loads(line)['args'] for line in self.log.read_text().splitlines()] \
+            if self.log.exists() else []
+
+    def make_game(self, name, exe):
+        folder = self.work / name
+        (folder / exe).parent.mkdir(parents=True, exist_ok=True)
+        (folder / exe).write_bytes(b'MZ')
+        return folder
+
+    def test_skipping_one_game_never_skips_asking_about_the_others(self):
+        # START HERE asked about FIFA 17 and nothing else: after Skip FIFA 17
+        # the other games were only looked for, so a player with FIFA 12 alone,
+        # kept where the search does not reach, ended with nothing set up.
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        f12 = self.make_game('Elsewhere/My FIFA 12', 'Game/fifa.exe')
+        f21 = self.make_game('Elsewhere/My FIFA 21', 'FIFA21.exe')
+        listed = ['FIFA 12', 'FIFA 15', 'FIFA 16', 'FIFA 21']
+
+        # FIFA 12 alone: Skip FIFA 17, tick FIFA 12, pick its folder.
+        result = self.run_setup_preflight([], ['Skip FIFA 17', 'FIFA 12', str(f12)], AURORA_GAME='fifa17')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Skipping FIFA 17; the other games are set up.', result.stdout)
+        self.assertIn('saved FIFA 12 game files: ' + str(f12.resolve()), result.stdout)
+        self.assertIn('FIFA17_SKIP=1', result.stdout)
+        self.assertEqual(choices.read_text().splitlines()[1:], [f'fifa12.folder={f12.resolve()}'])
+        calls = self.dialogs()
+        self.assertEqual(len(calls), 3, calls)
+        # The first dialog says what Skip does, and that more questions follow.
+        self.assertIn('Skipping leaves out FIFA 17 only', calls[0][2])
+        self.assertIn('You are asked next', calls[0][2])
+        # The list: every game not found, as arguments, and what skipping means.
+        self.assertEqual(calls[1][1:], ['Other FIFA games', calls[1][2], 'Choose folders…',
+                                        'Skip these games'] + listed)
+        self.assertIn('not found on this Mac: FIFA 12, FIFA 15, FIFA 16, FIFA 21.', calls[1][2])
+        self.assertIn('A game you do not select is skipped. Nothing else is skipped.', calls[1][2])
+        self.assertIn('Select FIFA 12 game files', calls[2][1])
+        self.assertIn('Game/fifa.exe', calls[2][1])
+        self.assertFalse((self.work / 'no-app.app').exists())
+        self.assertFalse((self.work / 'no-bottles').exists())
+
+        # A game that is found is not asked about again.
+        self.log.unlink()
+        result = self.run_setup_preflight([], ['Skip FIFA 17', ''], AURORA_GAME='fifa17')
+        self.assertEqual(self.dialogs()[1][5:], ['FIFA 15', 'FIFA 16', 'FIFA 21'])
+        self.assertIn('Skipping FIFA 15, FIFA 16, FIFA 21: none selected.', result.stdout)
+        choices.unlink()
+
+        # Two picked: cancelling the first one's chooser skips that game only.
+        # A wrong folder asks again, and names the game its Skip button skips.
+        for replies, saved, said in [
+            (['Skip FIFA 17', 'FIFA 12\nFIFA 21', '__cancel__', str(f21)],
+             [f'fifa21.folder={f21.resolve()}'], 'Skipping FIFA 12: no folder chosen.'),
+            (['Skip FIFA 17', 'FIFA 12\nFIFA 21', '/wrong', 'Skip FIFA 12', str(f21)],
+             [f'fifa21.folder={f21.resolve()}'], 'Skipping FIFA 12. The other games are still set up.'),
+            (['Skip FIFA 17', 'FIFA 12\nFIFA 21', '/wrong', 'Select again', str(f12), str(f21.parent)],
+             [f'fifa12.folder={f12.resolve()}', f'fifa21.folder={f21.resolve()}'], 'saved FIFA 12 game files'),
+        ]:
+            with self.subTest(replies=replies):
+                self.log.unlink(missing_ok=True)
+                choices.unlink(missing_ok=True)
+                result = self.run_setup_preflight([], replies, AURORA_GAME='fifa17')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(said, result.stdout)
+                self.assertIn('CONTINUED', result.stdout)
+                self.assertEqual(choices.read_text().splitlines()[1:], saved)
+                self.assertEqual(len(self.dialogs()), len(replies))
+                if '/wrong' in replies:
+                    self.assertEqual(self.dialogs()[3][3:5], ['Select again', 'Skip FIFA 12'])
+        choices.unlink()
+
+        # Skip these games, or closing the list: nothing saved, setup goes on.
+        for reply in ('', '__cancel__'):
+            with self.subTest(reply=reply):
+                self.log.unlink(missing_ok=True)
+                result = self.run_setup_preflight([], ['Skip FIFA 17', reply], AURORA_GAME='fifa17')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('CONTINUED folder= FIFA17_SKIP=1', result.stdout)
+                self.assertEqual(len(self.dialogs()), 2)
+                self.assertFalse(choices.exists())
+
+        # FIFA 17 found and the others not: the list is still shown, alone.
+        self.log.unlink()
+        f17 = self.make_game('Found FIFA 17', 'FIFA17.exe')
+        result = self.run_setup_preflight(['--offline'], ['FIFA 21', str(f21)], AURORA_GAME='fifa17',
+                                          AURORA_GAME_DIR=str(f17))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([c[1] for c in self.dialogs()][0], 'Other FIFA games')
+        self.assertIn('FIFA17_SKIP=0', result.stdout)
+        self.assertEqual(choices.read_text().splitlines()[1:], [f'fifa21.folder={f21.resolve()}'])
+
+    def test_the_other_games_list_is_for_the_full_install_with_dialogs_only(self):
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        f17 = self.make_game('Found FIFA 17', 'FIFA17.exe')
+        # Everything found: no dialog at all.
+        found = {'AURORA_GAME_DIR': str(f17)}
+        for game, exe in [('12', 'Game/fifa.exe'), ('15', 'fifa15.exe'), ('16', 'fifa16.exe'),
+                          ('21', 'FIFA21.exe')]:
+            found[f'FIFA{game}_DIR'] = str(self.make_game('Found FIFA ' + game, exe))
+        result = self.run_setup_preflight([], ['FIFA 12'], AURORA_GAME='fifa17', **found)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.dialogs(), [])
+        # Fix my installation asks about FIFA 17 as before and shows no list;
+        # its FIFA 17 dialog does not promise one either.
+        result = self.run_setup_preflight(['--repair'], ['Skip FIFA 17', 'FIFA 12'], AURORA_GAME='fifa17')
+        self.assertEqual([c[1] for c in self.dialogs()], ['FIFA 17 was not found'])
+        self.assertNotIn('You are asked next', self.dialogs()[0][2])
+        # One game's own run, a plain Terminal run, no desktop, SSH: no list.
+        for args, env in [(['--fifa15'], {'FIFA15_DIR': found['FIFA15_DIR']}),
+                          (['--verify'], {'AURORA_GAME': 'fifa17'}),
+                          ([], {'AURORA_GAME_DIR': str(f17)}),
+                          ([], {'AURORA_GAME': 'fifa17', 'AURORA_GAME_DIR': str(f17), 'CX_NO_DIALOGS': '1'}),
+                          ([], {'AURORA_GAME': 'fifa17', 'AURORA_GAME_DIR': str(f17), 'SSH_TTY': '/dev/ttys1'}),
+                          ([], {'AURORA_GAME': 'fifa17', 'AURORA_GAME_DIR': str(f17), 'CX_DIALOGS': '0'})]:
+            with self.subTest(args=args, env=env):
+                self.log.unlink(missing_ok=True)
+                result = self.run_setup_preflight(args, ['FIFA 12'], **env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.dialogs(), [])
+        self.assertFalse(choices.exists())
+
+    def test_the_other_games_prompt_stops_when_a_choice_cannot_be_saved(self):
+        # As for FIFA 17's prompt: a choice that cannot be written stops setup
+        # before anything is installed, and does not carry on without it.
+        choices = self.work / 'Library/Application Support/FIFA-CrossOver/choices.conf'
+        choices.parent.mkdir(parents=True)
+        choices.write_text('# My choices\nfifa16.shared_pae=no\n')
+        choices.parent.chmod(0o555)
+        self.addCleanup(choices.parent.chmod, 0o755)
+        f12 = self.make_game('Selected FIFA 12', 'Game/fifa.exe')
+        result = self.run_setup_preflight([], ['Skip FIFA 17', 'FIFA 12', str(f12)], AURORA_GAME='fifa17')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('Could not save a choice', result.stdout)
+        self.assertNotIn('CONTINUED', result.stdout)
+        self.assertNotIn('saved FIFA 12', result.stdout)
+        self.assertEqual(choices.read_text(), '# My choices\nfifa16.shared_pae=no\n')
+        self.assertFalse((self.work / 'no-app.app').exists())
+
+    def test_the_games_list_dialog_takes_every_text_as_an_argument(self):
+        result = self.run_shell('source ' + shlex_quote(str(ROOT / "lib/ui.zsh"))
+                                + '\nui_pick_games ' + shlex_quote('T "x"') + ' ' + shlex_quote('P $(id)')
+                                + ' OK "No way" "FIFA 12" "FIFA 21"'
+                                + ' && print PICKED || print NONE',
+                                ['FIFA 12\nFIFA 21'])
+        self.assertEqual(result.stdout, 'FIFA 12\nFIFA 21\nPICKED\n', result.stderr)
+        call = json.loads(self.log.read_text())
+        self.assertEqual(call['args'], ['-', 'T "x"', 'P $(id)', 'OK', 'No way', 'FIFA 12', 'FIFA 21'])
+        self.assertIn('with multiple selections allowed', call['script'])
+        self.assertIn('cancel button name (item 4 of argv)', call['script'])
+        self.assertNotIn('FIFA 12', call['script'])
+        self.log.unlink()
+        result = self.run_shell('source ' + shlex_quote(str(ROOT / "lib/ui.zsh"))
+                                + '\nui_pick_games T P OK No "FIFA 12" && print PICKED || print NONE', [''])
+        self.assertEqual(result.stdout, 'NONE\n')
 
     def test_missing_files_prompt_stops_when_the_choice_cannot_be_saved(self):
         # The prompt runs with set -e off (prompt_for_missing_game_files ||

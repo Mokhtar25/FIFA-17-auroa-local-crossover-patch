@@ -7374,7 +7374,7 @@ f12_install_cdb() {
     return $rc
 }
 
-# Steps 9 to 9d of configure_bottle, all of what FIFA 12 needs beyond the
+# Steps 9 to 9e of configure_bottle, all of what FIFA 12 needs beyond the
 # stand-in. Each is skipped when already right, and one failing leaves the
 # others done; the download is last, as it is the only one that can take long.
 # Sets F12_OK=1 only when everything is in place.
@@ -7384,10 +7384,10 @@ f12_install() {
     say "9. Installing the certutil stand-in Aurora 12's setup needs"
     f12_install_certutil || F12_OK=0
     say ""
-    say "9e. Installing the tasklist stand-in, so Aurora 12 does not stop a running game"
+    say "9a. Installing the tasklist stand-in, so Aurora 12 does not stop a running game"
     f12_install_tasklist || F12_OK=0
     say ""
-    say "9a. Letting Microsoft's debugger load its own DLLs"
+    say "9b. Letting Microsoft's debugger load its own DLLs"
     if [ ! -f "$(bottle_user_reg)" ]; then
         note "no user.reg in the $BOTTLE bottle yet — open it in CrossOver once, then run this again"
         F12_OK=0
@@ -7401,7 +7401,7 @@ f12_install() {
         F12_OK=0
     fi
     say ""
-    say "9b. Telling the game where it is (EA Sports\\FIFA 12, Install Dir)"
+    say "9c. Telling the game where it is (EA Sports\\FIFA 12, Install Dir)"
     if ! f12_install_dir_win >/dev/null; then
         note "no FIFA 12 folder found, so the registry value was not written. If it is elsewhere:"
         say "        FIFA12_DIR='/path/to/FIFA 12' ./setup.sh --fifa12"
@@ -7428,10 +7428,10 @@ f12_install() {
         say "        then run ./setup.sh --fifa12 again so Aurora offers Play for FIFA 12."
     fi
     say ""
-    say "9c. The game's display settings"
+    say "9d. The game's display settings"
     f12_write_ini || F12_OK=0
     say ""
-    say "9d. Microsoft's 32-bit debugger"
+    say "9e. Microsoft's 32-bit debugger"
     f12_install_cdb || F12_OK=0
     return 0
 }
@@ -7998,7 +7998,8 @@ configure_bottle() {
     fi
     if [ "$GAME" = fifa12 ]; then
         # Aurora 12, in Aurora's common bottle: see "FIFA 12, from Aurora 12".
-        # Step 9's names are Aurora17's, and 9a to 9c are FIFA 17's. In a
+        # Step 9's names are Aurora17's, and FIFA 17's 9a to 9e are not run:
+        # FIFA 12 has its own steps 9 to 9e (f12_install). In a
         # bottle CAS is in, Aurora17's stand-in goes beside CAS's, which
         # keeps the name and hands -EncodedCommand on to it.
         say ""
@@ -8178,7 +8179,7 @@ configure_bottle() {
 # Locate an explicitly requested game's files before install/repair can touch
 # an app or bottle. Terminal scripts, SSH, and read-only modes stay silent.
 prompt_for_missing_game_files() {
-    local folder exe label
+    local folder exe label next=""
     [ "${CX_DIALOGS:-0}" = 1 ] && [ "$GAME_EXPLICIT" = 1 ] || return 0
     case "$MODE" in install|bottle|repair) ;; *) return 0 ;; esac
     # FIFA 20's folder is REFUT's to ask for, in its own window.
@@ -8191,8 +8192,10 @@ prompt_for_missing_game_files() {
     # START HERE and Fix my installation are for every game: no FIFA 17 means
     # skipping FIFA 17's steps, never stopping before the other games.
     if [ "$GAME" = fifa17 ]; then
+        # Only the full install asks about them (prompt_for_other_missing_games).
+        [ "$MODE" = install ] && next=" You are asked next about any of them that are not found."
         say "FIFA 17 game files were not found."
-        if ! ui_ask "FIFA 17 was not found" "FIFA 17's game files were not found. Select the folder containing $exe, or skip FIFA 17 and set up the other games that are found (FIFA 15, 16, 20 and 21)." "Select folder…" "Skip FIFA 17" yes; then
+        if ! ui_ask "FIFA 17 was not found" "FIFA 17's game files were not found. Select the folder containing $exe, or press Skip FIFA 17 if you do not have it. Skipping leaves out FIFA 17 only: the other games (FIFA 12, 15, 16, 20 and 21) are still set up.$next" "Select folder…" "Skip FIFA 17" yes; then
             say "Skipping FIFA 17; the other games are set up."
             return 0
         fi
@@ -8224,7 +8227,65 @@ prompt_for_missing_game_files() {
     done
 }
 
+# START HERE's second question. FIFA 17's prompt above is one game; the other
+# games were only ever looked for, so a game kept anywhere the search does not
+# reach (game_dir_candidates) was "not found" and nobody was asked -- and a
+# player with FIFA 12 alone, who skipped FIFA 17, ended with nothing set up.
+# One list of the games not found; each one picked gets its own folder
+# chooser, and skipping or cancelling one never skips the next. Before any app
+# or bottle is touched, like the prompt above. The full install only: Fix my
+# installation is run again and again, and keeps to the hint in games_summary.
+# FIFA 20 is REFUT's to find, and FIFA 14 has its own command.
+OTHER_PROMPT_GAMES=( fifa12 fifa15 fifa16 fifa21 )
+prompt_for_other_missing_games() {
+    local g label exe folder picked line
+    local -a missing labels
+    [ "${CX_DIALOGS:-0}" = 1 ] && [ "$GAME_EXPLICIT" = 1 ] || return 0
+    [ "$MODE" = install ] && [ "$GAME" = fifa17 ] || return 0
+    missing=(); labels=()
+    for g in $OTHER_PROMPT_GAMES; do
+        game_dir_of "$g" >/dev/null 2>&1 && continue
+        missing+=( "$g" ); labels+=( "FIFA ${g#fifa}" )
+    done
+    (( ${#missing} )) || return 0
+    source "$HERE/lib/ui.zsh"
+    ui_gui_ok || return 0
+    say "Not found: ${(j:, :)labels}. Asking which of them you have."
+    if ! picked="$(ui_pick_games 'Other FIFA games' \
+            "These games were not found on this Mac: ${(j:, :)labels}.
+
+Select each one you have (hold Command to select more than one), then choose its folder.
+
+A game you do not select is skipped. Nothing else is skipped." \
+            'Choose folders…' 'Skip these games' "${labels[@]}")"; then
+        say "Skipping ${(j:, :)labels}: none selected."
+        return 0
+    fi
+    for line in ${(f)picked}; do
+        g="fifa${line#FIFA }"
+        (( ${missing[(Ie)$g]} )) || continue
+        label="$line"; exe="$(game_exe_of "$g")"
+        while true; do
+            if ! folder="$(ui_choose_folder "Select $label game files. Select the folder containing $exe." "$VOLUMES_DIR")"; then
+                say "Skipping $label: no folder chosen. The other games are still set up."
+                break
+            fi
+            if folder="$(choice_folder_validated "$g" "$folder")"; then
+                choice_write "$g" "$folder"
+                ok "saved $label game files: $folder"
+                break
+            fi
+            if ! ui_ask "Select $label game files" "That folder has no $exe. Select the folder containing $exe. If you select its parent, it must contain only one copy of the game. Skip $label leaves out $label only." 'Select again' "Skip $label" no; then
+                say "Skipping $label. The other games are still set up."
+                break
+            fi
+        done
+    done
+    return 0
+}
+
 prompt_for_missing_game_files || exit $?
+prompt_for_other_missing_games || exit $?
 
 # The full install and --repair skip FIFA 17's own steps when there is no
 # FIFA 17 (skipped in the dialog, or not found from Terminal); the other

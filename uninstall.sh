@@ -588,7 +588,10 @@ if [ -d "$BOTTLE_DIR/$F20_BOTTLE" ]; then
 fi
 say "  * what --fifa12 added to the bottle it was run on: CX_LOWPORT, cdb.exe's"
 say "    overrides, EA Sports\\FIFA 12's Install Dir, Microsoft's debugger under"
-say "    Program Files (x86)\\Windows Kits, and ~/Documents/FIFA 12/fifasetup.ini."
+say "    Program Files (x86)\\Windows Kits, ~/Documents/FIFA 12/fifasetup.ini, and"
+say "    the Aurora launcher's fifa12/enabled marker."
+say "  * FIFA 14's one setting, if 'FIFA 14.command' was used: DrTrap=3 for"
+say "    fifa14.exe in that bottle's registry. Nothing else reads it."
 say "  * Aurora17's own hosts receipt, if its launcher has run since. That is"
 say "    Aurora17's record, not ours. To clear it, run in the Aurora17 folder:"
 say "        .\\Aurora17Connector.exe uninstall-hosts"

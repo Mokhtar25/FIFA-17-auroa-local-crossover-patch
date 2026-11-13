@@ -1,7 +1,9 @@
 #!/bin/zsh
 # Double-click this. It installs the FIFA fixes into a copy of your CrossOver and
-# sets up every game it finds: FIFA 17, 15, 16 and 21, and FIFA 20 when the
-# REFUT launcher is here (downloaded, or installed in a bottle).
+# sets up every game it finds: FIFA 17, 15, 16, 21 and 12, and FIFA 20 when the
+# REFUT launcher is here (downloaded, or installed in a bottle). A game it does
+# not find is asked about, one small dialog, and skipping one game never skips
+# the others (setup.sh, prompt_for_other_missing_games).
 # Everything it does can be undone with "Uninstall.command" beside it.
 
 cd "${0:A:h}" || exit 1
@@ -26,13 +28,19 @@ print -r -- "  ========================="
 print -r -- ""
 print -r -- "  This makes a separate copy of CrossOver called CrossOver-FIFA, puts"
 print -r -- "  the fixes in it, and sets up each game it finds (FIFA 17, 15, 16, 21,"
-print -r -- "  and FIFA 20 if REFUT is here) in the bottle it is played from."
-print -r -- "  No FIFA 17? Choose Skip FIFA 17."
+print -r -- "  12, and FIFA 20 if REFUT is here) in the bottle it is played from."
+print -r -- ""
+print -r -- "  If a game is not found you are asked where it is. No FIFA 17? Choose"
+print -r -- "  Skip FIFA 17: that skips FIFA 17 only, and a second dialog lists the"
+print -r -- "  other games so you can pick the ones you have."
 print -r -- ""
 print -r -- "  Your own CrossOver is not touched, and neither is any other bottle"
 print -r -- "  you run in it. The copy needs about 1 GB of disk."
 print -r -- "  The game is never modified. One download: Microsoft's Edge WebView2"
 print -r -- "  runtime 99 (165 MB, once), which the RebornFUT launcher needs."
+print -r -- "  With FIFA 12 there is a second: Microsoft's debugger, from Microsoft"
+print -r -- "  (1.2 GB, once). FIFA 12 and FIFA 21 play from the Aurora launcher,"
+print -r -- "  which has to be installed in its bottle first."
 print -r -- "  CrossOver must be closed while this runs."
 print -r -- ""
 
