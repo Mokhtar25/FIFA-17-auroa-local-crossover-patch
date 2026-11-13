@@ -126,3 +126,16 @@ variables 7/7 (3/7 with profiles off, the stock result).
 Not tested: the real games. The probe shows each process gets the settings
 the table gives it; that FIFA 15 then starts from the Aurora17 bottle is the
 next thing to check.
+
+## Graphics backend per exe (crossover-26.3-launcher-graphics-backend.patch)
+
+The same lookup can also give a process its own CrossOver graphics backend.
+`cx_profile_init` sets `CX_GRAPHICS_BACKEND` in the process's unix
+environment before `start_main_thread` loads `cxcompatdb.so`, which is what
+reads it. First of: `AppDefaults\<exe>\CrossOver-FIFA` `GraphicsBackend` =
+`d3dmetal` | `dxvk` | `wined3d` (`bottle` = no change), then the built-in rule
+that an exe named `aurora15connector*` gets `wined3d`: Aurora's launcher from
+1.2.190 on draws with Direct2D, which gets no device under d3dmetal. Children
+are started from the Windows environment block, which was built before this,
+so the games a launcher starts keep the bottle's backend. `+cxprofile` shows
+`gfx=<backend>` when it acted; `CX_GAME_PROFILES=0` turns it off too.

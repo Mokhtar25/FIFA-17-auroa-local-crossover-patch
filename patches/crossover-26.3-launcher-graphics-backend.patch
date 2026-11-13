@@ -1,0 +1,113 @@
+ntdll: the Aurora launcher draws with wined3d in a D3DMetal bottle
+
+On 2026-11-13 Aurora released launcher 1.2.190 (Aurora15Connector.exe), a
+Rust rewrite that draws its window with Direct2D (d2d1, dwrite, dxgi). The
+.NET 1.2.188 before it drew with GDI. In a game bottle, which CrossOver runs
+with CX_GRAPHICS_BACKEND=d3dmetal because FIFA 15, 17 and 21 need it, the
+new launcher shows "Aurora could not open its window" and exits with code 1;
+Aurora's updater then logs "The updated Aurora15 launcher exited with code 1
+before becoming ready", puts 1.2.188 back, and tries again on the next start.
+
+Under d3dmetal Wine's own d2d1 gets no device:
+
+    warn:d3d10core:D3D10CoreCreateDevice Failed to create device, hr 0x80004005.
+    warn:d3d10:d3d10_create_device1 Failed to create a device, hr 0x80004005.
+    warn:d2d:d2d_factory_get_device Failed to create device, hr 0x80004005.
+
+The same exe with the bottle switched to wined3d or dxvk: no failure, the
+window opens. The backend is bottle-wide (cxbottle.conf), and CrossOver's
+per-exe switch lives in its signed compatibility database, so neither can
+single out the launcher.
+
+cxcompatdb.so, which start_main_thread loads right after cx_profile_init,
+picks the backend for the process from CX_GRAPHICS_BACKEND in the unix
+environment. So cx_profile_init now sets that variable for this process
+alone: AppDefaults\<exe>\CrossOver-FIFA "GraphicsBackend" (d3dmetal, dxvk,
+wined3d; "bottle" for no change), else wined3d for an exe whose name starts
+with "aurora15connector" (any case; the updater runs it under versioned
+names in launcher-cache). The Windows environment block that children start
+with was built by init_startup_info before this, so the games a launcher
+starts still get the bottle's backend. CX_GAME_PROFILES=0 switches it off
+with the rest of the profiles. +cxprofile logs gfx=<backend> when it acted.
+
+Applies on top of game-profiles (it extends cx_profile_init) and after every
+other patch that touches dlls/ntdll/unix/loader.c.
+
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2418,7 +2418,39 @@
+     buf[n] = 0;
+     return n > 0;  /* an empty value says nothing: as if it were not there */
+ }
++
++/* The graphics backend for this process alone.  CrossOver picks d3dmetal,
++ * dxvk or wined3d per process: cxcompatdb.so, which start_main_thread loads
++ * right after cx_profile_init, reads CX_GRAPHICS_BACKEND from the unix
++ * environment.  A game bottle says d3dmetal for the games, but under d3dmetal
++ * Wine's own d2d1 gets no device (D3D10CoreCreateDevice fails with E_FAIL),
++ * so a launcher that draws with Direct2D -- Aurora15Connector 1.2.190 on --
++ * cannot open its window.  Setting the variable here changes only this
++ * process: the Windows environment block, which every child is started with,
++ * was built by init_startup_info before this runs, so the games a launcher
++ * starts still get the bottle's backend.
++ *
++ * First of: HKCU\...\AppDefaults\<exe>\CrossOver-FIFA "GraphicsBackend"
++ * (d3dmetal, dxvk, wined3d, or "bottle" for no change), then the built-in
++ * rule (an exe name starting "aurora15connector" gets wined3d).  NULL: keep
++ * the bottle's. */
++static const char *cx_graphics_backend( const WCHAR *exe, HANDLE key, char *buf, size_t size )
++{
++    static const char aurora[] = "aurora15connector";
++    unsigned int i;
+ 
++    if (cx_reg_string( key, "GraphicsBackend", buf, size ))
++    {
++        if (!strcasecmp( buf, "bottle" )) return NULL;
++        if (!strcasecmp( buf, "d3dmetal" ) || !strcasecmp( buf, "dxvk" ) || !strcasecmp( buf, "wined3d" ))
++            return buf;
++        WARN_(cxprofile)( "unknown GraphicsBackend %s for %s, ignored\n", debugstr_a(buf), debugstr_w(exe) );
++    }
++    for (i = 0; aurora[i]; i++)
++        if (!exe[i] || (exe[i] | 0x20) != aurora[i]) return NULL;
++    return "wined3d";
++}
++
+ /***********************************************************************
+  *           cx_profile_init
+  *
+@@ -2433,7 +2465,8 @@
+     const char *source = "none", *profile = "none";
+     const WCHAR *exe = main_wargv[0], *p;
+     struct cx_settings s;
+-    char buf[64], dstfix[24], topdown[24], exe_a[256];
++    char buf[64], dstfix[24], topdown[24], exe_a[256], gfx_buf[16];
++    const char *gfx = NULL;
+     HANDLE key = 0;
+     int len;
+ 
+@@ -2484,6 +2517,13 @@
+         {
+             cx_parse_dstfix( strcasecmp( buf, "off" ) ? buf : NULL, &s );
+             source = "appdefaults";
++        }
++        if ((gfx = cx_graphics_backend( exe, key, gfx_buf, sizeof(gfx_buf) )))
++        {
++            const char *was = getenv( "CX_GRAPHICS_BACKEND" );
++
++            if (!was || strcasecmp( was, gfx )) setenv( "CX_GRAPHICS_BACKEND", gfx, 1 );
++            else gfx = NULL;  /* already the bottle's: nothing changed */
+         }
+         if (key) NtClose( key );
+     }
+@@ -2504,9 +2544,10 @@
+     else if (!s.dstfix_val) strcpy( dstfix, "auto" );
+     else snprintf( dstfix, sizeof(dstfix), "0x%lx", (unsigned long)s.dstfix_val );
+     TRACE_(cxprofile)( "CXPROFILE exe=%s profile=%s source=%s dr_trap=%d topdown=%s dstfix=%s "
+-                       "image_size=0x%x checksum=0x%08x%s\n",
++                       "image_size=0x%x checksum=0x%08x%s%s%s\n",
+                        exe_a, profile, source, s.dr_trap, topdown, dstfix,
+                        (int)main_image_info.ImageFileSize, (int)main_image_info.CheckSum,
++                       gfx ? " gfx=" : "", gfx ? gfx : "",
+                        enabled ? "" : " CX_GAME_PROFILES=0" );
+ }
+ 

@@ -168,6 +168,13 @@ PATCHES=(
 # FIFA 21 up. See the patch header.
 [ -f "$HERE/patches/crossover-26.3-aurora-elevate.patch" ] \
     && PATCHES+=( crossover-26.3-aurora-elevate.patch )
+# And the Aurora launcher's graphics: from 1.2.190 it draws with Direct2D,
+# which gets no device under CrossOver's d3dmetal backend, so it could not
+# open its window in a game bottle. cx_profile_init sets CX_GRAPHICS_BACKEND
+# for that one process (wined3d) before cxcompatdb.so reads it; the games it
+# starts keep the bottle's. Extends the game profiles. See the patch header.
+[ -f "$HERE/patches/crossover-26.3-launcher-graphics-backend.patch" ] \
+    && PATCHES+=( crossover-26.3-launcher-graphics-backend.patch )
 # For FIFA 14: GetComputerNameEx takes the name from the _CLUSTER_NETWORK_*_
 # environment variables when they are set, as Windows does. Wine ignored them.
 # kernelbase only, and the game is 32-bit, so this one is built as a 32-bit DLL

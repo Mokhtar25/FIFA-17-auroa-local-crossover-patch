@@ -126,6 +126,13 @@ administrator"). An exe whose name starts with "aurora" now gets the full
 token at start, as after a UAC approval on Windows. CX_AURORA_ELEVATE=0 turns
 it off.
 
+The seventeenth, crossover-26.3-launcher-graphics-backend.patch, is for the
+Aurora launcher from 1.2.190 on, which draws with Direct2D. Under CrossOver's
+d3dmetal backend Wine's d2d1 gets no device and the launcher could not open
+its window. Each process can now have its own backend (AppDefaults\<exe>\
+CrossOver-FIFA "GraphicsBackend"), and an exe named aurora15connector* gets
+wined3d by default; the games it starts keep the bottle's d3dmetal.
+
 One more, crossover-26.3-computername-env-override.patch, is for FIFA 14 and
 is the only one built as a 32-bit DLL (i386-windows/kernelbase.dll, out of a
 second build directory, build32, configured with --enable-archs=i386,x86_64).
@@ -156,6 +163,8 @@ APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
    15. crossover-26.3-remote-thread-exit.patch   (ntdll/unix thread.c, server.c,
                                                   unix_private.h)
    16. crossover-26.3-aurora-elevate.patch       (ntdll/unix/loader.c)
+   16a. crossover-26.3-launcher-graphics-backend.patch  (ntdll/unix/loader.c;
+                                                  on top of game-profiles)
    17. crossover-26.3-computername-env-override.patch  (kernelbase/registry.c;
                                                   independent; 32-bit DLL)
 
@@ -224,6 +233,11 @@ WHAT EACH ONE COVERS
                           so the Aurora launcher no longer stops at "not
                           running as administrator"; CX_AURORA_ELEVATE=0;
                           ntdll/unix/loader.c
+    launcher-graphics-backend
+              Aurora      a per-exe graphics backend; aurora15connector*
+                          gets wined3d so the Direct2D launcher (1.2.190+)
+                          opens its window in a d3dmetal bottle; AppDefaults
+                          "GraphicsBackend"; ntdll/unix/loader.c
     computername-env-override
               FIFA 14     GetComputerNameEx honours _CLUSTER_NETWORK_NAME_
                           and its three siblings, as Windows does; the game
