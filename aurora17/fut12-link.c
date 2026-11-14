@@ -14,7 +14,9 @@
  * has no CNG key store and no VPN stack, so the key is a file in the bottle
  * (%LOCALAPPDATA%\Aurora12\maclink) and the VPN steps report what makes the
  * helper try the dial: there is no rasdial.exe, the dial fails, and the helper
- * takes its own app-link fallback. Nothing here talks to any server.
+ * takes its own app-link fallback. repair and install have no such fallback, so
+ * for those two the link is reported as already up (see f12_parent_is_repair).
+ * Nothing here talks to any server.
  */
 #include <bcrypt.h>
 
@@ -625,6 +627,53 @@ static void f12_record_server(void)
     f12_write(path, o.p, o.n);
 }
 
+/* Is the futlink.exe that started us running "repair" or "install"? Read from
+ * the command lines of our ancestors (their PEBs): the hand-off powershell.exe
+ * sits between the helper and us. Any failure answers no. */
+static int f12_parent_is_repair(void)
+{
+    typedef LONG (WINAPI *nqip_t)(HANDLE, int, void *, ULONG, ULONG *);
+    struct { void *r1; void *peb; void *r2[2]; ULONG_PTR pid; ULONG_PTR parent; } pbi;
+    struct { USHORT len, max; wchar_t *buf; } us;
+    nqip_t nqip = (nqip_t)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
+    wchar_t cmd[2048], *t, *ctx;
+    void *params;
+    SIZE_T got, n;
+    HANDLE h;
+    DWORD up;
+    int depth, helper, verb;
+
+    if (!nqip || nqip(GetCurrentProcess(), 0, &pbi, sizeof(pbi), NULL)) return 0;
+    up = (DWORD)pbi.parent;
+    for (depth = 0; depth < 4 && up; depth++)
+    {
+        if (!(h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, up))) return 0;
+        up = 0;
+        helper = verb = 0;
+        if (!nqip(h, 0, &pbi, sizeof(pbi), NULL) && pbi.peb)
+        {
+            up = (DWORD)pbi.parent;
+            if (ReadProcessMemory(h, (char *)pbi.peb + 0x20, &params, sizeof(params), &got) && params
+                && ReadProcessMemory(h, (char *)params + 0x70, &us, sizeof(us), &got) && us.buf)
+            {
+                n = us.len < sizeof(cmd) - sizeof(wchar_t) ? us.len : sizeof(cmd) - sizeof(wchar_t);
+                if (ReadProcessMemory(h, us.buf, cmd, n, &got))
+                {
+                    cmd[got / sizeof(wchar_t)] = 0;
+                    _wcslwr(cmd);
+                    helper = wcsstr(cmd, L"futlink") != NULL;
+                    ctx = NULL;
+                    for (t = wcstok(cmd, L" \t\"", &ctx); t; t = wcstok(NULL, L" \t\"", &ctx))
+                        if (!wcscmp(t, L"repair") || !wcscmp(t, L"install")) verb = 1;
+                }
+            }
+        }
+        CloseHandle(h);
+        if (helper) return verb;
+    }
+    return 0;
+}
+
 /* Which script is this? -1 means none of ours. */
 static int f12_script(const char *s)
 {
@@ -644,6 +693,17 @@ static int f12_script(const char *s)
     }
     if (strstr(s, "'STATUS:missing'"))
     {
+        /* repair and install have no app-link fallback: a failed dial is their
+         * exit code 22, and the launcher (1.2.190+) runs repair before Play and
+         * stops there. Everything else they do works without the VPN, so for
+         * those two commands the link is reported as already up and they never
+         * dial. play is left alone: it must fail the dial to reach the app link. */
+        if (f12_parent_is_repair())
+        {
+            printf("STATUS:Connected\r\nSERVER:%s\r\nADDR:100.96.0.2\r\nEXCL:\r\nPBKS:1\r\n",
+                   f12_env("FUT12_LINK_SERVER"));
+            return 0;
+        }
         printf("STATUS:missing\r\n");
         return 0;
     }
