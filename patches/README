@@ -130,7 +130,7 @@ The seventeenth, crossover-26.3-launcher-graphics-backend.patch, is for the
 Aurora launcher from 1.2.190 on, which draws with Direct2D. Under CrossOver's
 d3dmetal backend Wine's d2d1 gets no device and the launcher could not open
 its window. Each process can now have its own backend (AppDefaults\<exe>\
-CrossOver-FIFA "GraphicsBackend"), and an exe named aurora15connector* gets
+CrossOver-FIFA "GraphicsBackend"), and Aurora.exe or aurora15connector* gets
 wined3d by default; the games it starts keep the bottle's d3dmetal.
 
 One more, crossover-26.3-computername-env-override.patch, is for FIFA 14 and
@@ -235,7 +235,7 @@ WHAT EACH ONE COVERS
                           running as administrator"; CX_AURORA_ELEVATE=0;
                           ntdll/unix/loader.c
     launcher-graphics-backend
-              Aurora      a per-exe graphics backend; aurora15connector*
+              Aurora      a per-exe graphics backend; Aurora.exe, aurora15connector*
                           gets wined3d so the Direct2D launcher (1.2.190+)
                           opens its window in a d3dmetal bottle; AppDefaults
                           "GraphicsBackend"; ntdll/unix/loader.c

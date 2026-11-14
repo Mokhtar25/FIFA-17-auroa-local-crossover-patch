@@ -23,9 +23,12 @@ cxcompatdb.so, which start_main_thread loads right after cx_profile_init,
 picks the backend for the process from CX_GRAPHICS_BACKEND in the unix
 environment. So cx_profile_init now sets that variable for this process:
 AppDefaults\<exe>\CrossOver-FIFA "GraphicsBackend" (d3dmetal, dxvk,
-wined3d; "bottle" for no change), else wined3d for an exe whose name starts
-with "aurora15connector" (any case; the updater runs it under versioned
-names in launcher-cache). CX_GAME_PROFILES=0 switches it off with the rest
+wined3d; "bottle" for no change), else wined3d for the Aurora launcher: an
+exe whose name starts with "aurora15connector" (any case; the updater runs
+it under versioned names in launcher-cache), or is "aurora" followed by
+something that is no letter or digit -- Aurora.exe, the name it is
+downloaded and usually started under. The first two versions of this patch
+had only the first rule and left Aurora.exe on D3DMetal, without a window. CX_GAME_PROFILES=0 switches it off with the rest
 of the profiles. +cxprofile logs gfx=<backend> when it acted.
 
 The games the launcher starts must keep the bottle's backend, and they would
@@ -51,7 +54,7 @@ other patch that touches dlls/ntdll/unix/loader.c.
 
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -2417,6 +2417,48 @@
+@@ -2417,6 +2417,53 @@
      }
      buf[n] = 0;
      return n > 0;  /* an empty value says nothing: as if it were not there */
@@ -70,8 +73,8 @@ other patch that touches dlls/ntdll/unix/loader.c.
 + *
 + * First of: HKCU\...\AppDefaults\<exe>\CrossOver-FIFA "GraphicsBackend"
 + * (d3dmetal, dxvk, wined3d, or "bottle" for no change), then the built-in
-+ * rule (an exe name starting "aurora15connector" gets wined3d).  NULL: keep
-+ * the bottle's. */
++ * rule (an exe named "aurora.exe" or starting "aurora15connector" gets
++ * wined3d).  NULL: keep the bottle's. */
 +/* While this process runs with its own backend, the bottle's values of the two
 + * variables that pick one, as they were before cxcompatdb.so ran: what every
 + * child must get instead of this process's (cx_gfx_child_*). */
@@ -84,6 +87,7 @@ other patch that touches dlls/ntdll/unix/loader.c.
 +
 +static const char *cx_graphics_backend( const WCHAR *exe, HANDLE key, char *buf, size_t size )
 +{
++#define CX_ALNUM(c) ((((c) | 0x20) >= 'a' && ((c) | 0x20) <= 'z') || ((c) >= '0' && (c) <= '9'))
 +    static const char aurora[] = "aurora15connector";
 +    unsigned int i;
 +
@@ -94,13 +98,17 @@ other patch that touches dlls/ntdll/unix/loader.c.
 +            return buf;
 +        WARN_(cxprofile)( "unknown GraphicsBackend %s for %s, ignored\n", debugstr_a(buf), debugstr_w(exe) );
 +    }
++    /* "aurora15connector*", or "aurora" and then no letter or digit: Aurora.exe,
++     * the name the launcher is downloaded under ("aurora (1).exe" too).  Not
++     * aurora15client, aurora17connector, aurora21-mathbridge. */
 +    for (i = 0; aurora[i]; i++)
-+        if (!exe[i] || (exe[i] | 0x20) != aurora[i]) return NULL;
++        if (!exe[i] || (exe[i] | 0x20) != aurora[i])
++            return i >= 6 && exe[6] && !CX_ALNUM( exe[6] ) ? "wined3d" : NULL;
 +    return "wined3d";
  }
  
  /***********************************************************************
-@@ -2433,7 +2475,8 @@
+@@ -2433,7 +2480,8 @@
      const char *source = "none", *profile = "none";
      const WCHAR *exe = main_wargv[0], *p;
      struct cx_settings s;
@@ -110,7 +118,7 @@ other patch that touches dlls/ntdll/unix/loader.c.
      HANDLE key = 0;
      int len;
  
-@@ -2485,6 +2528,24 @@
+@@ -2485,6 +2533,24 @@
              cx_parse_dstfix( strcasecmp( buf, "off" ) ? buf : NULL, &s );
              source = "appdefaults";
          }
@@ -135,7 +143,7 @@ other patch that touches dlls/ntdll/unix/loader.c.
          if (key) NtClose( key );
      }
  
-@@ -2504,12 +2565,60 @@
+@@ -2504,12 +2570,60 @@
      else if (!s.dstfix_val) strcpy( dstfix, "auto" );
      else snprintf( dstfix, sizeof(dstfix), "0x%lx", (unsigned long)s.dstfix_val );
      TRACE_(cxprofile)( "CXPROFILE exe=%s profile=%s source=%s dr_trap=%d topdown=%s dstfix=%s "
