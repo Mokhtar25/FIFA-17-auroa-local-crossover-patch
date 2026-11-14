@@ -163,7 +163,8 @@ APPLY ORDER MATTERS, AND IT IS NOT ALPHABETICAL
    15. crossover-26.3-remote-thread-exit.patch   (ntdll/unix thread.c, server.c,
                                                   unix_private.h)
    16. crossover-26.3-aurora-elevate.patch       (ntdll/unix/loader.c)
-   16a. crossover-26.3-launcher-graphics-backend.patch  (ntdll/unix/loader.c;
+   16a. crossover-26.3-launcher-graphics-backend.patch  (ntdll/unix/loader.c,
+                                                  process.c, unix_private.h;
                                                   on top of game-profiles)
    17. crossover-26.3-computername-env-override.patch  (kernelbase/registry.c;
                                                   independent; 32-bit DLL)

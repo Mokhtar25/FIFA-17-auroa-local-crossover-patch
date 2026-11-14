@@ -21,24 +21,41 @@ single out the launcher.
 
 cxcompatdb.so, which start_main_thread loads right after cx_profile_init,
 picks the backend for the process from CX_GRAPHICS_BACKEND in the unix
-environment. So cx_profile_init now sets that variable for this process
-alone: AppDefaults\<exe>\CrossOver-FIFA "GraphicsBackend" (d3dmetal, dxvk,
+environment. So cx_profile_init now sets that variable for this process:
+AppDefaults\<exe>\CrossOver-FIFA "GraphicsBackend" (d3dmetal, dxvk,
 wined3d; "bottle" for no change), else wined3d for an exe whose name starts
 with "aurora15connector" (any case; the updater runs it under versioned
-names in launcher-cache). The Windows environment block that children start
-with was built by init_startup_info before this, so the games a launcher
-starts still get the bottle's backend. CX_GAME_PROFILES=0 switches it off
-with the rest of the profiles. +cxprofile logs gfx=<backend> when it acted.
+names in launcher-cache). CX_GAME_PROFILES=0 switches it off with the rest
+of the profiles. +cxprofile logs gfx=<backend> when it acted.
+
+The games the launcher starts must keep the bottle's backend, and they would
+not on their own: a child starts with its parent's unix environment
+(write_env sends environ to CrossOver's loader; the fork path execs with
+it), so both CX_GRAPHICS_BACKEND and the CX_ACTIVE_GRAPHICS_BACKEND that
+cxcompatdb.so derives from it would follow the launcher into FIFA. The
+first version of this patch claimed otherwise. So cx_profile_init remembers
+the two variables as they were before it and cxcompatdb.so touched them, and
+process.c gives every child those values instead (write_env for the loader
+path, cx_gfx_child_fixup_environ after fork). Checked with a D3D11 probe in
+a d3dmetal bottle: run directly it maps D3DMetal.framework; renamed
+aurora15connector-p.exe it maps wined3d; started by a renamed cmd.exe it
+maps D3DMetal.framework again.
+
+When testing by hand: an ntdll.so copied into the app needs the lib64 rpath
+(install_name_tool -add_rpath @loader_path/../../../lib64) that setup.sh
+adds at install. Without it D3DMetal cannot be loaded and every process
+falls back to wined3d, whatever this patch does.
 
 Applies on top of game-profiles (it extends cx_profile_init) and after every
 other patch that touches dlls/ntdll/unix/loader.c.
 
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -2418,7 +2418,39 @@
+@@ -2417,6 +2417,48 @@
+     }
      buf[n] = 0;
      return n > 0;  /* an empty value says nothing: as if it were not there */
- }
++}
 +
 +/* The graphics backend for this process alone.  CrossOver picks d3dmetal,
 + * dxvk or wined3d per process: cxcompatdb.so, which start_main_thread loads
@@ -46,20 +63,30 @@ other patch that touches dlls/ntdll/unix/loader.c.
 + * environment.  A game bottle says d3dmetal for the games, but under d3dmetal
 + * Wine's own d2d1 gets no device (D3D10CoreCreateDevice fails with E_FAIL),
 + * so a launcher that draws with Direct2D -- Aurora15Connector 1.2.190 on --
-+ * cannot open its window.  Setting the variable here changes only this
-+ * process: the Windows environment block, which every child is started with,
-+ * was built by init_startup_info before this runs, so the games a launcher
-+ * starts still get the bottle's backend.
++ * cannot open its window.  The variable is set here for this process; a
++ * child would inherit it with the rest of the unix environment, so children
++ * are started with the bottle's values again (cx_gfx_child_* below) and the
++ * games a launcher starts keep the bottle's backend.
 + *
 + * First of: HKCU\...\AppDefaults\<exe>\CrossOver-FIFA "GraphicsBackend"
 + * (d3dmetal, dxvk, wined3d, or "bottle" for no change), then the built-in
 + * rule (an exe name starting "aurora15connector" gets wined3d).  NULL: keep
 + * the bottle's. */
++/* While this process runs with its own backend, the bottle's values of the two
++ * variables that pick one, as they were before cxcompatdb.so ran: what every
++ * child must get instead of this process's (cx_gfx_child_*). */
++static BOOL cx_gfx_changed;
++static struct { const char *name; char *bottle; } cx_gfx_vars[] =
++{
++    { "CX_GRAPHICS_BACKEND" },
++    { "CX_ACTIVE_GRAPHICS_BACKEND" },  /* set by cxcompatdb.so for itself */
++};
++
 +static const char *cx_graphics_backend( const WCHAR *exe, HANDLE key, char *buf, size_t size )
 +{
 +    static const char aurora[] = "aurora15connector";
 +    unsigned int i;
- 
++
 +    if (cx_reg_string( key, "GraphicsBackend", buf, size ))
 +    {
 +        if (!strcasecmp( buf, "bottle" )) return NULL;
@@ -70,12 +97,10 @@ other patch that touches dlls/ntdll/unix/loader.c.
 +    for (i = 0; aurora[i]; i++)
 +        if (!exe[i] || (exe[i] | 0x20) != aurora[i]) return NULL;
 +    return "wined3d";
-+}
-+
+ }
+ 
  /***********************************************************************
-  *           cx_profile_init
-  *
-@@ -2433,7 +2465,8 @@
+@@ -2433,7 +2475,8 @@
      const char *source = "none", *profile = "none";
      const WCHAR *exe = main_wargv[0], *p;
      struct cx_settings s;
@@ -85,21 +110,32 @@ other patch that touches dlls/ntdll/unix/loader.c.
      HANDLE key = 0;
      int len;
  
-@@ -2484,6 +2517,13 @@
-         {
+@@ -2485,6 +2528,24 @@
              cx_parse_dstfix( strcasecmp( buf, "off" ) ? buf : NULL, &s );
              source = "appdefaults";
-+        }
+         }
 +        if ((gfx = cx_graphics_backend( exe, key, gfx_buf, sizeof(gfx_buf) )))
 +        {
 +            const char *was = getenv( "CX_GRAPHICS_BACKEND" );
 +
-+            if (!was || strcasecmp( was, gfx )) setenv( "CX_GRAPHICS_BACKEND", gfx, 1 );
++            if (!was || strcasecmp( was, gfx ))
++            {
++                unsigned int i;
++
++                for (i = 0; i < ARRAY_SIZE(cx_gfx_vars); i++)
++                {
++                    const char *v = getenv( cx_gfx_vars[i].name );
++                    cx_gfx_vars[i].bottle = v ? strdup( v ) : NULL;
++                }
++                cx_gfx_changed = TRUE;
++                setenv( "CX_GRAPHICS_BACKEND", gfx, 1 );
++            }
 +            else gfx = NULL;  /* already the bottle's: nothing changed */
-         }
++        }
          if (key) NtClose( key );
      }
-@@ -2504,9 +2544,10 @@
+ 
+@@ -2504,12 +2565,60 @@
      else if (!s.dstfix_val) strcpy( dstfix, "auto" );
      else snprintf( dstfix, sizeof(dstfix), "0x%lx", (unsigned long)s.dstfix_val );
      TRACE_(cxprofile)( "CXPROFILE exe=%s profile=%s source=%s dr_trap=%d topdown=%s dstfix=%s "
@@ -109,5 +145,110 @@ other patch that touches dlls/ntdll/unix/loader.c.
                         (int)main_image_info.ImageFileSize, (int)main_image_info.CheckSum,
 +                       gfx ? " gfx=" : "", gfx ? gfx : "",
                         enabled ? "" : " CX_GAME_PROFILES=0" );
++}
++
++/* Children start with this process's unix environment (CrossOver's loader
++ * is sent environ, then the __CX_UNIX_ promotions; the fork path execs with
++ * it), so the backend set above, and the CX_ACTIVE_GRAPHICS_BACKEND that
++ * cxcompatdb.so sets from it, would follow a launcher into every game it
++ * starts.  The process itself keeps them; its children get the bottle's. */
++
++/* TRUE for an environ entry ("NAME=value") a child must not get as is. */
++BOOL cx_gfx_child_drops( const char *entry )
++{
++    unsigned int i;
++    size_t len;
++
++    if (!cx_gfx_changed) return FALSE;
++    for (i = 0; i < ARRAY_SIZE(cx_gfx_vars); i++)
++    {
++        len = strlen( cx_gfx_vars[i].name );
++        if (!strncmp( entry, cx_gfx_vars[i].name, len ) && entry[len] == '=') return TRUE;
++    }
++    return FALSE;
  }
  
++/* The entries a child gets instead, "NAME=value", for the variables the
++ * bottle sets; returns how many (up to 2) went into entries. */
++unsigned int cx_gfx_child_entries( char entries[][64] )
++{
++    unsigned int i, n = 0;
++
++    if (!cx_gfx_changed) return 0;
++    for (i = 0; i < ARRAY_SIZE(cx_gfx_vars); i++)
++        if (cx_gfx_vars[i].bottle)
++            snprintf( entries[n++], 64, "%s=%s", cx_gfx_vars[i].name, cx_gfx_vars[i].bottle );
++    return n;
++}
++
++/* In a forked child, before it execs: the bottle's values, or none. */
++void cx_gfx_child_fixup_environ(void)
++{
++    unsigned int i;
++
++    if (!cx_gfx_changed) return;
++    for (i = 0; i < ARRAY_SIZE(cx_gfx_vars); i++)
++    {
++        if (cx_gfx_vars[i].bottle) setenv( cx_gfx_vars[i].name, cx_gfx_vars[i].bottle, 1 );
++        else unsetenv( cx_gfx_vars[i].name );
++    }
++}
++
+ static inline BOOL cx_profile_resolved(void)
+ {
+     return __atomic_load_n( &cx_profile_ready, __ATOMIC_ACQUIRE );
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -239,8 +239,13 @@
+     uint64_t length = 0, promoted_length;
+     BOOL ret = TRUE;
+ 
++    char gfx_entries[2][64];
++    unsigned int i, gfx_count = cx_gfx_child_entries( gfx_entries );
++
+     for (elem = environ; *elem; elem++)
+-        length += strlen(*elem) + 1;
++        if (!cx_gfx_child_drops( *elem )) length += strlen(*elem) + 1;
++    for (i = 0; i < gfx_count; i++)
++        length += strlen( gfx_entries[i] ) + 1;
+ 
+     if (winedebug)
+         length += strlen(winedebug) + 1;
+@@ -266,7 +271,17 @@
+ 
+     for (elem = environ; *elem; elem++)
+     {
++        if (cx_gfx_child_drops( *elem )) continue;  /* the bottle's go below */
+         if (!write_data(sock, *elem, strlen(*elem) + 1))
++        {
++            WARN("failed to write environment variable\n");
++            ret = FALSE;
++            goto done;
++        }
++    }
++    for (i = 0; i < gfx_count; i++)
++    {
++        if (!write_data(sock, gfx_entries[i], strlen( gfx_entries[i] ) + 1))
+         {
+             WARN("failed to write environment variable\n");
+             ret = FALSE;
+@@ -881,6 +896,7 @@
+             if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+ 
+             if (winedebug) putenv( winedebug );
++            cx_gfx_child_fixup_environ();
+             if (unixdir != -1)
+             {
+                 fchdir( unixdir );
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -563,6 +563,9 @@
+ 
+ /* CrossOver-FIFA game profiles (loader.c) */
+ extern void cx_profile_init(void);
++extern BOOL cx_gfx_child_drops( const char *entry );
++extern unsigned int cx_gfx_child_entries( char entries[][64] );
++extern void cx_gfx_child_fixup_environ(void);
+ extern int cx_dr_trap(void);
+ extern ULONG_PTR cx_topdown_limit(void);
+ extern BOOL cx_fifa16_dstfix( ULONG_PTR *value );

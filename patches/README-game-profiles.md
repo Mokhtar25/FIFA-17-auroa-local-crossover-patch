@@ -135,7 +135,10 @@ environment before `start_main_thread` loads `cxcompatdb.so`, which is what
 reads it. First of: `AppDefaults\<exe>\CrossOver-FIFA` `GraphicsBackend` =
 `d3dmetal` | `dxvk` | `wined3d` (`bottle` = no change), then the built-in rule
 that an exe named `aurora15connector*` gets `wined3d`: Aurora's launcher from
-1.2.190 on draws with Direct2D, which gets no device under d3dmetal. Children
-are started from the Windows environment block, which was built before this,
-so the games a launcher starts keep the bottle's backend. `+cxprofile` shows
+1.2.190 on draws with Direct2D, which gets no device under d3dmetal. A child
+would inherit the variable with the rest of the unix environment, so
+`process.c` starts every child with the bottle's values again (`write_env`
+and the fork path): the games a launcher starts keep the bottle's backend.
+A hand-copied `ntdll.so` also needs the lib64 rpath setup.sh adds, or
+D3DMetal cannot load and everything falls back to wined3d. `+cxprofile` shows
 `gfx=<backend>` when it acted; `CX_GAME_PROFILES=0` turns it off too.
