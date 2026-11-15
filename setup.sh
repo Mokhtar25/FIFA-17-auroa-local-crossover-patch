@@ -5700,7 +5700,10 @@ BUNDLE_CHECK_TIMEOUT="${CX_BUNDLE_CHECK_TIMEOUT:-90}"
 # Under LC_ALL=C tolower changes no byte's place, so where it matched in the
 # copy is where it is in the line.
 bundle_redact() {
-    LC_ALL=C R_HOME="$HOME" R_HOMEA="${HOME:A}" awk '
+    # Wine names the home folder Z:\Users\<name> too, and JSON doubles the
+    # backslashes.
+    local w="Z:${HOME//\//\\}"
+    LC_ALL=C R_HOME="$HOME" R_HOMEA="${HOME:A}" R_HOMEW="$w" R_HOMEWW="${w//\\/\\\\}" awk '
         function lit(s, f, r,   out, i) {
             if (length(f) < 2) return s
             out = ""
@@ -5742,6 +5745,7 @@ bundle_redact() {
         }
         {
             s = lit(lit($0, ENVIRON["R_HOMEA"], "~"), ENVIRON["R_HOME"], "~")
+            s = lit(lit(s, ENVIRON["R_HOMEWW"], "~"), ENVIRON["R_HOMEW"], "~")
             s = scrub(s, Q K Q SEP Q "[^" Q "]*" Q, "^" Q K Q SEP Q, Q)
             s = scrub(s, Q K Q SEP "[^ \t" Q "]+", "^" Q K Q SEP, "")
             s = scrub(s, "bearer[ \t]+[^ \t" Q "\047,;<]+", "^bearer[ \t]+", "")
@@ -6026,6 +6030,7 @@ bundle_collect_bottle() {
         bundle_copy "$a/maclink/unknown-scripts.log" "$out/logs/aurora12/unknown-scripts.log"
         for f in "$out/logs/aurora12"/*(.); do
             LC_ALL=C sed -E -e 's/(signed in as )[^"]*/\1<name>/g' \
+                -e 's/("user"[[:space:]]*:[[:space:]]*")[^"]*/\1<name>/g' \
                 -e 's/(hostname[[:space:]]*[=:][[:space:]]*).*/\1<host>/' "$f" > "$f.tmp" 2>/dev/null \
                 && mv -f "$f.tmp" "$f" || rm -f "$f.tmp" "$f"
         done

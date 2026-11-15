@@ -324,7 +324,9 @@ class BundleTests(unittest.TestCase):
         logs.mkdir(parents=True)
         (logs / "futlink.log").write_text(
             '{"event": "progress", "step": "signin", "text": "signed in as player123"}\n'
-            '{"event": "log", "line": "game exited", "tag": "launch"}\n')
+            '{"event": "log", "line": "game exited", "tag": "launch"}\n'
+            '{"event": "result", "user": "player123", "game": "Z:\\\\'
+            + str(self.home).strip("/").replace("/", "\\\\") + '\\\\FIFA 12\\\\Game"}\n')
         (logs / "client_report.log").write_text("[preflight] hostname = someones-mac\n")
         for i in range(5):
             cdb = logs / f"cdb_2026111{i}_120000.log"
@@ -338,6 +340,7 @@ class BundleTests(unittest.TestCase):
         base = "bottles/Aurora17/logs/aurora12/"
         self.assertIn("game exited", files[base + "futlink.log"])
         self.assertIn("signed in as <name>", files[base + "futlink.log"])
+        self.assertIn('"user": "<name>", "game": "~\\\\FIFA 12', files[base + "futlink.log"])
         self.assertIn("hostname = <host>", files[base + "client_report.log"])
         self.assertIn("DONE:1", files[base + "unknown-scripts.log"])
         self.assertEqual(sorted(n for n in files if n.startswith(base + "cdb_")),
@@ -355,12 +358,17 @@ class BundleTests(unittest.TestCase):
             "token=abc1 auth=0 du=3", '"accessToken": "abc2", "name": "bob"',
             '"SessionKey"=hex:ab,cd', "Authorization: Bearer abc3", "Password: abc4",
             "?api_key=abc5&next=1", "mail Jo.Doe+x@example.co.uk", "HOME=" + str(self.home) + "/x",
+            "Install Dir = Z:" + str(self.home).replace("/", "\\") + "\\Games",
+            '"game": "Z:' + str(self.home).replace("/", "\\\\") + '\\\\Games"',
         ])
         result = subprocess.run(["/bin/zsh", "-c", function + "bundle_redact"], input=text,
                                 env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         for secret in ("abc1", "abc2", "ab,cd", "abc3", "abc4", "abc5", "Jo.Doe", str(self.home)):
             self.assertNotIn(secret, result.stdout)
+        self.assertIn("Install Dir = ~\\Games", result.stdout)
+        self.assertIn('"game": "~\\\\Games"', result.stdout)
+        self.assertNotIn(self.home.name, result.stdout)
         for kept in ("auth=0", "du=3", '"name": "bob"', "&next=1", "<email>", "HOME=~/x"):
             self.assertIn(kept, result.stdout)
 
