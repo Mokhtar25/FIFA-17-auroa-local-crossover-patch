@@ -314,6 +314,40 @@ class BundleTests(unittest.TestCase):
                 self.assertNotIn("must-not-go", text)
                 self.assertNotIn("abc123", text)
 
+    def test_bundle_collects_the_aurora12_helper_logs(self):
+        bottle = self.bottles / "Aurora17"
+        local = bottle / "drive_c/users/crossover/AppData/Local"
+        (local / "Aurora15Connector/logs").mkdir(parents=True)
+        (local / "Aurora15Connector/Aurora.exe").write_bytes(b"MZ\x00\x00")
+        (bottle / "cxbottle.conf").write_text("[EnvironmentVariables]\n")
+        logs = local / "Aurora12/FIFA12/server/logs"
+        logs.mkdir(parents=True)
+        (logs / "futlink.log").write_text(
+            '{"event": "progress", "step": "signin", "text": "signed in as player123"}\n'
+            '{"event": "log", "line": "game exited", "tag": "launch"}\n')
+        (logs / "client_report.log").write_text("[preflight] hostname = someones-mac\n")
+        for i in range(5):
+            cdb = logs / f"cdb_2026111{i}_120000.log"
+            cdb.write_text(f"cdb run {i}\n")
+            os.utime(cdb, (1700000000 + i, 1700000000 + i))
+        maclink = local / "Aurora12/maclink"
+        maclink.mkdir(parents=True)
+        (maclink / "unknown-scripts.log").write_text("----\nWrite-Output DONE:1\n")
+        (maclink / "client.key").write_text("must-not-go")
+        result, files = self.bundle()
+        base = "bottles/Aurora17/logs/aurora12/"
+        self.assertIn("game exited", files[base + "futlink.log"])
+        self.assertIn("signed in as <name>", files[base + "futlink.log"])
+        self.assertIn("hostname = <host>", files[base + "client_report.log"])
+        self.assertIn("DONE:1", files[base + "unknown-scripts.log"])
+        self.assertEqual(sorted(n for n in files if n.startswith(base + "cdb_")),
+                         [base + f"cdb_2026111{i}_120000.log" for i in (2, 3, 4)])
+        for name, text in files.items():
+            with self.subTest(name=name):
+                self.assertNotIn("must-not-go", text)
+                self.assertNotIn("player123", text)
+                self.assertNotIn("someones-mac", text)
+
     def test_redaction_forms(self):
         source = (ROOT / "setup.sh").read_text()
         function = "bundle_redact() {" + source.split("bundle_redact() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"

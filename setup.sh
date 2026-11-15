@@ -6004,6 +6004,31 @@ bundle_collect_bottle() {
             [ -n "$f" ] && bundle_copy "$f" "$out/logs/refut/${f:t}"
         done
         bundle_copy "$a/State/settings.json" "$out/logs/refut/settings.json"
+        # Aurora 12 (FIFA 12). Aurora's own fifa12/launcher.log only says
+        # "futlink play ended with code 0", which our launch stand-in returns
+        # whether the game ran for an hour or never started. What happened is
+        # in the helper's folder: futlink.log (the "launch" lines and the
+        # result's message), the newest cdb logs (did fifa.exe start, where
+        # did it stop), the forwarder and the server report. From maclink
+        # only unknown-scripts.log: the rest of that folder is this Mac's key
+        # and certificates. The helper logs name the Discord account and the
+        # Mac's hostname, which the filter does not cover, so those go here.
+        a="$u/AppData/Local/Aurora12"
+        if [ -d "$a/FIFA12/server/logs" ]; then
+            for f in futlink.log forwarder.out client_report.log; do
+                bundle_copy "$a/FIFA12/server/logs/$f" "$out/logs/aurora12/$f"
+            done
+            for f in ${(f)"$(bundle_newest 3 "$a/FIFA12/server/logs"/cdb_*.log)"} \
+                     ${(f)"$(bundle_newest 3 "$a/FIFA12/server/logs"/hang_*.log)"}; do
+                [ -n "$f" ] && bundle_copy "$f" "$out/logs/aurora12/${f:t}"
+            done
+        fi
+        bundle_copy "$a/maclink/unknown-scripts.log" "$out/logs/aurora12/unknown-scripts.log"
+        for f in "$out/logs/aurora12"/*(.); do
+            LC_ALL=C sed -E -e 's/(signed in as )[^"]*/\1<name>/g' \
+                -e 's/(hostname[[:space:]]*[=:][[:space:]]*).*/\1<host>/' "$f" > "$f.tmp" 2>/dev/null \
+                && mv -f "$f.tmp" "$f" || rm -f "$f.tmp" "$f"
+        done
     done
     bundle_copy "$bd/cxfifa-gate.log" "$out/logs/cxfifa-gate.log"
     return 0
@@ -6085,6 +6110,19 @@ bundle_games() {
                 head -c 65536 "$d/.aurora15/legends/state.json" | sed 's/^/  /'
                 print -r -- ""
             fi
+        fi
+        # FIFA 12's exe and DLLs are one level down, in Game.
+        if [ "$g" = fifa12 ] && [ -d "$d/Game" ]; then
+            print -r -- ""
+            print -r -- "in $d/Game:"
+            for f in "$d/Game"/*.(dll|DLL|exe|EXE|ini|INI)(.); do
+                size="$(stat -f %z "$f" 2>/dev/null || print 0)"
+                if [ "$size" -lt 20971520 ]; then
+                    print -r -- "  $(bundle_sha16 "$f")  $(printf '%10s' "$size")  ${f:t}"
+                else
+                    print -r -- "  (not hashed)      $(printf '%10s' "$size")  ${f:t}"
+                fi
+            done
         fi
         if [ "$g" = fifa17 ] && [ -d "$d/.crossover-fifa" ]; then
             print -r -- ""
