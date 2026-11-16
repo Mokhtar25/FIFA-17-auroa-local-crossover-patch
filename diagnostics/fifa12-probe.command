@@ -303,7 +303,13 @@ if [ -f "$F12/tools/futlink.exe" ]; then
     say "  helper: $(sha "$F12/tools/futlink.exe")"
     say "  If FIFA 12 opens: wait for its first menu, then quit the game normally."
     t0=$SECONDS
-    ( cd /tmp && "$WINE" --bottle "$BOTTLE" --no-gui --debugmsg "+loaddll,+process,+seh,+pid,+timestamp" \
+    INI="$U/Documents/FIFA 12/fifasetup.ini"
+    cat -v "$INI" > "$OUT/tests/t6-ini-before.txt" 2>&1
+    # +d3d9 and wined3d's warnings say why the game's CreateDevice fails
+    # (FIFA's dialog E0001); +win and the display mode calls say what screen
+    # mode it asked for.
+    ( cd /tmp && "$WINE" --bottle "$BOTTLE" --no-gui \
+        --debugmsg "+loaddll,+process,+seh,+pid,+timestamp,+d3d9,warn+d3d,warn+d3d_caps,+display,warn+win" \
         --cx-app 'C:\users\crossover\AppData\Local\Aurora12\FIFA12\tools\futlink.exe' \
         --root 'C:\users\crossover\AppData\Local\Aurora12\FIFA12' play ) > "$OUT/tests/t6-play.txt" 2>&1 &
     p=$!
@@ -327,6 +333,10 @@ if [ -f "$F12/tools/futlink.exe" ]; then
     cp_to "$F12/server/logs/forwarder.out" "$OUT/tests/t6-forwarder.out"
     cp_to "$F12/server/cdb_run.txt" "$OUT/tests/t6-cdb_run.txt"
     ls -la "$F12/server/logs" > "$OUT/tests/t6-logs-listing.txt" 2>&1
+    cat -v "$INI" > "$OUT/tests/t6-ini-after.txt" 2>&1
+    ls -la "${INI:h}" >> "$OUT/tests/t6-ini-after.txt" 2>&1
+    # The game writes a crash dump or a log next to itself on E0001.
+    [ -n "$GAME_MAC" ] && ls -lat "$GAME_MAC" | head -15 > "$OUT/tests/t6-game-newest.txt" 2>&1
 else
     say "  skipped: no futlink.exe"
 fi
