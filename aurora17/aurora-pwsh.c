@@ -24,6 +24,7 @@
 #include <tlhelp32.h>
 #include <shlobj.h>
 #include <bcrypt.h>
+#include <winhttp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
@@ -1645,9 +1646,15 @@ static const wchar_t *A21_REDIRECT_HOSTS[] = {
 };
 #define A21_NREDIRECT (sizeof(A21_REDIRECT_HOSTS) / sizeof(A21_REDIRECT_HOSTS[0]))
 
+/* The server's HTTPS fronts, in the order the pack's script tries them ($MathReportHosts).
+ * 21.aurorafut.com no longer resolves; the pack's current list has the .co.uk name. */
 static const wchar_t *A21_MATH_REPORT_HOSTS[] = {
-    L"21.aurorafut.com", L"21.onlyonemzy.com", L"21.aurcdn.com",
+    L"21.aurcdn.com", L"21.aurorafut.co.uk", L"21.onlyonemzy.com",
 };
+
+/* The FIFA21.exe digest a21_binary_preflight already computed (545 MB: not read twice). */
+static wchar_t cm_exe_digest_path[1024];
+static char cm_exe_digest_hex[65];
 
 static int a21_fail(int code, const wchar_t *fmt, ...)
 {
@@ -1957,6 +1964,12 @@ static int a21_binary_preflight(const wchar_t *path)
     }
     if (hash) BCryptDestroyHash(hash);
     if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    if (hashed)
+    {
+        for (int i = 0; i < 32; i++) _snprintf(cm_exe_digest_hex + i * 2, 3, "%02x", digest[i]);
+        wcsncpy(cm_exe_digest_path, path, 1023);
+        cm_exe_digest_path[1023] = 0;
+    }
     if (hashed && !memcmp(digest, malformed_hash, 32))
     {
         CloseHandle(h);
@@ -2834,6 +2847,1895 @@ static BOOL a21_trust_patched(const char *text, BOOL patch_origin)
     return TRUE;
 }
 
+/* ------------------------------------------------------------- client mod
+ *
+ * Install-ClientMod, Test-ClientModRequired and Send-ClientModReport of
+ * Start-Aurora21.ps1, with the prebuilt-patch path of Client-Mods.ps1, in C.
+ * The pack's script gets them from PowerShell; this bottle has none, and the
+ * pack's server exe has no command for it (its usage lists trust-patch,
+ * export-trust-anchors, redirector, ... and nothing that installs a mod).
+ *
+ * What it does, as the script does: ask the server for its client mod
+ * (/client/mods/manifest.json), download the patch (resuming a partial file),
+ * check its SHA-256, and build a ModData folder under
+ * %LOCALAPPDATA%\Aurora21\UltimateTeam\client-mods\leaderboards\<revision>:
+ * every archive of the game's Data and Patch folders linked (hard link, else
+ * symbolic link; never a 40 GB copy), the nine files the patch changes rebuilt from the
+ * game's own copy and checked against their result hash, and the mod's own
+ * archives added. Nothing in the game folder changes. FIFA then starts with
+ * -dataPath <ModData>. The profile and its compiled-profile.json are the
+ * script's own, so the two read each other's.
+ *
+ * The server requires the mod now (GET /client/mods/policy): a FIFA without
+ * it is refused at Ultimate Team's login, and the player sees a connection
+ * error. Everything is logged to client-mod.log beside the other helper logs.
+ */
+
+#define CM_JSON_MAX  (1u << 20)
+#define CM_PATH      1024
+
+typedef struct
+{
+    HMODULE dll;
+    HINTERNET (WINAPI *Open)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD);
+    HINTERNET (WINAPI *Connect)(HINTERNET, LPCWSTR, INTERNET_PORT, DWORD);
+    HINTERNET (WINAPI *OpenRequest)(HINTERNET, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR *, DWORD);
+    BOOL (WINAPI *SetTimeouts)(HINTERNET, int, int, int, int);
+    BOOL (WINAPI *SendRequest)(HINTERNET, LPCWSTR, DWORD, LPVOID, DWORD, DWORD, DWORD_PTR);
+    BOOL (WINAPI *ReceiveResponse)(HINTERNET, LPVOID);
+    BOOL (WINAPI *QueryHeaders)(HINTERNET, DWORD, LPCWSTR, LPVOID, LPDWORD, LPDWORD);
+    BOOL (WINAPI *ReadData)(HINTERNET, LPVOID, DWORD, LPDWORD);
+    BOOL (WINAPI *CloseHandle_)(HINTERNET);
+} cm_winhttp;
+
+static cm_winhttp cm_wh;
+static HANDLE cm_logh = INVALID_HANDLE_VALUE;
+static wchar_t cm_err[768];
+/* What this launch ended up with, for the report to matchmaking. */
+static char cm_revision[65];
+static const char *cm_install_state = "skipped";
+
+static void cm_log_line(const wchar_t *w)
+{
+    if (cm_logh == INVALID_HANDLE_VALUE) return;
+    char u[3072];
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, u, (int)sizeof(u) - 3, NULL, NULL);
+    if (n <= 0) return;
+    u[n - 1] = '\r';
+    u[n] = '\n';
+    DWORD wr;
+    WriteFile(cm_logh, u, (DWORD)n + 1, &wr, NULL);
+}
+
+/* Progress for the launcher ([INFO] lines) and for the log. */
+static void cm_say(const wchar_t *fmt, ...)
+{
+    wchar_t buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(buf, 1023, fmt, ap);
+    va_end(ap);
+    buf[1023] = 0;
+    cm_log_line(buf);
+    out(L"[INFO] %s\n", buf);
+}
+
+/* Detail for the log only. */
+static void cm_note(const wchar_t *fmt, ...)
+{
+    wchar_t buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(buf, 1023, fmt, ap);
+    va_end(ap);
+    buf[1023] = 0;
+    cm_log_line(buf);
+}
+
+static BOOL cm_fail(const wchar_t *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(cm_err, 767, fmt, ap);
+    va_end(ap);
+    cm_err[767] = 0;
+    return FALSE;
+}
+
+static void cm_path(wchar_t *dst, const wchar_t *a, const wchar_t *b)
+{
+    _snwprintf(dst, CM_PATH - 1, L"%s\\%s", a, b);
+    dst[CM_PATH - 1] = 0;
+}
+
+static BOOL cm_is_hex64(const char *s)
+{
+    if (!s || strlen(s) != 64) return FALSE;
+    for (int i = 0; i < 64; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return FALSE;
+    return TRUE;
+}
+
+static void cm_widen(const char *s, wchar_t *dst, size_t cap)
+{
+    if (!MultiByteToWideChar(CP_UTF8, 0, s, -1, dst, (int)cap)) dst[0] = 0;
+    dst[cap - 1] = 0;
+}
+
+/* --------------------------------------------------------------- SHA-256 */
+
+typedef struct { BCRYPT_ALG_HANDLE alg; BCRYPT_HASH_HANDLE h; BOOL ok; } cm_sha;
+
+static void cm_sha_begin(cm_sha *s)
+{
+    s->alg = NULL;
+    s->h = NULL;
+    s->ok = BCryptOpenAlgorithmProvider(&s->alg, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0 &&
+            BCryptCreateHash(s->alg, &s->h, NULL, 0, NULL, 0, 0) == 0;
+}
+
+static void cm_sha_add(cm_sha *s, const void *p, size_t n)
+{
+    const BYTE *b = p;
+    while (s->ok && n)
+    {
+        ULONG c = n > (1u << 24) ? (1u << 24) : (ULONG)n;
+        if (BCryptHashData(s->h, (PUCHAR)b, c, 0) != 0) s->ok = FALSE;
+        b += c;
+        n -= c;
+    }
+}
+
+static BOOL cm_sha_end(cm_sha *s, char hex[65])
+{
+    BYTE d[32];
+    BOOL ok = s->ok && BCryptFinishHash(s->h, d, 32, 0) == 0;
+    if (s->h) BCryptDestroyHash(s->h);
+    if (s->alg) BCryptCloseAlgorithmProvider(s->alg, 0);
+    if (ok)
+        for (int i = 0; i < 32; i++) _snprintf(hex + i * 2, 3, "%02x", d[i]);
+    else
+        hex[0] = 0;
+    return ok;
+}
+
+static BOOL cm_sha_file(const wchar_t *path, char hex[65])
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (h == INVALID_HANDLE_VALUE) return cm_fail(L"%s could not be read (Windows error %lu).", path, GetLastError());
+    BYTE *buf = malloc(1 << 20);
+    if (!buf) { CloseHandle(h); return cm_fail(L"Out of memory."); }
+    cm_sha s;
+    cm_sha_begin(&s);
+    DWORD rd;
+    BOOL read_ok = TRUE;
+    for (;;)
+    {
+        if (!ReadFile(h, buf, 1 << 20, &rd, NULL)) { read_ok = FALSE; break; }
+        if (!rd) break;
+        cm_sha_add(&s, buf, rd);
+    }
+    free(buf);
+    CloseHandle(h);
+    BOOL ok = cm_sha_end(&s, hex);
+    if (!read_ok) return cm_fail(L"%s could not be read to the end.", path);
+    return ok || cm_fail(L"SHA-256 is not available.");
+}
+
+/* ------------------------------------------------------------------ JSON */
+
+enum { CJ_NULL, CJ_BOOL, CJ_NUM, CJ_STR, CJ_ARR, CJ_OBJ };
+
+typedef struct cm_j
+{
+    int t;
+    char *s;
+    long long n;
+    struct cm_j **v;
+    char **k;
+    int c, cap;
+} cm_j;
+
+static void cj_free(cm_j *j)
+{
+    if (!j) return;
+    for (int i = 0; i < j->c; i++)
+    {
+        cj_free(j->v[i]);
+        if (j->k) free(j->k[i]);
+    }
+    free(j->v);
+    free(j->k);
+    free(j->s);
+    free(j);
+}
+
+static void cj_ws(const char **p)
+{
+    while (**p == ' ' || **p == '\t' || **p == '\r' || **p == '\n') (*p)++;
+}
+
+static char *cj_string(const char **p)
+{
+    if (**p != '"') return NULL;
+    (*p)++;
+    size_t cap = 64, n = 0;
+    char *o = malloc(cap);
+    if (!o) return NULL;
+    while (**p && **p != '"')
+    {
+        unsigned ch = (unsigned char)**p;
+        (*p)++;
+        if (ch == '\\')
+        {
+            ch = (unsigned char)**p;
+            if (!ch) break;
+            (*p)++;
+            switch (ch)
+            {
+            case 'n': ch = '\n'; break;
+            case 'r': ch = '\r'; break;
+            case 't': ch = '\t'; break;
+            case 'b': ch = '\b'; break;
+            case 'f': ch = '\f'; break;
+            case 'u':
+            {
+                unsigned v = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    char h = **p;
+                    if (!isxdigit((unsigned char)h)) { free(o); return NULL; }
+                    v = v * 16 + (unsigned)(h <= '9' ? h - '0' : (h | 0x20) - 'a' + 10);
+                    (*p)++;
+                }
+                ch = v;
+                break;
+            }
+            default: break;
+            }
+        }
+        if (n + 5 >= cap)
+        {
+            cap *= 2;
+            char *nb = realloc(o, cap);
+            if (!nb) { free(o); return NULL; }
+            o = nb;
+        }
+        if (ch < 0x80) o[n++] = (char)ch;
+        else if (ch < 0x800) { o[n++] = (char)(0xC0 | (ch >> 6)); o[n++] = (char)(0x80 | (ch & 0x3F)); }
+        else { o[n++] = (char)(0xE0 | (ch >> 12)); o[n++] = (char)(0x80 | ((ch >> 6) & 0x3F)); o[n++] = (char)(0x80 | (ch & 0x3F)); }
+    }
+    if (**p != '"') { free(o); return NULL; }
+    (*p)++;
+    o[n] = 0;
+    return o;
+}
+
+static BOOL cj_push(cm_j *j, cm_j *child, char *key)
+{
+    if (j->c == j->cap)
+    {
+        int cap = j->cap ? j->cap * 2 : 8;
+        cm_j **nv = realloc(j->v, (size_t)cap * sizeof(*nv));
+        if (!nv) return FALSE;
+        j->v = nv;
+        if (j->t == CJ_OBJ)
+        {
+            char **nk = realloc(j->k, (size_t)cap * sizeof(*nk));
+            if (!nk) return FALSE;
+            j->k = nk;
+        }
+        j->cap = cap;
+    }
+    j->v[j->c] = child;
+    if (j->t == CJ_OBJ) j->k[j->c] = key;
+    j->c++;
+    return TRUE;
+}
+
+static cm_j *cj_value(const char **p, int depth)
+{
+    if (depth > 16) return NULL;
+    cj_ws(p);
+    cm_j *j = calloc(1, sizeof(*j));
+    if (!j) return NULL;
+    char c = **p;
+    if (c == '"')
+    {
+        j->t = CJ_STR;
+        j->s = cj_string(p);
+        if (!j->s) { cj_free(j); return NULL; }
+    }
+    else if (c == '{' || c == '[')
+    {
+        j->t = c == '{' ? CJ_OBJ : CJ_ARR;
+        char close = c == '{' ? '}' : ']';
+        (*p)++;
+        cj_ws(p);
+        if (**p == close) { (*p)++; return j; }
+        for (;;)
+        {
+            char *key = NULL;
+            cj_ws(p);
+            if (j->t == CJ_OBJ)
+            {
+                key = cj_string(p);
+                cj_ws(p);
+                if (!key || **p != ':') { free(key); cj_free(j); return NULL; }
+                (*p)++;
+            }
+            cm_j *child = cj_value(p, depth + 1);
+            if (!child || !cj_push(j, child, key)) { cj_free(child); free(key); cj_free(j); return NULL; }
+            cj_ws(p);
+            if (**p == ',') { (*p)++; continue; }
+            if (**p == close) { (*p)++; return j; }
+            cj_free(j);
+            return NULL;
+        }
+    }
+    else if (!strncmp(*p, "true", 4)) { j->t = CJ_BOOL; j->n = 1; *p += 4; }
+    else if (!strncmp(*p, "false", 5)) { j->t = CJ_BOOL; *p += 5; }
+    else if (!strncmp(*p, "null", 4)) { j->t = CJ_NULL; *p += 4; }
+    else if (c == '-' || (c >= '0' && c <= '9'))
+    {
+        char *end;
+        j->t = CJ_NUM;
+        j->n = _strtoi64(*p, &end, 10);
+        while (*end == '.' || *end == 'e' || *end == 'E' || *end == '+' || *end == '-' || (*end >= '0' && *end <= '9')) end++;
+        *p = end;
+    }
+    else { cj_free(j); return NULL; }
+    return j;
+}
+
+static cm_j *cj_parse(const char *text)
+{
+    if ((unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) text += 3;
+    const char *p = text;
+    cm_j *j = cj_value(&p, 0);
+    if (j) { cj_ws(&p); if (*p) { cj_free(j); return NULL; } }
+    return j;
+}
+
+static const cm_j *cj_get(const cm_j *o, const char *key)
+{
+    if (!o || o->t != CJ_OBJ) return NULL;
+    for (int i = 0; i < o->c; i++)
+        if (!strcmp(o->k[i], key)) return o->v[i];
+    return NULL;
+}
+
+static const char *cj_str(const cm_j *o, const char *key)
+{
+    const cm_j *v = cj_get(o, key);
+    return v && v->t == CJ_STR ? v->s : NULL;
+}
+
+static long long cj_num(const cm_j *o, const char *key, long long dflt)
+{
+    const cm_j *v = cj_get(o, key);
+    return v && v->t == CJ_NUM ? v->n : dflt;
+}
+
+/* A JSON string for a Windows path or any text: quotes and backslashes escaped. */
+static void cm_json_str(const wchar_t *w, char *dst, size_t cap)
+{
+    char u[CM_PATH * 3];
+    if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof(u), NULL, NULL)) u[0] = 0;
+    size_t n = 0;
+    for (const char *p = u; *p && n + 8 < cap; p++)
+    {
+        if (*p == '"' || *p == '\\') dst[n++] = '\\';
+        if ((unsigned char)*p < 0x20) continue;
+        dst[n++] = *p;
+    }
+    dst[n] = 0;
+}
+
+/* CM-INFLATE-BEGIN: RFC 1951, after Mark Adler's puff.c. Whole input and output in
+ * memory; returns 0 only when the stream ends exactly at outlen bytes. */
+typedef struct
+{
+    const BYTE *in;
+    size_t inlen, inpos;
+    long bitbuf;
+    int bitcnt;
+    BYTE *out;
+    size_t outlen, outpos;
+} cm_inf;
+
+typedef struct { short count[16]; short symbol[288]; } cm_huff;
+
+static int cm_bits(cm_inf *s, int need)
+{
+    long val = s->bitbuf;
+    while (s->bitcnt < need)
+    {
+        if (s->inpos >= s->inlen) return -1;
+        val |= (long)s->in[s->inpos++] << s->bitcnt;
+        s->bitcnt += 8;
+    }
+    s->bitbuf = val >> need;
+    s->bitcnt -= need;
+    return (int)(val & ((1L << need) - 1));
+}
+
+static int cm_decode(cm_inf *s, const cm_huff *h)
+{
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len <= 15; len++)
+    {
+        int b = cm_bits(s, 1);
+        if (b < 0) return -1;
+        code |= b;
+        int count = h->count[len];
+        if (code - count < first) return h->symbol[index + (code - first)];
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+    }
+    return -2;
+}
+
+static int cm_construct(cm_huff *h, const short *length, int n)
+{
+    short offs[16];
+    for (int len = 0; len <= 15; len++) h->count[len] = 0;
+    for (int sym = 0; sym < n; sym++) h->count[length[sym]]++;
+    if (h->count[0] == n) return 0;
+    int left = 1;
+    for (int len = 1; len <= 15; len++)
+    {
+        left <<= 1;
+        left -= h->count[len];
+        if (left < 0) return left;
+    }
+    offs[1] = 0;
+    for (int len = 1; len < 15; len++) offs[len + 1] = (short)(offs[len] + h->count[len]);
+    for (int sym = 0; sym < n; sym++)
+        if (length[sym] != 0) h->symbol[offs[length[sym]]++] = (short)sym;
+    return left;
+}
+
+static int cm_codes(cm_inf *s, const cm_huff *lencode, const cm_huff *distcode)
+{
+    static const short lens[29] = { 3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258 };
+    static const short lext[29] = { 0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0 };
+    static const short dists[30] = { 1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577 };
+    static const short dext[30] = { 0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13 };
+    int symbol;
+    do
+    {
+        symbol = cm_decode(s, lencode);
+        if (symbol < 0) return symbol;
+        if (symbol < 256)
+        {
+            if (s->outpos >= s->outlen) return 1;
+            s->out[s->outpos++] = (BYTE)symbol;
+        }
+        else if (symbol > 256)
+        {
+            symbol -= 257;
+            if (symbol >= 29) return -10;
+            int extra = cm_bits(s, lext[symbol]);
+            if (extra < 0) return -1;
+            size_t len = (size_t)(lens[symbol] + extra);
+            symbol = cm_decode(s, distcode);
+            if (symbol < 0) return symbol;
+            extra = cm_bits(s, dext[symbol]);
+            if (extra < 0) return -1;
+            size_t dist = (size_t)(dists[symbol] + extra);
+            if (dist > s->outpos) return -11;
+            if (s->outpos + len > s->outlen) return 1;
+            BYTE *to = s->out + s->outpos;
+            const BYTE *from = to - dist;
+            s->outpos += len;
+            while (len--) *to++ = *from++;
+        }
+    } while (symbol != 256);
+    return 0;
+}
+
+static int cm_stored(cm_inf *s)
+{
+    s->bitbuf = 0;
+    s->bitcnt = 0;
+    if (s->inpos + 4 > s->inlen) return 2;
+    unsigned len = s->in[s->inpos] | ((unsigned)s->in[s->inpos + 1] << 8);
+    unsigned nlen = s->in[s->inpos + 2] | ((unsigned)s->in[s->inpos + 3] << 8);
+    s->inpos += 4;
+    if (len != (~nlen & 0xffffu)) return -2;
+    if (s->inpos + len > s->inlen) return 2;
+    if (s->outpos + len > s->outlen) return 1;
+    memcpy(s->out + s->outpos, s->in + s->inpos, len);
+    s->inpos += len;
+    s->outpos += len;
+    return 0;
+}
+
+static int cm_fixed(cm_inf *s)
+{
+    short lengths[288];
+    cm_huff lencode, distcode;
+    int sym;
+    for (sym = 0; sym < 144; sym++) lengths[sym] = 8;
+    for (; sym < 256; sym++) lengths[sym] = 9;
+    for (; sym < 280; sym++) lengths[sym] = 7;
+    for (; sym < 288; sym++) lengths[sym] = 8;
+    cm_construct(&lencode, lengths, 288);
+    for (sym = 0; sym < 30; sym++) lengths[sym] = 5;
+    cm_construct(&distcode, lengths, 30);
+    return cm_codes(s, &lencode, &distcode);
+}
+
+static int cm_dynamic(cm_inf *s)
+{
+    static const short order[19] = { 16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15 };
+    short lengths[320];
+    cm_huff lencode, distcode;
+    int nlen = cm_bits(s, 5), ndist = cm_bits(s, 5), ncode = cm_bits(s, 4);
+    if (nlen < 0 || ndist < 0 || ncode < 0) return -1;
+    nlen += 257;
+    ndist += 1;
+    ncode += 4;
+    if (nlen > 286 || ndist > 30) return -3;
+    int index;
+    for (index = 0; index < ncode; index++)
+    {
+        int b = cm_bits(s, 3);
+        if (b < 0) return -1;
+        lengths[order[index]] = (short)b;
+    }
+    for (; index < 19; index++) lengths[order[index]] = 0;
+    if (cm_construct(&lencode, lengths, 19) != 0) return -4;
+    index = 0;
+    while (index < nlen + ndist)
+    {
+        int symbol = cm_decode(s, &lencode);
+        if (symbol < 0) return symbol;
+        if (symbol < 16) lengths[index++] = (short)symbol;
+        else
+        {
+            int len = 0, rep, b;
+            if (symbol == 16)
+            {
+                if (index == 0) return -5;
+                len = lengths[index - 1];
+                b = cm_bits(s, 2);
+                rep = 3 + b;
+            }
+            else if (symbol == 17) { b = cm_bits(s, 3); rep = 3 + b; }
+            else { b = cm_bits(s, 7); rep = 11 + b; }
+            if (b < 0) return -1;
+            if (index + rep > nlen + ndist) return -6;
+            while (rep--) lengths[index++] = (short)len;
+        }
+    }
+    if (lengths[256] == 0) return -9;
+    int err = cm_construct(&lencode, lengths, nlen);
+    if (err && (err < 0 || nlen != lencode.count[0] + lencode.count[1])) return -7;
+    err = cm_construct(&distcode, lengths + nlen, ndist);
+    if (err && (err < 0 || ndist != distcode.count[0] + distcode.count[1])) return -8;
+    return cm_codes(s, &lencode, &distcode);
+}
+
+static int cm_inflate(const BYTE *in, size_t inlen, BYTE *out, size_t outlen)
+{
+    cm_inf s;
+    memset(&s, 0, sizeof(s));
+    s.in = in;
+    s.inlen = inlen;
+    s.out = out;
+    s.outlen = outlen;
+    int last, type, err;
+    do
+    {
+        last = cm_bits(&s, 1);
+        type = cm_bits(&s, 2);
+        if (last < 0 || type < 0) return -1;
+        err = type == 0 ? cm_stored(&s) : type == 1 ? cm_fixed(&s) : type == 2 ? cm_dynamic(&s) : -1;
+        if (err) return err;
+    } while (!last);
+    return s.outpos == outlen ? 0 : -20;
+}
+/* CM-INFLATE-END */
+
+/* ------------------------------------------------------------------- zip */
+
+typedef struct
+{
+    HANDLE f;
+    ULONGLONG size;
+    BYTE *cd;
+    DWORD cdsize;
+    int count;
+} cm_zip;
+
+static unsigned cm_u16(const BYTE *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
+static unsigned cm_u32(const BYTE *p) { return cm_u16(p) | (cm_u16(p + 2) << 16); }
+
+static BOOL cm_read_at(HANDLE f, ULONGLONG off, void *buf, DWORD n)
+{
+    LARGE_INTEGER li;
+    li.QuadPart = (LONGLONG)off;
+    DWORD rd = 0;
+    return SetFilePointerEx(f, li, NULL, FILE_BEGIN) && ReadFile(f, buf, n, &rd, NULL) && rd == n;
+}
+
+static void cm_zip_close(cm_zip *z)
+{
+    if (z->f != INVALID_HANDLE_VALUE && z->f) CloseHandle(z->f);
+    free(z->cd);
+    memset(z, 0, sizeof(*z));
+    z->f = INVALID_HANDLE_VALUE;
+}
+
+static BOOL cm_zip_open(cm_zip *z, const wchar_t *path)
+{
+    memset(z, 0, sizeof(*z));
+    z->f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    LARGE_INTEGER sz;
+    if (z->f == INVALID_HANDLE_VALUE || !GetFileSizeEx(z->f, &sz))
+    {
+        DWORD err = GetLastError();
+        cm_zip_close(z);
+        return cm_fail(L"The client mod patch could not be opened (Windows error %lu).", err);
+    }
+    z->size = (ULONGLONG)sz.QuadPart;
+    DWORD tail = z->size < 65557 ? (DWORD)z->size : 65557;
+    BYTE *buf = malloc(tail);
+    if (!buf || !cm_read_at(z->f, z->size - tail, buf, tail))
+    {
+        free(buf);
+        cm_zip_close(z);
+        return cm_fail(L"The client mod patch could not be read.");
+    }
+    long at = -1;
+    for (long i = (long)tail - 22; i >= 0; i--)
+        if (cm_u32(buf + i) == 0x06054b50u) { at = i; break; }
+    if (at < 0) { free(buf); cm_zip_close(z); return cm_fail(L"The client mod patch is not a zip file."); }
+    unsigned total = cm_u16(buf + at + 10), cdsize = cm_u32(buf + at + 12), cdoff = cm_u32(buf + at + 16);
+    free(buf);
+    if (total == 0xFFFF || cdsize == 0xFFFFFFFFu || cdoff == 0xFFFFFFFFu || cdsize > (64u << 20) ||
+        (ULONGLONG)cdoff + cdsize > z->size)
+    {
+        cm_zip_close(z);
+        return cm_fail(L"The client mod patch is a zip file this installer does not read.");
+    }
+    z->cd = malloc(cdsize ? cdsize : 1);
+    if (!z->cd || !cm_read_at(z->f, cdoff, z->cd, cdsize))
+    {
+        cm_zip_close(z);
+        return cm_fail(L"The client mod patch's directory could not be read.");
+    }
+    z->cdsize = cdsize;
+    z->count = (int)total;
+    return TRUE;
+}
+
+/* The entry's method, sizes and local header offset. */
+static BOOL cm_zip_find(const cm_zip *z, const char *name, unsigned *method, unsigned *csize,
+                        unsigned *usize, unsigned *lho)
+{
+    size_t want = strlen(name);
+    DWORD p = 0;
+    for (int i = 0; i < z->count; i++)
+    {
+        if (p + 46 > z->cdsize || cm_u32(z->cd + p) != 0x02014b50u) return FALSE;
+        unsigned nl = cm_u16(z->cd + p + 28), el = cm_u16(z->cd + p + 30), cl = cm_u16(z->cd + p + 32);
+        if (p + 46 + nl + el + cl > z->cdsize) return FALSE;
+        if (nl == want && !memcmp(z->cd + p + 46, name, nl))
+        {
+            *method = cm_u16(z->cd + p + 10);
+            *csize = cm_u32(z->cd + p + 20);
+            *usize = cm_u32(z->cd + p + 24);
+            *lho = cm_u32(z->cd + p + 42);
+            return TRUE;
+        }
+        p += 46 + nl + el + cl;
+    }
+    return FALSE;
+}
+
+/* The entry's bytes, NUL terminated (the NUL is not counted in *len). Free with free(). */
+static BYTE *cm_zip_read(const cm_zip *z, const char *name, size_t *len)
+{
+    unsigned method, csize, usize, lho;
+    wchar_t wname[160];
+    cm_widen(name, wname, 160);
+    if (!cm_zip_find(z, name, &method, &csize, &usize, &lho))
+    {
+        cm_fail(L"The client mod patch lacks %s.", wname);
+        return NULL;
+    }
+    BYTE head[30];
+    if (!cm_read_at(z->f, lho, head, 30) || cm_u32(head) != 0x04034b50u)
+    {
+        cm_fail(L"The client mod patch's %s has a bad header.", wname);
+        return NULL;
+    }
+    ULONGLONG data = (ULONGLONG)lho + 30 + cm_u16(head + 26) + cm_u16(head + 28);
+    if (data + csize > z->size || (method != 0 && method != 8) || (method == 0 && csize != usize))
+    {
+        cm_fail(L"The client mod patch's %s cannot be read.", wname);
+        return NULL;
+    }
+    BYTE *packed = malloc(csize ? csize : 1);
+    BYTE *plain = malloc((size_t)usize + 1);
+    if (!packed || !plain || !cm_read_at(z->f, data, packed, csize))
+    {
+        free(packed);
+        free(plain);
+        cm_fail(L"The client mod patch's %s could not be read.", wname);
+        return NULL;
+    }
+    int rc = method == 0 ? (memcpy(plain, packed, usize), 0) : cm_inflate(packed, csize, plain, usize);
+    free(packed);
+    if (rc != 0)
+    {
+        free(plain);
+        cm_fail(L"The client mod patch's %s is damaged (inflate %d).", wname, rc);
+        return NULL;
+    }
+    plain[usize] = 0;
+    if (len) *len = usize;
+    return plain;
+}
+
+/* ------------------------------------------------------------------ HTTPS */
+
+static BOOL cm_wh_load(void)
+{
+    if (cm_wh.dll) return cm_wh.Open != NULL;
+    cm_wh.dll = LoadLibraryW(L"winhttp.dll");
+    if (!cm_wh.dll) return FALSE;
+    cm_wh.Open = (void *)GetProcAddress(cm_wh.dll, "WinHttpOpen");
+    cm_wh.Connect = (void *)GetProcAddress(cm_wh.dll, "WinHttpConnect");
+    cm_wh.OpenRequest = (void *)GetProcAddress(cm_wh.dll, "WinHttpOpenRequest");
+    cm_wh.SetTimeouts = (void *)GetProcAddress(cm_wh.dll, "WinHttpSetTimeouts");
+    cm_wh.SendRequest = (void *)GetProcAddress(cm_wh.dll, "WinHttpSendRequest");
+    cm_wh.ReceiveResponse = (void *)GetProcAddress(cm_wh.dll, "WinHttpReceiveResponse");
+    cm_wh.QueryHeaders = (void *)GetProcAddress(cm_wh.dll, "WinHttpQueryHeaders");
+    cm_wh.ReadData = (void *)GetProcAddress(cm_wh.dll, "WinHttpReadData");
+    cm_wh.CloseHandle_ = (void *)GetProcAddress(cm_wh.dll, "WinHttpCloseHandle");
+    if (!cm_wh.Connect || !cm_wh.OpenRequest || !cm_wh.SetTimeouts || !cm_wh.SendRequest ||
+        !cm_wh.ReceiveResponse || !cm_wh.QueryHeaders || !cm_wh.ReadData || !cm_wh.CloseHandle_)
+        cm_wh.Open = NULL;
+    return cm_wh.Open != NULL;
+}
+
+/* One HTTPS request to one of the server's fronts; the certificate is checked as
+ * usual. Returns the HTTP status, or 0 when none came (cm_err says why).
+ * A body that arrives goes to `file` when that is a handle (positioned by the
+ * caller; a ranged request the server answers in full starts the file again),
+ * else into *mem, NUL terminated and at most CM_JSON_MAX long.
+ * `expect` is the download's total size, for the progress lines. */
+static int cm_http(const wchar_t *method, const wchar_t *host, const wchar_t *path,
+                   const char *post, ULONGLONG range_from, HANDLE file, char **mem,
+                   ULONGLONG expect)
+{
+    if (mem) *mem = NULL;
+    if (!cm_wh_load()) { cm_fail(L"WinHTTP is not available."); return 0; }
+    int status = 0;
+    HINTERNET ses = NULL, con = NULL, req = NULL;
+    BYTE *chunk = NULL;
+    char *body = NULL;
+
+    ses = cm_wh.Open(L"Aurora21-Client", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+    if (!ses) { cm_fail(L"WinHTTP could not start (Windows error %lu).", GetLastError()); goto end; }
+    cm_wh.SetTimeouts(ses, 15000, 15000, 30000, 60000);
+    con = cm_wh.Connect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    req = con ? cm_wh.OpenRequest(con, method, path, NULL, WINHTTP_NO_REFERER,
+                                  WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : NULL;
+    if (!req) { cm_fail(L"%s: no connection (Windows error %lu).", host, GetLastError()); goto end; }
+
+    wchar_t headers[256] = L"";
+    if (post) _snwprintf(headers, 255, L"Content-Type: application/json\r\n");
+    if (range_from)
+    {
+        size_t n = wcslen(headers);
+        _snwprintf(headers + n, 255 - n, L"Range: bytes=%llu-\r\n", range_from);
+    }
+    headers[255] = 0;
+    DWORD plen = post ? (DWORD)strlen(post) : 0;
+    if (!cm_wh.SendRequest(req, headers[0] ? headers : WINHTTP_NO_ADDITIONAL_HEADERS,
+                           headers[0] ? (DWORD)-1 : 0, (LPVOID)post, plen, plen, 0) ||
+        !cm_wh.ReceiveResponse(req, NULL))
+    {
+        cm_fail(L"%s: no answer (Windows error %lu).", host, GetLastError());
+        goto end;
+    }
+    DWORD code = 0, csz = sizeof(code);
+    if (!cm_wh.QueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &code, &csz, WINHTTP_NO_HEADER_INDEX))
+    {
+        cm_fail(L"%s: no status (Windows error %lu).", host, GetLastError());
+        goto end;
+    }
+    status = (int)code;
+
+    BOOL to_file = file != INVALID_HANDLE_VALUE;
+    if (to_file && status != 200 && status != 206) goto end;
+    ULONGLONG done = 0;
+    if (to_file)
+    {
+        if (range_from && status != 206)
+        {
+            LARGE_INTEGER z0;
+            z0.QuadPart = 0;
+            SetFilePointerEx(file, z0, NULL, FILE_BEGIN);
+            SetEndOfFile(file);
+            range_from = 0;
+        }
+        done = range_from;
+    }
+    chunk = malloc(65536);
+    size_t blen = 0, bcap = 4096;
+    if (!to_file) body = malloc(bcap);
+    if (!chunk || (!to_file && !body)) { cm_fail(L"Out of memory."); status = 0; goto end; }
+    int shown = -1;
+    for (;;)
+    {
+        DWORD rd = 0;
+        if (!cm_wh.ReadData(req, chunk, 65536, &rd))
+        {
+            cm_fail(L"%s: the download broke off (Windows error %lu).", host, GetLastError());
+            status = 0;
+            goto end;
+        }
+        if (!rd) break;
+        if (to_file)
+        {
+            DWORD wr = 0;
+            if (!WriteFile(file, chunk, rd, &wr, NULL) || wr != rd)
+            {
+                cm_fail(L"The download could not be written (Windows error %lu); is the disk full?", GetLastError());
+                status = 0;
+                goto end;
+            }
+            done += rd;
+            if (expect)
+            {
+                int pct = (int)(100 * done / expect);
+                if (pct >= shown + 10)
+                {
+                    shown = pct - (pct % 10);
+                    cm_say(L"Client mod: downloading %d%%", shown);
+                }
+            }
+        }
+        else
+        {
+            if (blen + rd >= CM_JSON_MAX) { cm_fail(L"%s: the answer is too long.", host); status = 0; goto end; }
+            if (blen + rd + 1 > bcap)
+            {
+                while (blen + rd + 1 > bcap) bcap *= 2;
+                char *nb = realloc(body, bcap);
+                if (!nb) { cm_fail(L"Out of memory."); status = 0; goto end; }
+                body = nb;
+            }
+            memcpy(body + blen, chunk, rd);
+            blen += rd;
+        }
+    }
+    if (body) { body[blen] = 0; if (mem) { *mem = body; body = NULL; } }
+
+end:
+    free(chunk);
+    free(body);
+    if (req) cm_wh.CloseHandle_(req);
+    if (con) cm_wh.CloseHandle_(con);
+    if (ses) cm_wh.CloseHandle_(ses);
+    return status;
+}
+
+/* --------------------------------------------------------- the game's files */
+
+typedef struct
+{
+    wchar_t *rel;
+    ULONGLONG size;
+    ULONGLONG ticks;   /* last write, in .NET ticks (the script's digest uses them) */
+    BOOL cas;
+} cm_file;
+
+typedef struct { cm_file *v; size_t n, cap; } cm_files;
+
+static void cm_files_free(cm_files *f)
+{
+    for (size_t i = 0; i < f->n; i++) free(f->v[i].rel);
+    free(f->v);
+    memset(f, 0, sizeof(*f));
+}
+
+/* Every file under root\sub, as a path relative to root. Reparse points are leaves. */
+static BOOL cm_enum(const wchar_t *root, const wchar_t *sub, cm_files *out_list)
+{
+    wchar_t dir[CM_PATH], pat[CM_PATH];
+    cm_path(dir, root, sub);
+    cm_path(pat, dir, L"*");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return cm_fail(L"%s could not be listed (Windows error %lu).", dir, GetLastError());
+    BOOL ok = TRUE;
+    do
+    {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        wchar_t rel[CM_PATH];
+        cm_path(rel, sub, fd.cFileName);
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        {
+            if (!cm_enum(root, rel, out_list)) { ok = FALSE; break; }
+            continue;
+        }
+        if (out_list->n == out_list->cap)
+        {
+            size_t cap = out_list->cap ? out_list->cap * 2 : 2048;
+            cm_file *nv = realloc(out_list->v, cap * sizeof(*nv));
+            if (!nv) { ok = cm_fail(L"Out of memory."); break; }
+            out_list->v = nv;
+            out_list->cap = cap;
+        }
+        cm_file *f = &out_list->v[out_list->n];
+        f->rel = _wcsdup(rel);
+        if (!f->rel) { ok = cm_fail(L"Out of memory."); break; }
+        f->size = ((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        f->ticks = (((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime) +
+                   504911232000000000ULL;
+        size_t ln = wcslen(rel);
+        f->cas = ln > 4 && !_wcsicmp(rel + ln - 4, L".cas");
+        out_list->n++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+static BOOL cm_enum_game(const wchar_t *game_dir, cm_files *out_list)
+{
+    return cm_enum(game_dir, L"Data", out_list) && cm_enum(game_dir, L"Patch", out_list);
+}
+
+static int cm_cmp_lines(const void *a, const void *b)
+{
+    return wcscmp(*(wchar_t *const *)a, *(wchar_t *const *)b);
+}
+
+/* LinkedModData.Digest(): "relative path|size|last-write ticks\n" for each linked
+ * archive (every .cas but the copied ones), sorted ordinally, SHA-256 of the UTF-8 text. */
+static BOOL cm_link_digest(const cm_files *files, const cm_j *copied, char hex[65])
+{
+    wchar_t **lines = calloc(files->n ? files->n : 1, sizeof(*lines));
+    size_t n = 0;
+    BOOL ok = lines != NULL;
+    for (size_t i = 0; ok && i < files->n; i++)
+    {
+        const cm_file *f = &files->v[i];
+        if (!f->cas) continue;
+        BOOL skip = FALSE;
+        if (copied)
+            for (int c = 0; c < copied->c && !skip; c++)
+            {
+                wchar_t w[CM_PATH];
+                if (copied->v[c]->t != CJ_STR) continue;
+                cm_widen(copied->v[c]->s, w, CM_PATH);
+                for (wchar_t *q = w; *q; q++) if (*q == L'/') *q = L'\\';
+                skip = !_wcsicmp(w, f->rel);
+            }
+        if (skip) continue;
+        lines[n] = malloc((wcslen(f->rel) + 64) * sizeof(wchar_t));
+        if (!lines[n]) { ok = FALSE; break; }
+        _snwprintf(lines[n], wcslen(f->rel) + 63, L"%s|%llu|%llu\n", f->rel, f->size, f->ticks);
+        n++;
+    }
+    if (ok)
+    {
+        qsort(lines, n, sizeof(*lines), cm_cmp_lines);
+        cm_sha s;
+        cm_sha_begin(&s);
+        for (size_t i = 0; i < n; i++)
+        {
+            char u[CM_PATH * 3 + 64];
+            int len = WideCharToMultiByte(CP_UTF8, 0, lines[i], -1, u, sizeof(u), NULL, NULL);
+            if (len > 1) cm_sha_add(&s, u, (size_t)len - 1);
+        }
+        ok = cm_sha_end(&s, hex);
+    }
+    for (size_t i = 0; lines && i < n; i++) free(lines[i]);
+    free(lines);
+    return ok || cm_fail(L"The archive digest could not be computed.");
+}
+
+/* ------------------------------------------------------------ file helpers */
+
+static BOOL cm_rmtree(const wchar_t *root_guard, const wchar_t *dir)
+{
+    /* Only ever inside the mod cache, and never through a link: a link, whatever it points at,
+     * is deleted as the file it is. */
+    size_t gl = wcslen(root_guard);
+    if (_wcsnicmp(dir, root_guard, gl) != 0 || dir[gl] != L'\\') return FALSE;
+    wchar_t pat[CM_PATH];
+    cm_path(pat, dir, L"*");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    BOOL ok = TRUE;
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            wchar_t p[CM_PATH];
+            cm_path(p, dir, fd.cFileName);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                ok = cm_rmtree(root_guard, p) && ok;
+            else
+            {
+                /* Only a read-only entry needs its attribute cleared: on a hard link that would change
+                 * the game's own file too. */
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL);
+                if (!DeleteFileW(p)) ok = FALSE;
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return RemoveDirectoryW(dir) && ok;
+}
+
+static void cm_mkdirs(const wchar_t *p) { ensure_dir(p); }
+
+static void cm_mkdirs_for(const wchar_t *file)
+{
+    wchar_t d[CM_PATH];
+    wcsncpy(d, file, CM_PATH - 1);
+    d[CM_PATH - 1] = 0;
+    wchar_t *s = wcsrchr(d, L'\\');
+    if (s) { *s = 0; cm_mkdirs(d); }
+}
+
+static ULONGLONG cm_free_bytes(const wchar_t *dir)
+{
+    ULARGE_INTEGER avail, total, freeb;
+    return GetDiskFreeSpaceExW(dir, &avail, &total, &freeb) ? avail.QuadPart : ~0ULL;
+}
+
+static BOOL cm_write_new(const wchar_t *path, const BYTE *data, size_t len)
+{
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL ok = TRUE;
+    while (ok && len)
+    {
+        DWORD c = len > (1u << 24) ? (1u << 24) : (DWORD)len, wr = 0;
+        ok = WriteFile(h, data, c, &wr, NULL) && wr == c;
+        data += c;
+        len -= c;
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+/* "Data/Win32/x.cas" as the patch spells it -> "Data\Win32\x.cas", or FALSE if it is not a
+ * plain path under Data or Patch. */
+static BOOL cm_patch_path(const char *s, wchar_t *rel)
+{
+    if (!s || strstr(s, "..")) return FALSE;
+    if (strncmp(s, "Data/", 5) && strncmp(s, "Patch/", 6)) return FALSE;
+    size_t n = strlen(s);
+    if (n < 6 || n >= CM_PATH) return FALSE;
+    for (size_t i = 0; i < n; i++)
+    {
+        char c = s[i];
+        if (!(isalnum((unsigned char)c) || c == '_' || c == '.' || c == '/' || c == '-')) return FALSE;
+        rel[i] = c == '/' ? L'\\' : (wchar_t)c;
+    }
+    rel[n] = 0;
+    return TRUE;
+}
+
+/* ---------------------------------------------------------- the profile */
+
+/* The FIFA21.exe copies of build 21.0.4750997.0 that Aurora's auth bridge accepts. They
+ * ship the same game data, so a patch made on one installs on the other. */
+static const char *CM_SAME_BUILD[2] = {
+    "44d0acc62a214c6f4dab2b8a4f4bdd068869c636f15cc262035b4edc862a1494",
+    "05cc56f897201a6ba74d608f971bcf157b1a46c10e9cda335e868c17004fbc71",
+};
+
+typedef struct { wchar_t rel[CM_PATH]; const cm_j *node; BOOL found; } cm_change;
+typedef struct { wchar_t rel[CM_PATH]; const cm_j *node; } cm_added;
+
+/* Test-ModDataFolder. */
+static BOOL cm_moddata_ok(const wchar_t *folder)
+{
+    if (!folder[0] || wcschr(folder, L'"')) return FALSE;
+    BOOL rooted = (folder[1] == L':' && folder[2] == L'\\') || (folder[0] == L'\\' && folder[1] == L'\\');
+    if (!rooted) return FALSE;
+    wchar_t a[CM_PATH], b[CM_PATH];
+    cm_path(a, folder, L"Data\\layout.toc");
+    cm_path(b, folder, L"Patch\\layout.toc");
+    return file_exists(a) && file_exists(b);
+}
+
+/* Test-UltimateTeamModProfile: this revision's ModData for this game, or FALSE. */
+static BOOL cm_profile_ok(const wchar_t *profile, const char *revision, const wchar_t *game_dir,
+                          const char *exe_hex, const char *cards_hex, wchar_t *moddata)
+{
+    wchar_t marker[CM_PATH];
+    cm_path(marker, profile, L"compiled-profile.json");
+    char *text = read_all_utf8(marker, NULL);
+    if (!text) return FALSE;
+    cm_j *m = cj_parse(text);
+    free(text);
+    if (!m) return FALSE;
+    BOOL ok = FALSE;
+    const char *dir = cj_str(m, "gameDirectory");
+    wchar_t wdir[CM_PATH];
+    if (dir) cm_widen(dir, wdir, CM_PATH);
+    if (cj_num(m, "schema", 0) == 1 && cj_str(m, "revision") && !strcmp(cj_str(m, "revision"), revision) &&
+        dir && !_wcsicmp(wdir, game_dir) &&
+        cj_str(m, "gameExecutableSha256") && !strcmp(cj_str(m, "gameExecutableSha256"), exe_hex) &&
+        cj_str(m, "cardsLibrarySha256") && !strcmp(cj_str(m, "cardsLibrarySha256"), cards_hex) &&
+        cj_str(m, "modDataRelativePath") && !strcmp(cj_str(m, "modDataRelativePath"), "compiler/ModData") &&
+        cj_num(m, "verifiedLanguages", 0) == 21)
+    {
+        wchar_t md[CM_PATH];
+        cm_path(md, profile, L"compiler\\ModData");
+        ok = cm_moddata_ok(md);
+        if (ok && cj_num(m, "linkedArchives", 0) > 0)
+        {
+            /* The archives it links to must be the ones it was built from: size and time. */
+            cm_files files;
+            memset(&files, 0, sizeof(files));
+            char hex[65];
+            ok = cm_enum_game(game_dir, &files) && cm_link_digest(&files, cj_get(m, "copiedArchives"), hex) &&
+                 cj_str(m, "linkedArchiveDigest") && !strcmp(cj_str(m, "linkedArchiveDigest"), hex);
+            cm_files_free(&files);
+        }
+        if (ok) wcscpy(moddata, md);
+    }
+    cj_free(m);
+    return ok;
+}
+
+/* Hard link, else symbolic link, for one of the game's archives. The first hard-link failure
+ * moves every later archive on to symbolic links. Never a copy, as in the script: that is
+ * about 40 GB, longer than the launcher's readySeconds, and a build killed by the timeout is
+ * removed and started again on the next Play. */
+static BOOL cm_link_archive(const wchar_t *target, const wchar_t *source, BOOL *hard,
+                            unsigned *linked, unsigned *symbolic)
+{
+    if (*hard)
+    {
+        if (CreateHardLinkW(target, source, NULL)) { (*linked)++; return TRUE; }
+        cm_note(L"Hard link failed (Windows error %lu).", GetLastError());
+        *hard = FALSE;
+        cm_say(L"Client mod: archive hard-linking failed; linking the remaining archives symbolically.");
+    }
+    if (CreateSymbolicLinkW(target, source, 0)) { (*linked)++; (*symbolic)++; return TRUE; }
+    return cm_fail(L"Windows would not link FIFA 21's game files for the client mod (Windows error %lu). "
+                   L"Aurora links them instead of copying about 40 GB, so the client mod was not installed.",
+                   GetLastError());
+}
+
+static BOOL cm_apply_edits(HANDLE h, const BYTE *e, size_t elen, ULONGLONG original_size, const wchar_t *rel)
+{
+    size_t at = 0;
+    while (at < elen)
+    {
+        if (at + 12 > elen) return cm_fail(L"Invalid edit in the patch for %s.", rel);
+        ULONGLONG off = (ULONGLONG)cm_u32(e + at) | ((ULONGLONG)cm_u32(e + at + 4) << 32);
+        unsigned len = cm_u32(e + at + 8);
+        at += 12;
+        if (off + len > original_size || at + len > elen) return cm_fail(L"Invalid edit in the patch for %s.", rel);
+        LARGE_INTEGER li;
+        li.QuadPart = (LONGLONG)off;
+        DWORD wr = 0;
+        if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN) || !WriteFile(h, e + at, len, &wr, NULL) || wr != len)
+            return cm_fail(L"%s could not be written (Windows error %lu).", rel, GetLastError());
+        at += len;
+    }
+    return TRUE;
+}
+
+/* Install-UltimateTeamModPatch. Builds <cache>\<revision>\compiler\ModData from the patch
+ * and the installed game, leaving the game alone; fills moddata. */
+static BOOL cm_install_patch(const wchar_t *game_dir, const wchar_t *cache, const wchar_t *patch_file,
+                             const char *exe_hex, const char *cards_hex, const char *patch_hex,
+                             wchar_t *moddata)
+{
+    cm_zip z;
+    cm_zip_open(&z, patch_file);   /* a failure leaves z.f invalid; cm_err is set */
+    BOOL ok = FALSE;
+    BYTE *pj = NULL;
+    cm_j *patch = NULL;
+    cm_change *changes = NULL;
+    cm_added *adds = NULL;
+    int nchanges = 0, nadds = 0;
+    cm_files files;
+    memset(&files, 0, sizeof(files));
+    HANDLE lock = INVALID_HANDLE_VALUE;
+    wchar_t staging[CM_PATH] = L"", modroot[CM_PATH] = L"", profile[CM_PATH] = L"";
+    wchar_t **copied_rel = NULL;
+    size_t ncopied = 0;
+    ULONGLONG started = GetTickCount64();
+
+    if (z.f == INVALID_HANDLE_VALUE) goto end;
+    pj = cm_zip_read(&z, "patch.json", NULL);
+    if (!pj) goto end;
+    patch = cj_parse((const char *)pj);
+    if (!patch) { cm_fail(L"The client mod patch's patch.json is not valid."); goto end; }
+
+    const cm_j *pfiles = cj_get(patch, "files"), *pnew = cj_get(patch, "newFiles");
+    long long schema = cj_num(patch, "schema", 0);
+    const char *kind = cj_str(patch, "kind"), *revision = cj_str(patch, "revision");
+    if ((schema != 1 && schema != 2) || !kind || strcmp(kind, "aurora21-client-mod-patch") ||
+        !cm_is_hex64(revision) || !pfiles || pfiles->t != CJ_ARR || pfiles->c == 0 ||
+        (schema == 1 && pnew && pnew->t == CJ_ARR && pnew->c > 0))
+    {
+        cm_fail(L"Invalid client mod patch.");
+        goto end;
+    }
+    {
+        const char *pexe = cj_str(patch, "gameExecutableSha256"), *pcards = cj_str(patch, "cardsLibrarySha256");
+        BOOL same = pexe && !strcmp(pexe, exe_hex);
+        if (!same && pexe)
+            same = (!strcmp(exe_hex, CM_SAME_BUILD[0]) || !strcmp(exe_hex, CM_SAME_BUILD[1])) &&
+                   (!strcmp(pexe, CM_SAME_BUILD[0]) || !strcmp(pexe, CM_SAME_BUILD[1]));
+        if (!same) { cm_fail(L"The client mod patch is for another game build: FIFA21.exe differs."); goto end; }
+        if (!pcards || strcmp(pcards, cards_hex))
+        {
+            cm_fail(L"The client mod patch is for another game build: CardsDLL_Win64_retail.dll differs.");
+            goto end;
+        }
+    }
+
+    changes = calloc((size_t)pfiles->c, sizeof(*changes));
+    adds = calloc(pnew && pnew->t == CJ_ARR ? (size_t)pnew->c + 1 : 1, sizeof(*adds));
+    if (!changes || !adds) { cm_fail(L"Out of memory."); goto end; }
+    for (int i = 0; i < pfiles->c; i++)
+    {
+        const cm_j *f = pfiles->v[i];
+        if (!cm_patch_path(cj_str(f, "path"), changes[nchanges].rel))
+        {
+            wchar_t w[160];
+            cm_widen(cj_str(f, "path") ? cj_str(f, "path") : "", w, 160);
+            cm_fail(L"Invalid patch path: %s", w);
+            goto end;
+        }
+        for (int k = 0; k < nchanges; k++)
+            if (!_wcsicmp(changes[k].rel, changes[nchanges].rel)) { cm_fail(L"Invalid client mod patch."); goto end; }
+        changes[nchanges++].node = f;
+    }
+    for (int i = 0; pnew && pnew->t == CJ_ARR && i < pnew->c; i++)
+    {
+        const cm_j *f = pnew->v[i];
+        if (f->t == CJ_NULL) continue;
+        const char *content = cj_str(f, "content");
+        unsigned m, cs, us, lho;
+        if (!cm_patch_path(cj_str(f, "path"), adds[nadds].rel) || !content || !cm_zip_find(&z, content, &m, &cs, &us, &lho))
+        {
+            cm_fail(L"Invalid new file in the patch.");
+            goto end;
+        }
+        for (int k = 0; k < nchanges; k++)
+            if (!_wcsicmp(changes[k].rel, adds[nadds].rel)) { cm_fail(L"Invalid new file in the patch."); goto end; }
+        for (int k = 0; k < nadds; k++)
+            if (!_wcsicmp(adds[k].rel, adds[nadds].rel)) { cm_fail(L"Invalid new file in the patch."); goto end; }
+        wchar_t there[CM_PATH];
+        cm_path(there, game_dir, adds[nadds].rel);
+        if (GetFileAttributesW(there) != INVALID_FILE_ATTRIBUTES)
+        {
+            cm_fail(L"The installed game already has %s, which the client mod patch adds; it is not the game "
+                    L"the patch was made for.", adds[nadds].rel);
+            goto end;
+        }
+        adds[nadds++].node = f;
+    }
+
+    if (!cm_enum_game(game_dir, &files)) goto end;
+    {
+        ULONGLONG need = 256ULL << 20;
+        for (size_t i = 0; i < files.n; i++) if (!files.v[i].cas) need += files.v[i].size;
+        for (int i = 0; i < nadds; i++) need += (ULONGLONG)cj_num(cj_get(adds[i].node, "result"), "size", 0);
+        for (int i = 0; i < nchanges; i++) need += (ULONGLONG)cj_num(cj_get(changes[i].node, "result"), "size", 0);
+        cm_mkdirs(cache);
+        if (cm_free_bytes(cache) < need)
+        {
+            cm_fail(L"There is not enough free disk space for the client mod (about %llu MB needed).", need >> 20);
+            goto end;
+        }
+    }
+
+    {
+        wchar_t name[64];
+        _snwprintf(name, 63, L".building-%08lx%08lx%08lx", (unsigned long)GetCurrentProcessId(),
+                   (unsigned long)(GetTickCount64() & 0xffffffffu), (unsigned long)(GetTickCount64() >> 32) ^ 0x5a5a);
+        name[63] = 0;
+        cm_path(staging, cache, name);
+        if (!CreateDirectoryW(staging, NULL)) { cm_fail(L"%s could not be created (Windows error %lu).", staging, GetLastError()); staging[0] = 0; goto end; }
+        wchar_t lockfile[CM_PATH];
+        cm_path(lockfile, staging, L".lock");
+        /* Held open while this install runs: once it can be opened, the install was killed and the
+         * next Play's cleanup removes the build. */
+        lock = CreateFileW(lockfile, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        wchar_t md[CM_PATH];
+        cm_path(md, staging, L"compiler\\ModData");
+        wcsncpy(modroot, md, CM_PATH - 1);
+        static const wchar_t *top[] = { L"Data", L"Patch", L"Update" };
+        for (int i = 0; i < 3; i++) { wchar_t d[CM_PATH]; cm_path(d, modroot, top[i]); cm_mkdirs(d); }
+    }
+
+    BOOL hard = TRUE;
+    unsigned linked = 0, symbolic = 0, copied = 0, linked_files = 0, rebuilt = 0;
+    BOOL link_misc = TRUE;
+    cm_say(L"Client mod %.8S: preparing the client mod, linked to the installed game data.", revision);
+    {
+        wchar_t t[CM_PATH], s[CM_PATH];
+        cm_path(t, modroot, L"FIFA21.exe");
+        cm_path(s, game_dir, L"FIFA21.exe");
+        if (!CreateHardLinkW(t, s, NULL))
+        {
+            if (!CopyFileW(s, t, TRUE)) { cm_fail(L"FIFA21.exe could not be copied (Windows error %lu).", GetLastError()); goto end; }
+            copied++;
+        }
+    }
+    copied_rel = calloc(files.n ? files.n : 1, sizeof(*copied_rel));
+    if (!copied_rel) { cm_fail(L"Out of memory."); goto end; }
+    for (size_t i = 0; i < files.n; i++)
+    {
+        const cm_file *f = &files.v[i];
+        wchar_t t[CM_PATH], s[CM_PATH];
+        cm_path(t, modroot, f->rel);
+        cm_path(s, game_dir, f->rel);
+        cm_mkdirs_for(t);
+        BOOL is_changed = FALSE;
+        for (int k = 0; k < nchanges; k++)
+            if (!_wcsicmp(changes[k].rel, f->rel)) { changes[k].found = TRUE; is_changed = TRUE; break; }
+        if (is_changed)
+        {
+            /* A rebuilt archive is the profile's own copy: the script's copiedArchives, left out of
+             * the linked-archive digest. */
+            rebuilt++;
+            if (f->cas) copied_rel[ncopied++] = f->rel;
+            continue;
+        }
+        if (f->cas)
+        {
+            if (!cm_link_archive(t, s, &hard, &linked, &symbolic)) goto end;
+        }
+        else
+        {
+            /* Nothing writes to an unchanged toc or sb file either: a hard link saves copying them. */
+            BOOL done = FALSE;
+            if (link_misc)
+            {
+                if (CreateHardLinkW(t, s, NULL)) { linked_files++; done = TRUE; }
+                else link_misc = FALSE;
+            }
+            if (!done)
+            {
+                if (!CopyFileW(s, t, TRUE)) { cm_fail(L"%s could not be copied (Windows error %lu).", s, GetLastError()); goto end; }
+                copied++;
+            }
+        }
+    }
+    if ((int)rebuilt != nchanges)
+    {
+        cm_fail(L"The installed game lacks files the client mod patch changes.");
+        goto end;
+    }
+
+    cm_say(L"Client mod %.8S: rebuilding %d changed files.", revision, nchanges);
+    for (int i = 0; i < nchanges; i++)
+    {
+        const cm_j *f = changes[i].node;
+        const cm_j *orig = cj_get(f, "original"), *res = cj_get(f, "result");
+        wchar_t t[CM_PATH], s[CM_PATH];
+        cm_path(t, modroot, changes[i].rel);
+        cm_path(s, game_dir, changes[i].rel);
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        ULONGLONG have = 0;
+        if (GetFileAttributesExW(s, GetFileExInfoStandard, &fa)) have = ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+        if (have != (ULONGLONG)cj_num(orig, "size", -1))
+        {
+            cm_fail(L"The installed %s is not the file the patch was made from.", changes[i].rel);
+            goto end;
+        }
+        if (!CopyFileW(s, t, TRUE)) { cm_fail(L"%s could not be copied (Windows error %lu).", s, GetLastError()); goto end; }
+        SetFileAttributesW(t, FILE_ATTRIBUTE_NORMAL);
+        HANDLE h = CreateFileW(t, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) { cm_fail(L"%s could not be opened (Windows error %lu).", t, GetLastError()); goto end; }
+        BOOL wrote = TRUE;
+        const char *edits = cj_str(f, "edits"), *tail = cj_str(f, "tail");
+        if (edits)
+        {
+            size_t elen = 0;
+            BYTE *e = cm_zip_read(&z, edits, &elen);
+            wrote = e && cm_apply_edits(h, e, elen, have, changes[i].rel);
+            free(e);
+        }
+        if (wrote && tail)
+        {
+            size_t tlen = 0;
+            BYTE *tb = cm_zip_read(&z, tail, &tlen);
+            LARGE_INTEGER zero;
+            zero.QuadPart = 0;
+            DWORD wr = 0;
+            wrote = tb && SetFilePointerEx(h, zero, NULL, FILE_END) && WriteFile(h, tb, (DWORD)tlen, &wr, NULL) && wr == tlen;
+            if (!wrote && tb) cm_fail(L"%s could not be extended (Windows error %lu).", changes[i].rel, GetLastError());
+            free(tb);
+        }
+        CloseHandle(h);
+        if (!wrote) goto end;
+        char hex[65];
+        WIN32_FILE_ATTRIBUTE_DATA fb;
+        ULONGLONG now = 0;
+        if (GetFileAttributesExW(t, GetFileExInfoStandard, &fb)) now = ((ULONGLONG)fb.nFileSizeHigh << 32) | fb.nFileSizeLow;
+        const char *want = cj_str(res, "sha256");
+        if (now != (ULONGLONG)cj_num(res, "size", -1) || !cm_sha_file(t, hex) || !want || strcmp(hex, want))
+        {
+            cm_fail(L"The rebuilt %s does not match the patch; the installed file differs from the one it was made from.",
+                    changes[i].rel);
+            goto end;
+        }
+    }
+
+    if (nadds) cm_say(L"Client mod %.8S: adding the mod's own %d archives.", revision, nadds);
+    for (int i = 0; i < nadds; i++)
+    {
+        const cm_j *res = cj_get(adds[i].node, "result");
+        wchar_t t[CM_PATH];
+        cm_path(t, modroot, adds[i].rel);
+        cm_mkdirs_for(t);
+        size_t len = 0;
+        BYTE *c = cm_zip_read(&z, cj_str(adds[i].node, "content"), &len);
+        if (!c) goto end;
+        cm_sha s;
+        char hex[65];
+        cm_sha_begin(&s);
+        cm_sha_add(&s, c, len);
+        const char *want = cj_str(res, "sha256");
+        BOOL good = cm_sha_end(&s, hex) && want && !strcmp(hex, want) && (long long)len == cj_num(res, "size", -1);
+        if (!good) { free(c); cm_fail(L"The client mod's new file %s does not match the patch.", adds[i].rel); goto end; }
+        BOOL wrote = cm_write_new(t, c, len);
+        DWORD werr = GetLastError();
+        free(c);
+        if (!wrote) { cm_fail(L"%s could not be written (Windows error %lu).", t, werr); goto end; }
+    }
+
+    {
+        char digest[65] = "", gdir[CM_PATH * 2], rel_json[CM_PATH * 2];
+        BOOL have_digest = FALSE;
+        if (linked > 0)
+        {
+            /* A throwaway "copied" list: the archives this profile copied are not linked to the game. */
+            cm_j *copied_list = calloc(1, sizeof(*copied_list));
+            if (copied_list) copied_list->t = CJ_ARR;
+            for (size_t i = 0; copied_list && i < ncopied; i++)
+            {
+                cm_j *e = calloc(1, sizeof(*e));
+                char u[CM_PATH * 3];
+                WideCharToMultiByte(CP_UTF8, 0, copied_rel[i], -1, u, sizeof(u), NULL, NULL);
+                if (e) { e->t = CJ_STR; e->s = _strdup(u); }
+                if (!e || !cj_push(copied_list, e, NULL)) { cj_free(e); break; }
+            }
+            have_digest = cm_link_digest(&files, copied_list, digest);
+            cj_free(copied_list);
+            if (!have_digest) goto end;
+        }
+        cm_json_str(game_dir, gdir, sizeof(gdir));
+        size_t cap = 4096 + ncopied * (CM_PATH * 2 + 8);
+        char *js = malloc(cap);
+        if (!js) { cm_fail(L"Out of memory."); goto end; }
+        int n = _snprintf(js, cap - 1,
+            "{\n  \"schema\": 1,\n  \"revision\": \"%s\",\n  \"gameDirectory\": \"%s\",\n"
+            "  \"gameExecutableSha256\": \"%s\",\n  \"cardsLibrarySha256\": \"%s\",\n"
+            "  \"modDataRelativePath\": \"compiler/ModData\",\n  \"verifiedLanguages\": %lld,\n"
+            "  \"verifiedArtworkAssets\": %lld,\n  \"verifiedTextures\": %lld,\n"
+            "  \"linkedArchives\": %u,\n  \"symbolicArchives\": %u,\n  \"linkedArchiveDigest\": ",
+            revision, gdir, exe_hex, cards_hex, cj_num(patch, "verifiedLanguages", 0),
+            cj_num(patch, "verifiedArtworkAssets", 0), cj_num(patch, "verifiedTextures", 0), linked, symbolic);
+        if (have_digest) n += _snprintf(js + n, cap - n - 1, "\"%s\"", digest);
+        else n += _snprintf(js + n, cap - n - 1, "null");
+        n += _snprintf(js + n, cap - n - 1, ",\n  \"copiedArchives\": [");
+        for (size_t i = 0; i < ncopied; i++)
+        {
+            cm_json_str(copied_rel[i], rel_json, sizeof(rel_json));
+            n += _snprintf(js + n, cap - n - 1, "%s\"%s\"", i ? ", " : "", rel_json);
+        }
+        n += _snprintf(js + n, cap - n - 1, "],\n  \"source\": \"patch\",\n  \"patchSha256\": \"%s\"\n}\n", patch_hex);
+        wchar_t mk[CM_PATH];
+        cm_path(mk, staging, L"compiled-profile.json");
+        BOOL wrote = write_all_utf8(mk, js);
+        free(js);
+        if (!wrote) { cm_fail(L"The client mod's profile marker could not be written (Windows error %lu).", GetLastError()); goto end; }
+    }
+    cm_say(L"Client mod %.8S: linked %u archives (%u symbolically) and %u other files, copied %u files, "
+           L"rebuilt %d and added %d from the prebuilt patch.",
+           revision, linked, symbolic, linked_files, copied, nchanges, nadds);
+
+    /* Done: the build becomes the profile. */
+    if (lock != INVALID_HANDLE_VALUE) { CloseHandle(lock); lock = INVALID_HANDLE_VALUE; }
+    {
+        wchar_t lockfile[CM_PATH], rev[80];
+        cm_path(lockfile, staging, L".lock");
+        DeleteFileW(lockfile);
+        cm_widen(revision, rev, 80);
+        cm_path(profile, cache, rev);
+        if (dir_exists(profile)) cm_rmtree(cache, profile);
+        if (!MoveFileExW(staging, profile, 0))
+        {
+            cm_fail(L"The client mod profile could not be put in place (Windows error %lu).", GetLastError());
+            goto end;
+        }
+        staging[0] = 0;
+        cm_path(moddata, profile, L"compiler\\ModData");
+    }
+    cm_say(L"Client mod %.8S: installed in %.1f s.", revision, (double)(GetTickCount64() - started) / 1000.0);
+    ok = TRUE;
+
+end:
+    if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+    if (staging[0]) cm_rmtree(cache, staging);
+    free(copied_rel);
+    cm_files_free(&files);
+    free(changes);
+    free(adds);
+    cj_free(patch);
+    free(pj);
+    cm_zip_close(&z);
+    return ok;
+}
+
+/* ------------------------------------------------- cache and the server */
+
+static void cm_cache_root(wchar_t *dst)
+{
+    wchar_t base[CM_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, CM_PATH);
+    if (!n || n >= CM_PATH)
+    {
+        if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) wcscpy(base, L"C:\\users\\crossover\\AppData\\Local");
+    }
+    _snwprintf(dst, CM_PATH - 1, L"%s\\Aurora21\\UltimateTeam\\client-mods\\leaderboards", base);
+    dst[CM_PATH - 1] = 0;
+}
+
+/* Remove-UltimateTeamStaleModProfiles: earlier revisions, builds a closed window abandoned,
+ * and profiles of a game that is gone. Never while FIFA runs (the caller checks). */
+static void cm_clean_cache(const wchar_t *cache, const char *keep, const wchar_t *game_dir)
+{
+    wchar_t pat[CM_PATH];
+    cm_path(pat, cache, L"*");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        char name[CM_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof(name), NULL, NULL);
+        if (!strcmp(name, keep)) continue;
+        wchar_t dir[CM_PATH];
+        cm_path(dir, cache, fd.cFileName);
+        if (cm_is_hex64(name))
+        {
+            wchar_t marker[CM_PATH];
+            cm_path(marker, dir, L"compiled-profile.json");
+            char *text = read_all_utf8(marker, NULL);
+            cm_j *m = text ? cj_parse(text) : NULL;
+            free(text);
+            const char *other = m ? cj_str(m, "gameDirectory") : NULL;
+            BOOL foreign = FALSE;
+            if (other)
+            {
+                wchar_t wother[CM_PATH];
+                cm_widen(other, wother, CM_PATH);
+                if (_wcsicmp(wother, game_dir) != 0)
+                {
+                    /* Another installation's profile is not this build's to remove, unless that game is
+                     * gone from a drive that is still there. */
+                    wchar_t root[4] = { wother[0], L':', L'\\', 0 }, exe[CM_PATH];
+                    cm_path(exe, wother, L"FIFA21.exe");
+                    foreign = !(wother[1] == L':' && dir_exists(root) && !file_exists(exe));
+                }
+            }
+            cj_free(m);
+            if (foreign) continue;
+        }
+        else if (!wcsncmp(fd.cFileName, L".building-", 10))
+        {
+            wchar_t lockfile[CM_PATH];
+            cm_path(lockfile, dir, L".lock");
+            BOOL abandoned = FALSE;
+            if (file_exists(lockfile))
+            {
+                HANDLE l = CreateFileW(lockfile, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+                if (l != INVALID_HANDLE_VALUE) { CloseHandle(l); abandoned = TRUE; }
+            }
+            FILETIME now;
+            GetSystemTimeAsFileTime(&now);
+            ULONGLONG n = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+            ULONGLONG w = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+            if (!abandoned && !(n > w && n - w > 864000000000ULL)) continue;
+        }
+        else continue;
+        if (cm_rmtree(cache, dir)) cm_say(L"Removed an earlier client mod profile: %s", fd.cFileName);
+        else cm_note(L"Could not remove an earlier client mod profile: %s", fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* Downloads of other revisions, complete or partial. */
+static void cm_clean_downloads(const wchar_t *dir, const char *keep)
+{
+    wchar_t pat[CM_PATH];
+    cm_path(pat, dir, L"aurora21-mod-*");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        char name[CM_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof(name), NULL, NULL);
+        size_t kl = strlen(keep);
+        if (!strncmp(name, keep, kl) && (!name[kl] || !strcmp(name + kl, ".partial"))) continue;
+        wchar_t p[CM_PATH];
+        cm_path(p, dir, fd.cFileName);
+        if (DeleteFileW(p)) cm_say(L"Removed an earlier client mod download: %s", fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static ULONGLONG cm_file_size(const wchar_t *p)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(p, GetFileExInfoStandard, &fa)) return 0;
+    return ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+}
+
+/* Get-UltimateTeamClientModFromServer for one front. 1 = moddata filled, 0 = the server publishes
+ * no mod, -1 = it does and this PC could not install it (cm_err says why). */
+static int cm_from_server(const wchar_t *host, const wchar_t *game_dir, wchar_t *moddata)
+{
+    char *body = NULL;
+    int st = cm_http(L"GET", host, L"/client/mods/manifest.json", NULL, 0, INVALID_HANDLE_VALUE, &body, 0);
+    if (st != 200)
+    {
+        if (st) cm_say(L"Client mod: the server publishes no prebuilt mod (HTTP %d).", st);
+        else cm_say(L"Client mod: the server publishes no prebuilt mod (%s)", cm_err);
+        free(body);
+        return 0;
+    }
+    cm_j *man = cj_parse(body);
+    free(body);
+    const cm_j *entry = NULL;
+    const char *suffix = ".v2.patch";
+    const cm_j *list = cj_get(man, "files");
+    for (int pass = 0; pass < 2 && !entry; pass++)
+    {
+        const char *want = pass ? "aurora21-client-mod-patch" : "aurora21-client-mod-patch-v2";
+        suffix = pass ? ".patch" : ".v2.patch";
+        for (int i = 0; list && list->t == CJ_ARR && i < list->c; i++)
+            if (cj_str(list->v[i], "kind") && !strcmp(cj_str(list->v[i], "kind"), want)) { entry = list->v[i]; break; }
+    }
+    const char *version = cj_str(man, "version"), *ename = entry ? cj_str(entry, "name") : NULL;
+    const char *esha = entry ? cj_str(entry, "sha256") : NULL;
+    long long esize = entry ? cj_num(entry, "size", 0) : 0;
+    char want_name[160];
+    if (version && strlen(version) == 64) _snprintf(want_name, sizeof(want_name) - 1, "aurora21-mod-%s%s", version, suffix);
+    else want_name[0] = 0;
+    want_name[sizeof(want_name) - 1] = 0;
+    if (!man || cj_num(man, "schema", 0) != 1 || !cm_is_hex64(version) || !entry || !ename || strcmp(ename, want_name) ||
+        !cm_is_hex64(esha) || esize <= 0)
+    {
+        cj_free(man);
+        cm_fail(L"The server published an invalid client mod manifest.");
+        return -1;
+    }
+    char revision[65], name[160], sha[65];
+    strcpy(revision, version);
+    strcpy(name, ename);
+    strcpy(sha, esha);
+    cj_free(man);
+    ULONGLONG size = (ULONGLONG)esize;
+
+    wchar_t exe[CM_PATH], cards[CM_PATH];
+    char exe_hex[65], cards_hex[65];
+    cm_path(exe, game_dir, L"FIFA21.exe");
+    cm_path(cards, game_dir, L"CardsDLL_Win64_retail.dll");
+    if (!_wcsicmp(exe, cm_exe_digest_path) && cm_exe_digest_hex[0]) strcpy(exe_hex, cm_exe_digest_hex);
+    else if (!cm_sha_file(exe, exe_hex)) return -1;
+    if (!cm_sha_file(cards, cards_hex)) return -1;
+
+    wchar_t cache[CM_PATH], downloads[CM_PATH], wrev[80], profile[CM_PATH];
+    cm_cache_root(cache);
+    cm_mkdirs(cache);
+    cm_say(L"Client mod: profile cache %s", cache);
+    cm_widen(revision, wrev, 80);
+    cm_clean_cache(cache, revision, game_dir);
+    cm_path(downloads, cache, L"downloads");
+    cm_mkdirs(downloads);
+    cm_clean_downloads(downloads, name);
+    cm_path(profile, cache, wrev);
+    if (cm_profile_ok(profile, revision, game_dir, exe_hex, cards_hex, moddata))
+    {
+        cm_say(L"Client mod %.8S: reusing the installed profile.", revision);
+        strcpy(cm_revision, revision);
+        return 1;
+    }
+
+    wchar_t wname[160], file[CM_PATH], partial[CM_PATH], url[256];
+    cm_widen(name, wname, 160);
+    cm_path(file, downloads, wname);
+    _snwprintf(partial, CM_PATH - 1, L"%s.partial", file);
+    partial[CM_PATH - 1] = 0;
+    _snwprintf(url, 255, L"/client/mods/%s", wname);
+    url[255] = 0;
+    if (cm_file_size(file) != size)
+    {
+        ULONGLONG have = cm_file_size(partial);
+        if (have >= size) { DeleteFileW(partial); have = 0; }
+        if (cm_free_bytes(downloads) < (size - have) + (1536ULL << 20))
+        {
+            cm_fail(L"There is not enough free disk space for the client mod (about %llu MB needed).",
+                    ((size - have) + (1536ULL << 20)) >> 20);
+            return -1;
+        }
+        HANDLE f = CreateFileW(partial, GENERIC_WRITE, 0, NULL, have ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f == INVALID_HANDLE_VALUE)
+        {
+            cm_fail(L"%s could not be opened (Windows error %lu).", partial, GetLastError());
+            return -1;
+        }
+        if (have)
+        {
+            LARGE_INTEGER end;
+            end.QuadPart = (LONGLONG)have;
+            SetFilePointerEx(f, end, NULL, FILE_BEGIN);
+        }
+        cm_say(L"Client mod %.8S: downloading %llu MB%s.", revision, size >> 20, have ? L" (resuming)" : L"");
+        st = cm_http(L"GET", host, url, NULL, have, f, NULL, size);
+        CloseHandle(f);
+        if (st != 200 && st != 206)
+        {
+            if (st == 416) DeleteFileW(partial);
+            if (st) cm_fail(L"The server answered the client mod download with HTTP %d.", st);
+            return -1;
+        }
+        if (cm_file_size(partial) != size)
+        {
+            cm_fail(L"The client mod download is incomplete; it resumes on the next attempt.");
+            return -1;
+        }
+        if (!MoveFileExW(partial, file, MOVEFILE_REPLACE_EXISTING))
+        {
+            cm_fail(L"The client mod download could not be kept (Windows error %lu).", GetLastError());
+            return -1;
+        }
+    }
+    char got[65];
+    if (!cm_sha_file(file, got)) return -1;
+    if (strcmp(got, sha))
+    {
+        DeleteFileW(file);
+        cm_fail(L"The downloaded client mod does not match the server's hash; it was removed.");
+        return -1;
+    }
+    if (!cm_install_patch(game_dir, cache, file, exe_hex, cards_hex, got, moddata)) return -1;
+    DeleteFileW(file);
+    cm_clean_cache(cache, revision, game_dir);
+    strcpy(cm_revision, revision);
+    return 1;
+}
+
+/* Install-ClientMod. Fills moddata with the folder FIFA takes as -dataPath, or leaves it empty
+ * (FIFA then starts without the mod, as the script does). */
+static void a21_client_mod(const wchar_t *game_path, const wchar_t *logs, wchar_t *moddata, size_t cap)
+{
+    moddata[0] = 0;
+    cm_revision[0] = 0;
+    cm_install_state = "unavailable";
+    if (cm_logh == INVALID_HANDLE_VALUE)
+    {
+        wchar_t lp[CM_PATH];
+        cm_path(lp, logs, L"client-mod.log");
+        cm_logh = CreateFileW(lp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    wchar_t game_dir[CM_PATH];
+    wcsncpy(game_dir, game_path, CM_PATH - 1);
+    game_dir[CM_PATH - 1] = 0;
+    wchar_t *slash = wcsrchr(game_dir, L'\\');
+    if (slash) *slash = 0;
+
+    wchar_t found[CM_PATH];
+    found[0] = 0;
+    for (size_t i = 0; i < sizeof(A21_MATH_REPORT_HOSTS) / sizeof(A21_MATH_REPORT_HOSTS[0]); i++)
+    {
+        int r = cm_from_server(A21_MATH_REPORT_HOSTS[i], game_dir, found);
+        if (r == 1) break;
+        if (r < 0)
+        {
+            cm_install_state = "failed";
+            cm_say(L"Client mod from %s: %s", A21_MATH_REPORT_HOSTS[i], cm_err);
+        }
+        found[0] = 0;
+    }
+    if (!found[0]) return;
+    /* -dataPath "<folder>" must not end in a backslash: it would escape the closing quote. */
+    size_t n = wcslen(found);
+    while (n > 3 && found[n - 1] == L'\\') found[--n] = 0;
+    if (n >= cap || !cm_moddata_ok(found))
+    {
+        cm_say(L"Client mod: the installed folder is not a complete ModData folder.");
+        cm_install_state = "failed";
+        cm_revision[0] = 0;
+        return;
+    }
+    cm_install_state = "prepared";
+    wcsncpy(moddata, found, cap - 1);
+    moddata[cap - 1] = 0;
+}
+
+/* Test-ClientModRequired: whether the server needs its current client mod to let FIFA into
+ * Ultimate Team (GET /client/mods/policy). The first front that answers decides; none
+ * answering counts as not required, as the script has it. */
+static BOOL a21_client_mod_required(void)
+{
+    for (size_t i = 0; i < sizeof(A21_MATH_REPORT_HOSTS) / sizeof(A21_MATH_REPORT_HOSTS[0]); i++)
+    {
+        char *body = NULL;
+        int st = cm_http(L"GET", A21_MATH_REPORT_HOSTS[i], L"/client/mods/policy", NULL, 0, INVALID_HANDLE_VALUE, &body, 0);
+        if (st == 200 && body)
+        {
+            cm_j *j = cj_parse(body);
+            const cm_j *r = cj_get(j, "required");
+            BOOL required = r && r->t == CJ_BOOL && r->n;
+            cj_free(j);
+            free(body);
+            cm_note(L"Policy from %s: required=%d", A21_MATH_REPORT_HOSTS[i], (int)required);
+            return required;
+        }
+        free(body);
+        if (st) cm_say(L"Client mod policy from %s: HTTP %d", A21_MATH_REPORT_HOSTS[i], st);
+        else cm_say(L"Client mod policy from %s: %s", A21_MATH_REPORT_HOSTS[i], cm_err);
+    }
+    return FALSE;
+}
+
+/* Send-ClientModReport: tells the server which client mod this FIFA started with (POST
+ * /client/launch/mods), so matchmaking pairs it only with players on the same mod. "" is no
+ * mod. Best-effort: a failed report leaves the server's answer at no mod, never the launch. */
+static void a21_client_mod_report(const char *code, BOOL have_mod)
+{
+    char body[512];
+    _snprintf(body, sizeof(body) - 1,
+              "{\"code\":\"%s\",\"mod\":\"%s\",\"launch\":\"direct\",\"install\":\"%s\",\"argument\":\"%s\"}",
+              code, have_mod ? cm_revision : "", cm_install_state, have_mod ? "received" : "not-requested");
+    body[sizeof(body) - 1] = 0;
+    for (size_t i = 0; i < sizeof(A21_MATH_REPORT_HOSTS) / sizeof(A21_MATH_REPORT_HOSTS[0]); i++)
+    {
+        char *reply = NULL;
+        int st = cm_http(L"POST", A21_MATH_REPORT_HOSTS[i], L"/client/launch/mods", body, 0, INVALID_HANDLE_VALUE, &reply, 0);
+        if (st >= 200 && st < 300)
+        {
+            cm_j *j = reply ? cj_parse(reply) : NULL;
+            const cm_j *cur = cj_get(j, "current");
+            cm_say(L"Client mod reported (%.8S, current: %s)", have_mod ? cm_revision : "none",
+                   cur && cur->t == CJ_BOOL ? (cur->n ? L"True" : L"False") : L"unknown");
+            cj_free(j);
+            free(reply);
+            return;
+        }
+        free(reply);
+        if (st) cm_say(L"Client mod report to %s: HTTP %d", A21_MATH_REPORT_HOSTS[i], st);
+        else cm_say(L"Client mod report to %s: %s", A21_MATH_REPORT_HOSTS[i], cm_err);
+    }
+}
+
 /* Invoke-TrustPatchUntilReady for the game this program started. */
 static char *a21_trust_patch(const wchar_t *pack, const wchar_t *anchors, DWORD game_pid,
                              BOOL patch_origin)
@@ -2925,11 +4827,25 @@ static BOOL a21_auth_bridge(const wchar_t *pack, const wchar_t *game_path, DWORD
 
 /* ------------------------------------------------------------------ script */
 
+/* -LogPath, or %TEMP%\aurora21-client as the script has it. */
+static void a21_logs_dir(const wchar_t *log_arg, wchar_t *logs)
+{
+    if (log_arg && *log_arg)
+        wcsncpy(logs, log_arg, MAX_PATH - 1);
+    else
+    {
+        wchar_t tmp[MAX_PATH];
+        GetEnvironmentVariableW(L"TEMP", tmp, MAX_PATH);
+        join(logs, MAX_PATH, tmp, L"aurora21-client");
+    }
+    logs[MAX_PATH - 1] = 0;
+}
+
 static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **argv)
 {
     const wchar_t *game_path = NULL, *server_address = NULL, *trust_anchors = NULL;
     const wchar_t *log_arg = NULL, *launch_arg = L"auto";
-    BOOL no_game_launch = FALSE, detect_only = FALSE, cleanup = FALSE;
+    BOOL no_game_launch = FALSE, detect_only = FALSE, cleanup = FALSE, client_mod_only = FALSE;
     DWORD watch_pid = 0;
     for (int i = 0; i < argc; i++)
     {
@@ -2944,6 +4860,7 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
         else if (!_wcsicmp(a, L"-NoGameLaunch")) no_game_launch = TRUE;
         else if (!_wcsicmp(a, L"-DetectOnly")) detect_only = TRUE;
         else if (!_wcsicmp(a, L"-Cleanup")) cleanup = TRUE;
+        else if (!_wcsicmp(a, L"-ClientModOnly")) client_mod_only = TRUE;   /* ours: install the mod, start nothing */
         else if (!_wcsicmp(a, L"-WatchFriendlies") && more) watch_pid = wcstoul(argv[++i], NULL, 10);
     }
     /* Ours, not the script's: see the friendlies parser above. */
@@ -2953,7 +4870,7 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
     a21_game game = {0};
     PROCESS_INFORMATION started;
     ZeroMemory(&started, sizeof(started));
-    BOOL held = FALSE;
+    BOOL held = FALSE, mod_checked = FALSE, have_mod = FALSE;
     a21_math math;
     ZeroMemory(&math, sizeof(math));
     char code[128] = {0};
@@ -2990,6 +4907,24 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
         wchar_t error[1024];
         if (!a21_remove_hosts_entry(error, 1024)) return a21_fail(6, L"%s", error);
         out(L"[READY] hosts entry removed\n");
+        return 0;
+    }
+
+    if (client_mod_only)
+    {
+        if (!game_named || !file_exists(game_path))
+            return a21_fail(2, L"GamePath must be the FIFA21.exe of the installed game.");
+        wchar_t lg[MAX_PATH], md[MAX_PATH];
+        a21_logs_dir(log_arg, lg);
+        ensure_dir(lg);
+        int pre = a21_binary_preflight(game_path);
+        if (pre != 0) return pre;
+        /* The install removes earlier profiles, which a running FIFA may be using. */
+        if (a21_newest_game(&game)) return a21_fail(3, L"FIFA 21 is already running: close it first.");
+        out(L"[INFO] Checking the client mod...\n");
+        a21_client_mod(game_path, lg, md, MAX_PATH);
+        if (!md[0]) return a21_fail(3, L"The client mod was not installed; see %s\\client-mod.log", lg);
+        out(L"[READY] client mod %s\n", md);
         return 0;
     }
 
@@ -3043,15 +4978,7 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
         }
     }
     wchar_t logs[MAX_PATH];
-    if (log_arg && *log_arg)
-        wcsncpy(logs, log_arg, MAX_PATH - 1);
-    else
-    {
-        wchar_t tmp[MAX_PATH];
-        GetEnvironmentVariableW(L"TEMP", tmp, MAX_PATH);
-        join(logs, MAX_PATH, tmp, L"aurora21-client");
-    }
-    logs[MAX_PATH - 1] = 0;
+    a21_logs_dir(log_arg, logs);
     ensure_dir(logs);
 
     if ((rc = a21_binary_preflight(game_path)) != 0) goto done;
@@ -3106,11 +5033,32 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
                 goto done;
             }
         }
+        /* Install-ClientMod. The server requires its client mod now: a FIFA started without it
+         * is refused at Ultimate Team's login, which the player sees as a connection error. */
+        out(L"[INFO] Checking the client mod...\n");
+        wchar_t moddata[MAX_PATH];
+        a21_client_mod(game_path, logs, moddata, MAX_PATH);
+        mod_checked = TRUE;
+        have_mod = moddata[0] != 0;
+        if (!have_mod)
+        {
+            if (a21_client_mod_required())
+            {
+                rc = a21_fail(3, L"Aurora's client mod could not be installed, and this server needs it to enter "
+                                 L"Ultimate Team. Check that the disk has free space and FIFA 21's files are "
+                                 L"complete, then press Play again. Details: %s\\client-mod.log", logs);
+                goto done;
+            }
+            out(L"[INFO] Starting FIFA 21 without the client mod.\n");
+        }
         out(L"[INFO] Starting FIFA21.exe directly (%s)\n", reason);
-        wchar_t dir[MAX_PATH], cmdline[MAX_PATH + 4];
+        wchar_t dir[MAX_PATH], cmdline[3 * MAX_PATH];
         a21_parent_dir(game_path, dir, MAX_PATH);
-        _snwprintf(cmdline, MAX_PATH + 3, L"\"%s\"", game_path);
-        cmdline[MAX_PATH + 3] = 0;
+        if (have_mod)
+            _snwprintf(cmdline, 3 * MAX_PATH - 1, L"\"%s\" -dataPath \"%s\"", game_path, moddata);
+        else
+            _snwprintf(cmdline, 3 * MAX_PATH - 1, L"\"%s\"", game_path);
+        cmdline[3 * MAX_PATH - 1] = 0;
         STARTUPINFOW si;
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
@@ -3211,6 +5159,8 @@ static int run_start_aurora21(const wchar_t *script_path, int argc, wchar_t **ar
     /* Ready: the maths helper of the patched process gets the code for its
      * report (it sends it once its switch has held). */
     a21_submit_math_code(&math, game.pid, code);
+    /* Complete-ClientModLaunch: which client mod this FIFA started with, for matchmaking. */
+    if (mod_checked) a21_client_mod_report(code, have_mod);
     SecureZeroMemory(code, sizeof(code));
     a21_math_status(&math);
     out(L"[READY] FIFA 21 (PID %lu) is patched and routed to %s\n", game.pid, address);
